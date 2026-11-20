@@ -4,6 +4,7 @@ import { CookieJar, fetchWithCookieJar } from './cookies.js';
 import { environmentApiKey, resolveCredential, type Credential } from './credential.js';
 import { StoreClient, type StoreKeyPrefix } from './store.js';
 import { normalizePutOptions, type PutBatchOptions, type PutLimits } from './limits.js';
+import { normalizeSubscriptionRetry, type SubscriptionRetryConfig } from './subscription.js';
 import { Service as IngestService } from './gen/ts/log/v1/ingest_pb.js';
 import { Service as PruneService } from './gen/ts/store/v1/prune_pb.js';
 import { Service as QueryService } from './gen/ts/store/v1/query_pb.js';
@@ -125,6 +126,9 @@ function waitForPutRetry(delay: number, signal: AbortSignal, deadline: number | 
 function makeRetryInterceptor(config: RetryConfig): Interceptor {
     const maxAttempts = Math.max(config.maxAttempts, 1);
     return (next) => async (req) => {
+        // Subscriptions resume with their own cursor and outage budget.
+        if (req.method === StreamService.method.subscribe) return next(req);
+
         const isPut = req.service.typeName === IngestService.typeName && req.method.name === IngestService.method.put.name;
         const deadline = isPut ? putDeadline(req.header) : undefined;
         if (req.stream && req.method === QueryService.method.reduce) {
@@ -206,6 +210,8 @@ export type ClientOptions = {
     token?: string;
     /** Retry attempt and backoff limits for retryable RPC failures. */
     retry?: RetryConfig;
+    /** How Store subscriptions resume after a disconnect. Unset fields keep their defaults. */
+    subscriptionRetry?: Partial<SubscriptionRetryConfig>;
     /** Defaults to true (binary protobuf). Set false to use Connect JSON for services other than Put. */
     useBinaryFormat?: boolean;
     /** Default limits on Put entry counts, encoded request size, and value size. */
@@ -267,6 +273,7 @@ export class Client {
     public readonly retention: ConnectClient<typeof RetentionService>;
     public readonly stream: ConnectClient<typeof StreamService>;
     public readonly retryConfig: RetryConfig;
+    public readonly subscriptionRetry: Readonly<SubscriptionRetryConfig>;
     public readonly putOptions: Readonly<Required<PutBatchOptions>>;
     /** Whether this client sends a credential, which is what makes a 401 explicable. */
     public readonly credential: Credential;
@@ -275,6 +282,7 @@ export class Client {
         const opts = normalizeClientOptions(tokenOrOptions);
         this.baseUrl = baseUrl.replace(/\/$/, '');
         this.retryConfig = opts.retry ?? DEFAULT_RETRY_CONFIG;
+        this.subscriptionRetry = normalizeSubscriptionRetry(opts.subscriptionRetry);
         this.putOptions = Object.freeze(normalizePutOptions(opts.putLimits));
         const { create, credential } = transportFactory(opts);
         const transport = create(this.baseUrl, opts.useBinaryFormat);

@@ -30,6 +30,13 @@ async fn serve<E: StoreEngine>(engine: Arc<E>) -> std::io::Result<()> {
 
 Call this function from a Tokio runtime. Replace `std::future::pending()` with
 your shutdown future to stop accepting connections and drain active requests.
+Shutdown signals open subscriptions at once, so a client that is reading sees
+a resumable `UNAVAILABLE` error. `serve` returns as soon as every connection
+has closed. Connections still open 30 seconds after shutdown began are closed,
+cutting off any response still in progress, so a client cannot hold the
+process open. To choose a different limit for a deployment, call
+`transport::serve_with_config` with a `ServeConfig` whose `shutdown_timeout`
+you set.
 The [simulator](../examples/simulator/src/server.rs) shows a concrete backend
 and an Axum router with a health endpoint.
 
@@ -41,6 +48,15 @@ during shutdown.
 
 To serve capabilities in separate components, construct the relevant
 `IngestState`, `QueryState`, `PruneState`, `RetentionState`, or `StreamState`.
+
+`with_subscription_lifetime` on `AppState` or `StreamState` bounds how long
+one subscription stays open. Each subscription ends with the same resumable
+`UNAVAILABLE` error as shutdown, at a jittered time no later than the maximum,
+so resuming clients reconnect and a load balancer can place them elsewhere. It
+is off by default, because clients that do not resume would see each close as
+the end of their stream. Backends with their own `log.stream.v1` `Subscribe`
+handler can wrap their response with `bound_subscription` and the request's
+`ShutdownSignal` to get the same behavior.
 
 A query worker must be able to serve batches before announcing them, as required
 by the [stream coordination contract](src/stream.rs). `AppState` shares a local

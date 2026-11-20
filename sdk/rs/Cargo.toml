@@ -33,6 +33,7 @@ reqwest = { workspace = true, features = ["json"] }
 rustls-platform-verifier = { workspace = true }
 commonware-codec = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+sync_wrapper = "1"
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

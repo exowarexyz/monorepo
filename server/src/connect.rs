@@ -4,8 +4,10 @@
 #![allow(refining_impl_trait)]
 
 use crate::{
+    ingest::transport::ShutdownSignal,
     reduce::{decode_group, execute_reduce, RangeError, ReduceExecution, REDUCE_BATCH_ROWS},
     stream::{StreamHub, StreamNotifier},
+    subscription::{bound_subscription, SubscriptionLifetime},
     validate::{self, IngestLimits},
     FilteredBatch, Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan,
     RangeScanResult, Retention, StoreEngine,
@@ -191,6 +193,8 @@ pub struct AppState<E> {
     pub ready: Arc<AtomicBool>,
     /// Shared fan-out hub for `log.stream.v1.Subscribe`.
     pub stream: Arc<StreamHub>,
+    /// Maximum lifetime of each `log.stream.v1.Subscribe` stream.
+    pub subscription_lifetime: SubscriptionLifetime,
 }
 
 impl<E> Clone for AppState<E> {
@@ -201,6 +205,7 @@ impl<E> Clone for AppState<E> {
             put_config: self.put_config.clone(),
             ready: self.ready.clone(),
             stream: self.stream.clone(),
+            subscription_lifetime: self.subscription_lifetime,
         }
     }
 }
@@ -217,6 +222,7 @@ where
             put_config: crate::ingest::service::PutConfig::default(),
             ready: Arc::new(AtomicBool::new(true)),
             stream: Arc::new(StreamHub::new(current_sequence)),
+            subscription_lifetime: SubscriptionLifetime::unbounded(),
         }
     }
 
@@ -226,6 +232,11 @@ where
     }
     pub fn with_put_config(mut self, config: crate::ingest::service::PutConfig) -> Self {
         self.put_config = config;
+        self
+    }
+
+    pub const fn with_subscription_lifetime(mut self, lifetime: SubscriptionLifetime) -> Self {
+        self.subscription_lifetime = lifetime;
         self
     }
 }
@@ -417,6 +428,8 @@ pub struct StreamState<L> {
     pub log: Arc<L>,
     /// In-process notifier used to wake subscribers after new batches commit.
     pub notifier: Arc<dyn StreamNotifier>,
+    /// Maximum lifetime of each subscription.
+    pub subscription_lifetime: SubscriptionLifetime,
 }
 
 impl<L> Clone for StreamState<L> {
@@ -424,6 +437,7 @@ impl<L> Clone for StreamState<L> {
         Self {
             log: self.log.clone(),
             notifier: self.notifier.clone(),
+            subscription_lifetime: self.subscription_lifetime,
         }
     }
 }
@@ -433,7 +447,16 @@ where
     L: Log,
 {
     pub fn new(log: Arc<L>, notifier: Arc<dyn StreamNotifier>) -> Self {
-        Self { log, notifier }
+        Self {
+            log,
+            notifier,
+            subscription_lifetime: SubscriptionLifetime::unbounded(),
+        }
+    }
+
+    pub const fn with_subscription_lifetime(mut self, lifetime: SubscriptionLifetime) -> Self {
+        self.subscription_lifetime = lifetime;
+        self
     }
 }
 
@@ -442,6 +465,7 @@ impl<E> From<AppState<E>> for StreamState<E> {
         Self {
             log: state.engine,
             notifier: state.stream,
+            subscription_lifetime: state.subscription_lifetime,
         }
     }
 }
@@ -958,6 +982,11 @@ where
     ) -> Pin<Box<dyn Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>> {
         Box::pin(stream_util::unfold(self, |mut state| async move {
             loop {
+                // Batches that match nothing produce no frame, so a long run of
+                // ready batches would otherwise never leave this poll. Spending
+                // cooperative budget lets lifetime and shutdown bounds run.
+                tokio::task::consume_budget().await;
+
                 if state.replay.is_some() {
                     match state.next_replay_frame().await {
                         Ok(ReplayProgress::Frame(frame)) => return Some((Ok(frame), state)),
@@ -1066,11 +1095,11 @@ where
 {
     async fn subscribe(
         &self,
-        _ctx: Context,
+        ctx: Context,
         request: ServiceRequest<'_, exoware_proto::log::stream::v1::SubscribeRequest>,
     ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<SubscribeResponse>> {
         let filter = domain_filter_from_subscribe_view(request.view())?;
-        let since = request.since_sequence_number;
+        let since = request.since_sequence_number.filter(|since| *since > 0);
 
         // Snapshot the published frontier to bound replay and subscribe for
         // live wakeups. Bounded lookahead overlaps log reads while retaining
@@ -1086,7 +1115,7 @@ where
         // on the established stream itself so callers reconnect from a safe
         // point instead of silently continuing.
         let replay = match since {
-            Some(s) if s <= replay_bound && s > 0 => {
+            Some(s) if s <= replay_bound => {
                 let first_batch = self
                     .state
                     .log
@@ -1126,9 +1155,31 @@ where
             matchers,
         );
 
-        Ok(connectrpc::Response::stream(
-            SubscriptionState::new(self.state.clone(), replay, live).into_stream(),
-        ))
+        // The opening frame carries no entries and only tells the client where
+        // to resume, at the checkpoint plus one. A cursor keeps its own
+        // position even when it is ahead of this instance, because announcing
+        // the frontier instead would let a reconnecting client skip the
+        // batches between its cursor and that frontier. It precedes the bounds
+        // so that a subscription cut short by shutdown or by its lifetime still
+        // leaves the client a cursor to resume from.
+        let checkpoint = SubscribeResponse {
+            sequence_number: since.map_or(replay_bound, |since| since - 1),
+            ..Default::default()
+        };
+        let batches = SubscriptionState::new(self.state.clone(), replay, live).into_stream();
+
+        // Without the transport's signal, only the lifetime, a failure, or the
+        // client ends the subscription.
+        let close = ctx
+            .extensions()
+            .get::<ShutdownSignal>()
+            .cloned()
+            .unwrap_or_default()
+            .closed();
+        let bounded = bound_subscription(batches, self.state.subscription_lifetime, close);
+        Ok(connectrpc::Response::stream(Box::pin(
+            stream_util::once(async { Ok(checkpoint) }).chain(bounded),
+        )))
     }
 
     async fn get(
@@ -2281,7 +2332,7 @@ mod tests {
             .expect("decode prune request")
     }
 
-    async fn subscribe_stream<B>(
+    async fn subscribe_stream_with_checkpoint<B>(
         connect: &StreamConnect<B>,
         since_sequence_number: Option<u64>,
     ) -> Result<
@@ -2298,6 +2349,42 @@ mod tests {
         Ok(StreamApi::subscribe(connect, Context::default(), request)
             .await?
             .body)
+    }
+
+    async fn subscribe_stream<B>(
+        connect: &StreamConnect<B>,
+        since_sequence_number: Option<u64>,
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>>,
+        ConnectError,
+    >
+    where
+        B: Log,
+    {
+        let mut stream = subscribe_stream_with_checkpoint(connect, since_sequence_number).await?;
+        let checkpoint = stream
+            .next()
+            .await
+            .expect("opening frame")
+            .expect("opening frame ok");
+        assert!(checkpoint.entries.is_empty());
+        Ok(stream)
+    }
+
+    async fn checkpoint_of<B>(connect: &StreamConnect<B>, since: Option<u64>) -> u64
+    where
+        B: Log,
+    {
+        let mut stream = subscribe_stream_with_checkpoint(connect, since)
+            .await
+            .expect("subscribe");
+        let frame = stream
+            .next()
+            .await
+            .expect("opening frame")
+            .expect("opening frame ok");
+        assert!(frame.entries.is_empty());
+        frame.sequence_number
     }
 
     async fn next_subscribe_frame(
@@ -4331,5 +4418,122 @@ mod tests {
         }
         let expected: Vec<u64> = (1..=(REPLAY_BATCHES * 2)).collect();
         assert_eq!(sequence_numbers, expected);
+    }
+
+    #[tokio::test]
+    async fn opening_checkpoint_names_the_safe_resume_cursor() {
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_current_sequence(5);
+        for seq in 1..=5 {
+            engine.set_batch(seq, Some(vec![matching_kv(b"seed", b"v")]));
+        }
+        let connect = StreamConnect::new(AppState::new(engine));
+
+        assert_eq!(checkpoint_of(&connect, None).await, 5);
+        assert_eq!(checkpoint_of(&connect, Some(0)).await, 5);
+        assert_eq!(checkpoint_of(&connect, Some(1)).await, 0);
+        assert_eq!(checkpoint_of(&connect, Some(3)).await, 2);
+        assert_eq!(checkpoint_of(&connect, Some(6)).await, 5);
+        assert_eq!(checkpoint_of(&connect, Some(15)).await, 14);
+    }
+
+    #[tokio::test]
+    async fn opening_checkpoint_on_an_empty_log_is_zero() {
+        let engine = Arc::new(FakeEngine::default());
+        let state = AppState::new(engine.clone());
+        let connect = StreamConnect::new(state.clone());
+        assert_eq!(checkpoint_of(&connect, None).await, 0);
+
+        let mut stream = subscribe_stream(&connect, None).await.expect("subscribe");
+        engine.publish_live(state.stream.clone(), 1, vec![matching_kv(b"hit", b"v")]);
+        let frame = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("stream should yield")
+            .expect("frame should exist")
+            .expect("frame should be ok");
+        assert_eq!(frame.sequence_number, 1);
+    }
+
+    #[tokio::test]
+    async fn opening_checkpoint_precedes_replay_from_an_earlier_cursor() {
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_current_sequence(3);
+        for seq in 1..=3 {
+            engine.set_batch(seq, Some(vec![matching_kv(b"seed", &[seq as u8])]));
+        }
+        let connect = StreamConnect::new(AppState::new(engine));
+        let mut stream = subscribe_stream_with_checkpoint(&connect, Some(2))
+            .await
+            .expect("subscribe");
+
+        let mut observed = Vec::new();
+        for _ in 0..3 {
+            let frame = stream.next().await.expect("frame").expect("frame ok");
+            observed.push((frame.sequence_number, frame.entries.len()));
+        }
+        assert_eq!(observed, vec![(1, 0), (2, 1), (3, 1)]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn subscription_ends_with_unavailable_at_its_lifetime() {
+        let engine = Arc::new(FakeEngine::default());
+        let state = AppState::new(engine.clone()).with_subscription_lifetime(
+            SubscriptionLifetime::new(Duration::from_secs(10)).with_jitter(0.0),
+        );
+        let connect = StreamConnect::new(state.clone());
+        let mut stream = subscribe_stream(&connect, None).await.expect("subscribe");
+
+        tokio::time::advance(Duration::from_secs(9)).await;
+        engine.publish_live(state.stream.clone(), 1, vec![matching_kv(b"hit", b"v")]);
+        let frame = stream.next().await.expect("frame").expect("frame ok");
+        assert_eq!(frame.sequence_number, 1);
+
+        let started = tokio::time::Instant::now();
+        let error = stream
+            .next()
+            .await
+            .expect("error item")
+            .expect_err("lifetime must end the subscription");
+        assert_eq!(started.elapsed(), Duration::from_secs(1));
+        assert_eq!(error.code, connectrpc::ErrorCode::Unavailable);
+        let decoded = decode_connect_error(&error).expect("decode connect error");
+        assert_eq!(
+            decoded.error_info.expect("error info").reason,
+            crate::REASON_SUBSCRIPTION_EXPIRED,
+        );
+        assert!(stream.next().await.is_none());
+    }
+
+    // A client that is cut off before any batch still needs a cursor, or a
+    // live-only subscriber could only resume by skipping batches.
+    #[tokio::test(start_paused = true)]
+    async fn an_already_expired_subscription_still_opens_with_its_checkpoint() {
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_current_sequence(5);
+        for seq in 1..=5 {
+            engine.set_batch(seq, Some(vec![matching_kv(b"seed", b"v")]));
+        }
+        let state = AppState::new(engine)
+            .with_subscription_lifetime(SubscriptionLifetime::new(Duration::ZERO));
+        let connect = StreamConnect::new(state);
+
+        for (since, checkpoint) in [(None, 5), (Some(0), 5), (Some(2), 1), (Some(8), 7)] {
+            let mut stream = subscribe_stream_with_checkpoint(&connect, since)
+                .await
+                .expect("subscribe");
+            let frame = stream.next().await.expect("frame").expect("checkpoint");
+            assert_eq!(
+                (frame.sequence_number, frame.entries.len()),
+                (checkpoint, 0)
+            );
+
+            let error = stream
+                .next()
+                .await
+                .expect("error item")
+                .expect_err("the lifetime must end the subscription");
+            assert_eq!(error.code, connectrpc::ErrorCode::Unavailable);
+            assert!(stream.next().await.is_none());
+        }
     }
 }

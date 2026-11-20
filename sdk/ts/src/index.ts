@@ -1,4 +1,5 @@
 export { Client, createTransport, type ClientOptions, type RetryConfig } from './client.js';
+export type { SubscriptionRetryConfig } from './subscription.js';
 export { API_KEY_ENV, InvalidApiKeyError, type Credential } from './credential.js';
 export { CookieJar, fetchWithCookieJar } from './cookies.js';
 export {
