@@ -66,7 +66,7 @@ use commonware_storage::{
 };
 use commonware_utils::{bitmap::Readable as _, iter::zip_eq};
 use exoware_sdk::{keys::Key, PrefixedStoreClient, StoreWriteBatch};
-use std::{collections::BTreeSet, sync::Arc};
+use std::{borrow::Borrow, collections::BTreeSet, sync::Arc};
 
 /// An operation range and prefix frontier for authentication against a trusted root.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -186,27 +186,28 @@ where
         });
     }
 
-    // Decode only once the range authenticates, and accept only canonical encodings.
+    // Decode only once the range authenticates, and accept only canonical encodings. Each operation
+    // is decoded when its rows are prepared, so one decoded operation is held at a time.
+    let decode = |(offset, encoded): (usize, &Vec<u8>)| {
+        let location = authenticated.start_location + offset as u64;
+        let operation = Op::decode_cfg(Copying(encoded), operation_cfg).map_err(|error| {
+            QmdbError::CorruptData(format!(
+                "failed to decode authenticated operation at {location}: {error}"
+            ))
+        })?;
+        if operation.encode().as_ref() != encoded {
+            return Err(QmdbError::CorruptData(format!(
+                "authenticated operation at {location} is not canonically encoded"
+            )));
+        }
+        Ok(operation)
+    };
     let operations = authenticated
         .encoded_operations
         .iter()
         .enumerate()
-        .map(|(offset, encoded)| {
-            let location = authenticated.start_location + offset as u64;
-            let operation = Op::decode_cfg(Copying(encoded), operation_cfg).map_err(|error| {
-                QmdbError::CorruptData(format!(
-                    "failed to decode authenticated operation at {location}: {error}"
-                ))
-            })?;
-            if operation.encode().as_ref() != encoded {
-                return Err(QmdbError::CorruptData(format!(
-                    "authenticated operation at {location} is not canonically encoded"
-                )));
-            }
-            Ok(operation)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    prepare_rows(authenticated, extension, &operations)
+        .map(decode);
+    prepare_rows(authenticated, extension, operations)
 }
 
 /// What an Exoware writer stores for one current QMDB batch. Replaying `operations` onto
@@ -432,7 +433,11 @@ where
     }
 
     // Prepare the range's rows, then add the current-state rows at its final location.
-    let mut prepared = prepare_rows(&authenticated, extension, operations)?;
+    let mut prepared = prepare_rows::<_, _, AnyOperation<F, U>>(
+        &authenticated,
+        extension,
+        operations.iter().map(Ok),
+    )?;
     let latest_location = prepared.latest_location;
     let rows = &mut prepared.rows;
     rows.reserve(2 + publication.chunks.len() + publication.grafted_nodes.len());
@@ -536,11 +541,12 @@ where
 
 /// Prepare the operation, index, Merkle node, and presence rows of a range. `extension` must be
 /// what [`reconstruct_range`] returned for `authenticated`, with its root already authenticated.
-/// `operations` must hold the decoding of each of `authenticated.encoded_operations`, in order.
+/// `operations` must yield the decoding of each of `authenticated.encoded_operations`, in order.
+/// Each operation is dropped before the next is taken.
 fn prepare_rows<F, D, Op>(
     authenticated: &AuthenticatedOperationRange<'_, D, F>,
     extension: MerkleExtension<F, D>,
-    operations: &[Op],
+    operations: impl IntoIterator<Item = Result<impl Borrow<Op>, QmdbError>>,
 ) -> Result<PreparedAuthenticatedRange<D, F>, QmdbError>
 where
     F: Family,
@@ -550,13 +556,15 @@ where
     let start = authenticated.start_location;
     let end = authenticated.end_location;
     let latest_location = end - 1;
-    let mut operation_rows = Vec::with_capacity(operations.len());
+    let mut operation_rows = Vec::with_capacity(authenticated.encoded_operations.len());
     let mut index_rows = Vec::new();
     let mut final_floor = None;
     for (offset, (operation, encoded)) in
         zip_eq(operations, authenticated.encoded_operations).enumerate()
     {
         let location = start + offset as u64;
+        let operation = operation?;
+        let operation = operation.borrow();
         final_floor = operation.inactivity_floor();
         if let Some(floor) = final_floor {
             if !floor.is_valid() || floor > location {
@@ -962,6 +970,89 @@ mod tests {
     fn test_authenticates_before_decoding_and_rejects_noncanonical_encoding() {
         authenticate_before_decode::<mmr::Family>();
         authenticate_before_decode::<mmb::Family>();
+    }
+
+    /// How many decoded [`TrackedCommit`]s are alive, and the most that were alive at once.
+    #[derive(Default)]
+    struct Live {
+        now: AtomicUsize,
+        peak: AtomicUsize,
+    }
+
+    /// A commit that counts itself in a [`Live`] from decode until drop.
+    struct TrackedCommit(Arc<Live>);
+
+    impl TrackedCommit {
+        /// Count a new commit as alive in `live`.
+        fn new(live: &Arc<Live>) -> Self {
+            let now = live.now.fetch_add(1, Ordering::Relaxed) + 1;
+            live.peak.fetch_max(now, Ordering::Relaxed);
+            Self(live.clone())
+        }
+    }
+
+    impl Drop for TrackedCommit {
+        fn drop(&mut self) {
+            self.0.now.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    impl Write for TrackedCommit {
+        fn write(&self, buf: &mut impl BufMut) {
+            0u8.write(buf);
+        }
+    }
+
+    impl FixedSize for TrackedCommit {
+        const SIZE: usize = 1;
+    }
+
+    impl Read for TrackedCommit {
+        type Cfg = Arc<Live>;
+
+        fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+            u8::read_cfg(buf, &())?;
+            Ok(Self::new(cfg))
+        }
+    }
+
+    impl<F: Family> Committable<F> for TrackedCommit {
+        fn inactivity_floor(&self) -> Option<Location<F>> {
+            Some(Location::new(0))
+        }
+
+        fn initial_commit() -> Self {
+            Self::new(&Arc::default())
+        }
+    }
+
+    impl<F: Family> UploadOperation<F> for TrackedCommit {
+        fn indexed_key(&self) -> Option<(&[u8], bool)> {
+            None
+        }
+    }
+
+    /// Preparing a range of family `F` holds one decoded operation at a time, and none outlives the
+    /// call.
+    fn decode_one_operation_at_a_time<F: Family>() {
+        let authenticated = authenticated_range_fixture::<F>(&vec![vec![0]; 4], 0, 0);
+        let live = Arc::new(Live::default());
+        let _ = prepare_authenticated_range::<F, Sha256, TrackedCommit, _>(
+            &authenticated.view(),
+            &authenticated.root,
+            &live,
+            &Sequential,
+        )
+        .expect("canonical commits must prepare");
+        assert_eq!(live.peak.load(Ordering::Relaxed), 1);
+        assert_eq!(live.now.load(Ordering::Relaxed), 0);
+    }
+
+    /// Preparation decodes one operation at a time for MMR and MMB.
+    #[test]
+    fn test_decodes_one_operation_at_a_time() {
+        decode_one_operation_at_a_time::<mmr::Family>();
+        decode_one_operation_at_a_time::<mmb::Family>();
     }
 
     fn reject_invalid_commit_contract<F: Family>() {
