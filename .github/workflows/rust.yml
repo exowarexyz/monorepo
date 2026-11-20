@@ -49,6 +49,35 @@ jobs:
         uses: ./.github/actions/setup
       - name: Run tests
         run: cargo test --verbose
+  indexeddb:
+    name: IndexedDB
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Check disk space and configure swap
+        uses: ./.github/actions/disk
+      - name: Run setup
+        uses: ./.github/actions/setup
+      - name: Install wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Install wasm-bindgen-cli
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.127
+      # The host lint never compiles code that is gated on wasm32.
+      - name: Lint wasm32
+        run: |
+          cargo clippy --target wasm32-unknown-unknown -p exoware-sdk -p exoware-server -p exoware-conformance --lib -- -D warnings
+          cargo clippy --target wasm32-unknown-unknown -p exoware-indexeddb --all-targets -- -D warnings
+      - name: Test in headless Chrome
+        run: CHROMEDRIVER="$CHROMEWEBDRIVER/chromedriver" cargo test --target wasm32-unknown-unknown -p exoware-indexeddb
+        env:
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+          # The runner's default of 20 seconds leaves little room to load a debug build of
+          # the request stack.
+          WASM_BINDGEN_TEST_TIMEOUT: 120
 
   dependencies:
     name: Dependencies

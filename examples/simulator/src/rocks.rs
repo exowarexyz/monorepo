@@ -38,30 +38,27 @@ use exoware_sdk::common::kv::v1::Entry;
 use exoware_sdk::log::stream::v1::GetResponse as StreamGetResponse;
 use exoware_sdk::{
     common::kv::v1::EntryView,
-    keys::Prefix,
     limits::{
         put_encoded_len, PutTooLarge, MAX_PUT_ENTRIES, MAX_REQUEST_MESSAGE_BYTES,
         MAX_RESPONSE_ELEMENT_MEMORY_BYTES, MAX_RESPONSE_MESSAGE_BYTES,
     },
     log::stream::v1::GetResponseView as StreamGetResponseView,
-    prune_policy::{KeysScope, OrderEncoding, PrunePolicyDocument, RetainPolicy},
+    prune_policy::{PrunePolicy, PrunePolicyDocument},
     retention::{validate_retention_policy, RetentionPolicy},
-    selector::compile_payload_regex,
 };
 use exoware_server::{
     ingest::{BudgetConfig, ByteLease, DecodeBuffers, IngestBudget, RequestLease},
-    Ingest, IngestError, Log, LogBatch, Prune, PutError, PutInput, Query, QueryExtra, QueryResult,
-    RangeScan, RangeScanBatch, RangeScanResult, Retention, Sequence, StreamNotifier,
+    Ingest, IngestError, Log, LogBatch, Prune, PruneSelection, PutError, PutInput, Query,
+    QueryExtra, QueryResult, RangeScan, RangeScanBatch, RangeScanResult, Retention, Sequence,
+    StreamNotifier,
 };
 use parking_lot::Mutex;
-use regex::bytes::Regex;
 use rocksdb::{
     BlockBasedOptions, ColumnFamily, ColumnFamilyDescriptor, DBCompactionStyle, DBCompressionType,
     DBIterator, Direction, IngestExternalFileOptions, IteratorMode, Options, Snapshot,
     SstFileWriter, WriteOptions, DB,
 };
 use std::{
-    cmp::Ordering as CmpOrdering,
     collections::BTreeMap,
     num::NonZeroUsize,
     path::{Path, PathBuf},
@@ -275,115 +272,6 @@ impl RangeScan for RocksRangeScanCursor {
             rows,
             extra: QueryExtra::default(),
         })
-    }
-}
-
-struct KeyEntry {
-    key: Bytes,
-    order_value: Vec<u8>,
-}
-
-/// Extracts the per-key ordering value used to decide which matching keys a prune policy retains.
-fn extract_order_value(payload: &[u8], regex: &Regex, scope: &KeysScope) -> Option<Vec<u8>> {
-    let order_by = scope.order_by.as_ref()?;
-    let captures = regex.captures(payload)?;
-    let matched = captures.name(&order_by.capture_group)?;
-    let raw = matched.as_bytes();
-    match order_by.encoding {
-        OrderEncoding::BytesAsc => Some(raw.to_vec()),
-        OrderEncoding::U64Be | OrderEncoding::I64Be => {
-            if raw.len() == 8 {
-                Some(raw.to_vec())
-            } else {
-                None
-            }
-        }
-    }
-}
-
-/// Builds the grouping key that scopes retention independently within a key prune policy.
-fn extract_group_key(payload: &[u8], regex: &Regex, scope: &KeysScope) -> Option<Vec<u8>> {
-    if scope.group_by.capture_groups.is_empty() {
-        return Some(Vec::new());
-    }
-    let captures = regex.captures(payload)?;
-    let mut group_key = Vec::new();
-    for group_name in &scope.group_by.capture_groups {
-        let matched = captures.name(group_name)?;
-        let bytes = matched.as_bytes();
-        group_key.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
-        group_key.extend_from_slice(bytes);
-    }
-    Some(group_key)
-}
-
-/// Compares captured policy order values according to the encoding declared by the key scope.
-fn compare_order_values(a: &[u8], b: &[u8], scope: &KeysScope) -> CmpOrdering {
-    match scope.order_by.as_ref().map(|o| &o.encoding) {
-        Some(OrderEncoding::U64Be) => {
-            let a_val = a.try_into().map(u64::from_be_bytes).unwrap_or(0);
-            let b_val = b.try_into().map(u64::from_be_bytes).unwrap_or(0);
-            a_val.cmp(&b_val)
-        }
-        Some(OrderEncoding::I64Be) => {
-            let a_val = a.try_into().map(i64::from_be_bytes).unwrap_or(0);
-            let b_val = b.try_into().map(i64::from_be_bytes).unwrap_or(0);
-            a_val.cmp(&b_val)
-        }
-        Some(OrderEncoding::BytesAsc) | None => a.cmp(b),
-    }
-}
-
-/// Encodes a retention threshold into the same representation used by captured order values.
-fn threshold_order_value(scope: &KeysScope, threshold: u64) -> Result<[u8; 8], String> {
-    match scope.order_by.as_ref().map(|o| &o.encoding) {
-        Some(OrderEncoding::U64Be) => Ok(threshold.to_be_bytes()),
-        Some(OrderEncoding::I64Be | OrderEncoding::BytesAsc) => Err(
-            "threshold retention requires order_by.encoding = u64_be for key scopes".to_string(),
-        ),
-        None => Err("threshold retention requires order_by for key scopes".to_string()),
-    }
-}
-
-/// Selects the keys to delete from one already-partitioned retention group.
-fn keys_to_delete(
-    mut entries: Vec<KeyEntry>,
-    scope: &KeysScope,
-    retain: &RetainPolicy,
-) -> Result<Vec<Bytes>, String> {
-    entries.sort_by(|a, b| compare_order_values(&a.order_value, &b.order_value, scope));
-
-    match retain {
-        RetainPolicy::KeepLatest { count } => {
-            if entries.len() <= *count {
-                return Ok(Vec::new());
-            }
-            Ok(entries[..entries.len() - count]
-                .iter()
-                .map(|e| e.key.clone())
-                .collect())
-        }
-        RetainPolicy::GreaterThan { threshold } => {
-            let threshold = threshold_order_value(scope, *threshold)?;
-            Ok(entries
-                .iter()
-                .filter(|e| {
-                    compare_order_values(&e.order_value, &threshold, scope) != CmpOrdering::Greater
-                })
-                .map(|e| e.key.clone())
-                .collect())
-        }
-        RetainPolicy::GreaterThanOrEqual { threshold } => {
-            let threshold = threshold_order_value(scope, *threshold)?;
-            Ok(entries
-                .iter()
-                .filter(|e| {
-                    compare_order_values(&e.order_value, &threshold, scope) == CmpOrdering::Less
-                })
-                .map(|e| e.key.clone())
-                .collect())
-        }
-        RetainPolicy::DropAll => Ok(entries.iter().map(|e| e.key.clone()).collect()),
     }
 }
 
@@ -1383,23 +1271,15 @@ impl RocksStore {
     /// (see the [`Retention`] impl).
     fn apply_prune_policies(&self, document: PrunePolicyDocument) -> Result<(), String> {
         for policy in &document.policies {
-            self.apply_key_prune_policy(&policy.scope, &policy.retain)?;
+            self.apply_key_prune_policy(policy)?;
         }
         Ok(())
     }
 
-    /// Scans matching current keys in bounded chunks, groups them, and deletes non-retained rows.
-    fn apply_key_prune_policy(
-        &self,
-        scope: &KeysScope,
-        retain: &RetainPolicy,
-    ) -> Result<(), String> {
-        let prefix =
-            Prefix::new(scope.selector.prefix.clone()).map_err(|e| format!("policy: {e}"))?;
-        let regex = compile_payload_regex(&scope.selector.payload_regex)
-            .map_err(|e| format!("policy: {e}"))?;
-
-        let (start, end) = prefix.bounds();
+    /// Scans the policy's key range in bounded chunks and deletes the keys it does not retain.
+    fn apply_key_prune_policy(&self, policy: &PrunePolicy) -> Result<(), String> {
+        let mut selection = PruneSelection::new(policy)?;
+        let (start, end) = selection.bounds();
         let mut rows = RocksRangeScanState::new(
             OwnedRocksSnapshot::capture(self.db.clone(), &self.frontiers),
             start,
@@ -1407,40 +1287,18 @@ impl RocksStore {
             usize::MAX,
             true,
         );
-        let mut groups: BTreeMap<Vec<u8>, Vec<KeyEntry>> = BTreeMap::new();
 
         loop {
             let batch = rows.next_batch(PRUNE_SCAN_BATCH_SIZE)?;
             if batch.is_empty() {
                 break;
             }
-
             for (key, _value) in batch {
-                let payload = match prefix.strip(&key) {
-                    Ok(payload) => payload,
-                    Err(_) => continue,
-                };
-                if !regex.is_match(&payload) {
-                    continue;
-                }
-
-                let group_key = match extract_group_key(&payload, &regex, scope) {
-                    Some(group_key) => group_key,
-                    None => continue,
-                };
-                let order_value = extract_order_value(&payload, &regex, scope).unwrap_or_default();
-
-                groups
-                    .entry(group_key)
-                    .or_default()
-                    .push(KeyEntry { key, order_value });
+                selection.push(key);
             }
         }
 
-        let mut all_deletes = Vec::new();
-        for (_group_key, entries) in groups {
-            all_deletes.extend(keys_to_delete(entries, scope, retain)?);
-        }
+        let all_deletes = selection.finish()?;
         if all_deletes.is_empty() {
             return Ok(());
         }

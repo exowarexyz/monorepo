@@ -769,10 +769,10 @@ async fn test_prefixed_prune_composes_selector_and_prunes_cleanly() {
     let base = local_store_client().await;
     let client = base.prefixed(StoreKeyPrefix::new(vec![0x05, 0x06]).unwrap());
 
-    // LOGICAL keys carry the logical family prefix 0x07 and the versioned-payload
-    // layout used by prune_contract.rs. These are the LOGICAL keys handed to the
-    // prefixed client; the client prepends the [0x05, 0x06] store prefix itself,
-    // so physical keys become [0x05, 0x06, 0x07, ...].
+    // LOGICAL keys carry the logical family prefix 0x07 and the versioned payload layout
+    // of the conformance prune cases. The test hands these LOGICAL keys to the prefixed
+    // client. The client prepends the [0x05, 0x06] store prefix itself, so physical keys
+    // become [0x05, 0x06, 0x07, ...].
     let logical_key = |name: &[u8], version: u64| -> Key {
         let mut key = Vec::new();
         key.push(0x07);
@@ -800,9 +800,9 @@ async fn test_prefixed_prune_composes_selector_and_prunes_cleanly() {
     }
     batch.commit(&base).await.expect("commit versioned keys");
 
-    // The LOGICAL prune policy's selector.prefix is the logical family [0x07],
-    // NOT the composed bytes. Scope/group_by/order_by/retain mirror
-    // prune_contract.rs's version_policy_with_encoding.
+    // The LOGICAL prune policy's selector.prefix is the logical family [0x07], NOT the
+    // composed bytes. Its scope, grouping, ordering and retention mirror the conformance
+    // suite's version policy.
     let policy = PrunePolicy {
         scope: KeysScope {
             selector: Selector {

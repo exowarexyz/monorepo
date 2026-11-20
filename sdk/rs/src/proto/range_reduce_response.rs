@@ -63,8 +63,9 @@ pub fn to_domain_reduce_response(
 mod tests {
     use super::*;
     use crate::{
+        kv_codec::KvReducedValue,
         query::{self, kv_reduced_value},
-        to_proto_reduce_response, KvReducedValue,
+        to_proto_reduce_response,
     };
 
     #[test]
