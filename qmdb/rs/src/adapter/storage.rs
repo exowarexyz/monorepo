@@ -140,7 +140,7 @@ pub(crate) fn node_source<F: Graftable, const N: usize>(
     // A parent can cover both discarded all-zero chunks and retained chunks with active bits
     // Activity changes before pruning can change its hash
     // Pruning itself preserves the root
-    // Boundary deltas omit discarded chunks, so only wholly retained nodes reuse stored current hashes
+    // Publications omit discarded chunks, so only wholly retained nodes reuse stored current hashes
     if *leftmost >= pruned_chunks {
         return Ok(NodeSource::Grafted(grafted_position));
     }

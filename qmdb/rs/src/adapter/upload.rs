@@ -227,9 +227,9 @@ impl<F: Graftable, D: Digest, U: Update, const N: usize> Publication<F, D, U, N>
 where
     AnyOperation<F, U>: Codec,
 {
-    /// Build `batch`'s publication from the batch and `db`. Call this before applying `batch`,
-    /// because its frontier is readable only until the batch's changes are flushed. The frontier
-    /// reads through `batch`'s unapplied ancestors, so they must still be held.
+    /// Build `batch`'s publication from the batch and `db`. Call this before applying `batch`, so
+    /// a later flush cannot discard frontier nodes it needs. Nodes appended by unapplied
+    /// ancestors come from records `batch` kept when it was merkleized.
     pub fn from_batch<E, C, I, H, S>(
         batch: &MerkleizedBatch<F, D, U, N, S>,
         db: &Db<F, E, C, I, H, U, N, S>,
@@ -444,8 +444,8 @@ where
         ));
     }
 
-    // `grafting::ops_to_grafted_pos` panics for a node below the grafting height and, in an MMR,
-    // for a position that exceeds the node limit once two is added, so both are rejected first.
+    // `grafting::ops_to_grafted_pos` panics for a node below the grafting height, and its position
+    // arithmetic assumes a position within the node limit. A node that breaks either is rejected.
     let grafting_height = grafting::height::<N>();
     for &(ops_position, digest) in &publication.grafted_nodes {
         if ops_position.checked_add(2).is_none() {

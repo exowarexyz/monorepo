@@ -1395,7 +1395,7 @@ async fn test_prepare_publication_rejects_unbound_publications() {
         Err(QmdbError::CorruptData(_))
     ));
 
-    // A decoded grafted node too close to the family's node limit to convert is rejected.
+    // A decoded grafted node less than two positions below the family's node limit is rejected.
     let mut high_graft = publication.clone();
     high_graft.grafted_nodes = vec![(Position::new(*mmr::Family::MAX_NODES - 1), root)];
     let high_graft = common::round_trip_publication(&high_graft, op_cfg::<mmr::Family>());

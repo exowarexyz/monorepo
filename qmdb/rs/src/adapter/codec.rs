@@ -351,12 +351,11 @@ pub(crate) fn encode_chunk_key<F: Family>(chunk_index: u64, watermark: Location<
 
 /// Clear every bitmap bit below `floor` within the chunk at `chunk_index`.
 ///
-/// Bits below the inactivity floor are definitionally 0 at any watermark. The
-/// producer does not republish a chunk every time floor advancement flips one
-/// of its bits, so the stored payload may carry stale 1s. Fold those clears
-/// in deterministically at read time. Mirrors the bit layout used by
-/// `commonware_utils::bitmap::BitMap`: byte offset within the chunk is
-/// `(L / 8) % N`, bit mask is `1 << (L % 8)`.
+/// Bits below the inactivity floor are definitionally 0 at any watermark. Chunk
+/// rows are not authenticated when they are uploaded, so clearing those bits at
+/// read time keeps a stale 1 below the floor out of every proof. Mirrors the bit
+/// layout used by `commonware_utils::bitmap::BitMap`: byte offset within the
+/// chunk is `(L / 8) % N`, bit mask is `1 << (L % 8)`.
 pub(crate) fn clear_below_floor<F: Family, const N: usize>(
     chunk: &mut [u8; N],
     chunk_index: u64,

@@ -67,10 +67,10 @@ authentication, use `new` with a configured transport.
 log membership, so an included update need not still be active.
 
 For queries about active state, `Current*` proofs also authenticate the activity
-bitmap at a batch boundary, the final commit location of an applied batch.
-Current key proofs establish active values, and ordered key proofs can establish
-absence. "Current" refers to that requested boundary, which may be older than
-the latest published boundary.
+bitmap at a batch boundary, a commit whose publication was uploaded. Current key
+proofs establish active values, and ordered key proofs can establish absence.
+"Current" refers to that requested boundary, which may be older than the latest
+published boundary.
 
 For a database with current state, pass its trusted current root. The proof's
 operation-root witness binds the operation log to that root. For an
@@ -217,9 +217,8 @@ let prepared =
 
 #### Updates
 
-Build each batch's publication before applying the batch and while its
-unapplied ancestors are still held. Its frontier is readable only until the
-batch's changes are flushed:
+Build each batch's publication before applying the batch, so a later flush
+cannot discard frontier nodes it needs:
 
 ```rust,ignore
 let batch = batch.merkleize(&db).await?;
