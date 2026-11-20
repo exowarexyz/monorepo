@@ -4,6 +4,8 @@
 //! profiles include both client and in-process server work. Backend counters measure fetched key
 //! and value bytes, while body counters measure encoded Connect traffic without HTTP headers.
 //! SQL RPC cases include protobuf response decoding, but not client-side result materialization.
+//! `EXOWARE_SQL_BENCH_STORE_DELAY_MS` delays each Store read RPC by that many milliseconds
+//! (default 0), so overlapping requests shows up in execution time.
 
 use axum::{
     body::Body,
@@ -17,7 +19,8 @@ use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use datafusion::{
     arrow::datatypes::DataType,
-    physical_plan::{collect, execution_plan::reset_plan_states, ExecutionPlan},
+    physical_plan::{collect, displayable, execution_plan::reset_plan_states, ExecutionPlan},
+    scalar::ScalarValue,
 };
 use exoware_sdk::{transport::set_tcp_nodelay, StoreClient, StoreKeyPrefix};
 use exoware_server::{
@@ -39,6 +42,7 @@ use std::{
         Arc, Mutex,
     },
     task::{Context, Poll},
+    time::Duration,
 };
 use tokio::runtime::Runtime;
 
@@ -90,6 +94,8 @@ struct Traffic {
     response_body_bytes: Arc<AtomicU64>,
     sql_request_body_bytes: Arc<AtomicU64>,
     sql_response_body_bytes: Arc<AtomicU64>,
+    store_delay: Duration,
+    target_partitions: AtomicU64,
 }
 
 impl Traffic {
@@ -113,12 +119,17 @@ impl Traffic {
         ALLOC_BYTES.store(0, Ordering::Relaxed);
     }
     fn profile(&self, name: &str, phase: &str) {
+        // Constructing the JSON report allocates too.
+        let allocation_calls = ALLOC_CALLS.load(Ordering::Relaxed);
+        let allocation_bytes = ALLOC_BYTES.load(Ordering::Relaxed);
         println!(
             "READ_PATH_PROFILE {}",
             serde_json::json!({
                 "case": name, "phase": phase,
-                "allocation_calls": ALLOC_CALLS.load(Ordering::Relaxed),
-                "allocation_bytes": ALLOC_BYTES.load(Ordering::Relaxed),
+                "store_delay_ms": self.store_delay.as_millis(),
+                "target_partitions": self.target_partitions.load(Ordering::Relaxed),
+                "allocation_calls": allocation_calls,
+                "allocation_bytes": allocation_bytes,
                 "get": self.get.load(Ordering::Relaxed),
                 "get_many": self.get_many.load(Ordering::Relaxed),
                 "range": self.range.load(Ordering::Relaxed),
@@ -174,20 +185,18 @@ async fn measure_traffic(
     request: Request,
     next: Next,
 ) -> Response {
-    match request.uri().path().rsplit('/').next() {
-        Some("Get") => {
-            traffic.get.fetch_add(1, Ordering::Relaxed);
+    let read = match request.uri().path().rsplit('/').next() {
+        Some("Get") => Some(&traffic.get),
+        Some("GetMany") => Some(&traffic.get_many),
+        Some("Range") => Some(&traffic.range),
+        Some("Reduce") => Some(&traffic.reduce),
+        _ => None,
+    };
+    if let Some(counter) = read {
+        counter.fetch_add(1, Ordering::Relaxed);
+        if !traffic.store_delay.is_zero() {
+            tokio::time::sleep(traffic.store_delay).await;
         }
-        Some("GetMany") => {
-            traffic.get_many.fetch_add(1, Ordering::Relaxed);
-        }
-        Some("Range") => {
-            traffic.range.fetch_add(1, Ordering::Relaxed);
-        }
-        Some("Reduce") => {
-            traffic.reduce.fetch_add(1, Ordering::Relaxed);
-        }
-        _ => {}
     }
     let (request_bytes, response_bytes) = if sql {
         (
@@ -380,7 +389,16 @@ impl Fixture {
             .enable_all()
             .build()
             .unwrap();
-        let backend = Arc::new(Backend::default());
+        let store_delay = std::env::var("EXOWARE_SQL_BENCH_STORE_DELAY_MS").map_or(0, |ms| {
+            ms.parse().expect("EXOWARE_SQL_BENCH_STORE_DELAY_MS")
+        });
+        let backend = Arc::new(Backend {
+            traffic: Arc::new(Traffic {
+                store_delay: Duration::from_millis(store_delay),
+                ..Traffic::default()
+            }),
+            ..Backend::default()
+        });
         let traffic = backend.traffic.clone();
         let app = Router::new()
             .route_service(
@@ -467,6 +485,10 @@ impl Fixture {
         });
         let sql_server = Arc::new(exoware_sql::SqlServer::new(schema).unwrap());
         let ctx = sql_server.session().clone();
+        traffic.target_partitions.store(
+            ctx.datafusion().copied_config().target_partitions() as u64,
+            Ordering::Relaxed,
+        );
         let app = Router::new()
             .fallback_service(exoware_sql::sql_connect_stack(sql_server))
             .layer(axum::middleware::from_fn_with_state(
@@ -517,6 +539,18 @@ impl Fixture {
         })
     }
 
+    fn first_row(&self, sql: &str) -> Vec<ScalarValue> {
+        let plan = self.plan(sql);
+        let batches = self
+            .runtime
+            .block_on(collect(plan, self.ctx.datafusion().task_ctx()))
+            .unwrap();
+        let batch = &batches[0];
+        (0..batch.num_columns())
+            .map(|column| ScalarValue::try_from_array(batch.column(column), 0).unwrap())
+            .collect()
+    }
+
     fn query_rpc(&self, sql: &str) {
         self.runtime.block_on(async {
             std::hint::black_box(
@@ -563,6 +597,8 @@ fn read_path_perf(c: &mut Criterion) {
         ("aggregate_filtered_index", "SELECT SUM(amount_cents) FILTER (WHERE status = 'open' AND amount_cents >= 59960) FROM covered_orders".to_string(), 1),
         ("aggregate_filtered_index_grouped", "SELECT id, SUM(amount_cents) FILTER (WHERE status = 'open' AND amount_cents >= 59960) FROM covered_orders GROUP BY id".to_string(), 6000),
         ("aggregate_grouped_ranges", "SELECT status, SUM(amount_cents), AVG(amount_cents) FROM orders WHERE id IN (0, 100, 200, 300, 400, 500, 600, 700) GROUP BY status".to_string(), 1),
+        ("aggregate_filtered_jobs", "SELECT COUNT(*), SUM(amount_cents) FILTER (WHERE status = 'open'), SUM(amount_cents) FILTER (WHERE status = 'closed') FROM orders".to_string(), 1),
+        ("aggregate_seeded_jobs", "SELECT status, SUM(CASE WHEN id < 3000 THEN amount_cents END), SUM(CASE WHEN id >= 3000 THEN amount_cents END) FROM orders GROUP BY status".to_string(), 2),
         ("aggregate_sparse", format!("SELECT id, {} FROM orders GROUP BY id", (0..8).map(|i| format!("SUM(amount_cents) FILTER (WHERE amount_cents >= {})", i * 1000)).collect::<Vec<_>>().join(", ")), 6000),
     ];
     // Profiles include client and in-process server allocations on one runtime thread
@@ -575,6 +611,30 @@ fn read_path_perf(c: &mut Criterion) {
         fixture.traffic.reset();
         assert_eq!(fixture.execute(plan.clone()), *expected_rows, "{name}");
         fixture.traffic.profile(name, "execution");
+        if matches!(*name, "aggregate_filtered_jobs" | "aggregate_seeded_jobs") {
+            // Three RPCs could also come from a single job with three ranges.
+            let explain = displayable(plan.as_ref()).indent(false).to_string();
+            let node = explain
+                .lines()
+                .find(|line| line.contains("KvAggregateExec:"))
+                .expect(&explain);
+            let seeded = *name == "aggregate_seeded_jobs";
+            assert_eq!(node.contains("seed_job=none,"), !seeded, "{name}: {node}");
+            assert_eq!(
+                node.matches("{mode=").count(),
+                if seeded { 2 } else { 3 },
+                "{name}: {node}"
+            );
+            assert_eq!(node.matches(", ranges=1,").count(), 3, "{name}: {node}");
+            assert_eq!(fixture.traffic.reduce.load(Ordering::Relaxed), 3, "{name}");
+        }
+        if *name == "aggregate_filtered_jobs" {
+            assert_eq!(
+                fixture.first_row(sql),
+                [6000, 89_970_000, 90_000_000].map(|value| ScalarValue::Int64(Some(value))),
+                "{name}"
+            );
+        }
         c.bench_with_input(
             BenchmarkId::new("exoware_sql_planning", name),
             sql,

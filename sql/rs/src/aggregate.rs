@@ -670,11 +670,20 @@ impl ExecutionPlan for KvAggregateExec {
                 expr_plans: Vec::new(),
             })
             .chain(self.spec.aggregate_jobs.clone());
-        let batches = futures::stream::iter(jobs)
-            .map(move |job| {
-                execute_reduce_job(session.clone(), Arc::new(job), source.clone(), concurrency)
+        // One window over every job's ranges, so a later job's ranges open while an
+        // earlier job is still running. Output keeps job and range order, which keeps
+        // Final's float results deterministic.
+        let ranges = jobs.flat_map(|mut job| {
+            let ranges = std::mem::take(&mut job.job.ranges);
+            let job = Arc::new(job);
+            ranges.into_iter().map(move |range| (job.clone(), range))
+        });
+        let batches = futures::stream::iter(ranges)
+            .map(move |(job, range)| {
+                execute_reduce_range(session.clone(), job, source.clone(), range)
             })
-            .flatten();
+            .buffered(concurrency)
+            .try_flatten();
         Ok(Box::pin(RecordBatchStreamAdapter::new(
             self.schema(),
             batches,
@@ -732,18 +741,6 @@ pub(crate) fn cast_scalar_value(
     value.cast_to(data_type)
 }
 
-fn execute_reduce_job(
-    session: ReadSession,
-    job: Arc<CombinedAggregateJob>,
-    source: Arc<KvAggregateExec>,
-    concurrency: usize,
-) -> impl futures::Stream<Item = DataFusionResult<RecordBatch>> {
-    futures::stream::iter(job.job.ranges.clone())
-        .map(move |range| execute_reduce_range(session.clone(), job.clone(), source.clone(), range))
-        .buffered(concurrency)
-        .try_flatten()
-}
-
 async fn execute_reduce_range(
     session: ReadSession,
     job: Arc<CombinedAggregateJob>,
@@ -758,8 +755,11 @@ async fn execute_reduce_range(
         let response = exoware_sdk::scalar_reduce_response(responses, &job.job.request)
             .await
             .map_err(|error| DataFusionError::External(Box::new(error)))?;
-        let batch = source.decode_reduce_batch(&job, response.view())?;
-        return Ok(futures::stream::once(futures::future::ready(Ok(batch))).boxed());
+        // Keep the wire response compact until the ordered stream reaches this range.
+        return Ok(futures::stream::once(async move {
+            source.decode_reduce_batch(&job, response.view())
+        })
+        .boxed());
     }
     Ok(responses
         .map(move |response| {
@@ -4168,6 +4168,319 @@ mod tests {
         assert_eq!(pool.reserved(), 0);
         let requests = transport.requests.lock().unwrap();
         assert_eq!(requests.len(), 4, "the fifth range must not open");
+    }
+
+    type ReduceBodySender =
+        futures::channel::mpsc::UnboundedSender<Result<Bytes, std::convert::Infallible>>;
+    type ReduceBodyReceiver =
+        futures::channel::mpsc::UnboundedReceiver<Result<Bytes, std::convert::Infallible>>;
+
+    /// Answers the Nth Reduce request with the Nth queued body, so a test controls
+    /// each response by issue order.
+    #[derive(Clone, Default)]
+    struct IssueOrderReduceTransport {
+        bodies: Arc<Mutex<std::collections::VecDeque<ReduceBodyReceiver>>>,
+        requests: Arc<Mutex<Vec<exoware_sdk::query::ReduceRequest>>>,
+    }
+
+    impl IssueOrderReduceTransport {
+        fn queue(&self, count: usize) -> Vec<ReduceBodySender> {
+            (0..count)
+                .map(|_| {
+                    let (sender, receiver) = futures::channel::mpsc::unbounded();
+                    self.bodies.lock().unwrap().push_back(receiver);
+                    sender
+                })
+                .collect()
+        }
+
+        fn issued(&self) -> usize {
+            self.requests.lock().unwrap().len()
+        }
+    }
+
+    impl connectrpc::client::ClientTransport for IssueOrderReduceTransport {
+        type ResponseBody = axum::body::Body;
+        type Error = connectrpc::ConnectError;
+
+        fn send(
+            &self,
+            request: axum::http::Request<connectrpc::client::ClientBody>,
+        ) -> connectrpc::client::BoxFuture<
+            'static,
+            Result<axum::http::Response<Self::ResponseBody>, Self::Error>,
+        > {
+            let transport = self.clone();
+            Box::pin(async move {
+                assert_eq!(request.uri().path(), "/store.query.v1.Service/Reduce");
+                let bytes =
+                    axum::body::to_bytes(axum::body::Body::new(request.into_body()), usize::MAX)
+                        .await
+                        .unwrap();
+                let request = crate::tests::decode_reduce_request(&bytes);
+                let receiver = transport
+                    .bodies
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .expect("unexpected Reduce request");
+                transport.requests.lock().unwrap().push(request);
+                Ok(axum::http::Response::builder()
+                    .header("content-type", "application/connect+proto")
+                    .body(axum::body::Body::from_stream(receiver))
+                    .unwrap())
+            })
+        }
+    }
+
+    fn reduce_frame(response: RangeReduceResponse, sequence_number: u64) -> Bytes {
+        let (results, groups) = exoware_sdk::to_proto_reduce_response(response);
+        let response = exoware_sdk::query::ReduceResponse {
+            results,
+            groups,
+            detail: Some(exoware_sdk::query::Detail {
+                sequence_number,
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        };
+        connectrpc::envelope::Envelope::data(response.encode_to_bytes()).encode()
+    }
+
+    fn reduce_end() -> Bytes {
+        connectrpc::envelope::Envelope::end_stream(Bytes::from_static(b"{}")).encode()
+    }
+
+    /// Plans `sql` over a `pending_jobs` table whose Reduce requests go to
+    /// `transport`, and returns its Store REDUCE node.
+    async fn pending_jobs_reduce_node(
+        transport: &IssueOrderReduceTransport,
+        sql: &str,
+        target_partitions: usize,
+    ) -> (Arc<dyn ExecutionPlan>, crate::SqlContext) {
+        let client = StoreClient::builder()
+            .url("http://query.test")
+            .retry_config(exoware_sdk::RetryConfig::disabled())
+            .client_transport(transport.clone())
+            .build()
+            .unwrap();
+        let client = PrefixedStoreClient::empty(client);
+        let context = crate::SqlContext::builder(client.clone())
+            .with_config(
+                datafusion::prelude::SessionConfig::new().with_target_partitions(target_partitions),
+            )
+            .build();
+        let schema = crate::KvSchema::new(client)
+            .table(
+                "pending_jobs",
+                vec![
+                    TableColumnConfig::new("bucket", DataType::Int64, false),
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("category", DataType::Int64, false),
+                ],
+                vec!["bucket".to_string(), "id".to_string()],
+                vec![],
+            )
+            .unwrap();
+        context.register_schema(schema).unwrap();
+        let plan = context
+            .sql(sql)
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        let mut found = None;
+        plan.apply(|node| {
+            if node.downcast_ref::<KvAggregateExec>().is_some() {
+                found = Some(node.clone());
+                return Ok(TreeNodeRecursion::Stop);
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .unwrap();
+        (
+            found.expect("the aggregate must push down to Store REDUCE"),
+            context,
+        )
+    }
+
+    /// Polls `output` until `transport` has seen `issued` requests, keeping any
+    /// batches it yields.
+    async fn poll_until_issued(
+        output: &mut SendableRecordBatchStream,
+        batches: &mut Vec<RecordBatch>,
+        transport: &IssueOrderReduceTransport,
+        issued: usize,
+    ) {
+        use std::task::Poll;
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            futures::future::poll_fn(|cx| {
+                while let Poll::Ready(batch) = output.as_mut().poll_next(cx) {
+                    batches.push(batch.expect("the stream must stay open").unwrap());
+                }
+                if transport.issued() >= issued {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            }),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "{} of {issued} requests started",
+            transport.issued()
+        );
+        assert_eq!(transport.issued(), issued);
+    }
+
+    #[tokio::test]
+    async fn scalar_reduce_jobs_share_one_window() {
+        let transport = IssueOrderReduceTransport::default();
+        let senders = transport.queue(3);
+        let (node, context) = pending_jobs_reduce_node(
+            &transport,
+            "SELECT COUNT(*), SUM(id) FILTER (WHERE bucket = 1), SUM(id) FILTER (WHERE bucket = 3) FROM pending_jobs",
+            2,
+        )
+        .await;
+        let mut output = node.execute(0, context.datafusion().task_ctx()).unwrap();
+        let mut batches = Vec::new();
+
+        // Three single-range jobs and a cap of two: job 1 opens while job 0 is
+        // still pending, and job 2 waits for a slot.
+        poll_until_issued(&mut output, &mut batches, &transport, 2).await;
+        assert!(batches.is_empty());
+        assert!(transport
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.min_sequence_number.is_none()));
+
+        // Job 1 finishes first, but its output waits for job 0's and keeps its slot.
+        let sum = |value| RangeReduceResponse {
+            results: vec![RangeReduceResult {
+                value: Some(KvReducedValue::Int64(value)),
+            }],
+            groups: vec![],
+        };
+        senders[1]
+            .unbounded_send(Ok(reduce_frame(sum(100), 11)))
+            .unwrap();
+        senders[1].unbounded_send(Ok(reduce_end())).unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            futures::future::poll_fn(|cx| {
+                assert!(output.as_mut().poll_next(cx).is_pending());
+                if senders[1].is_closed() {
+                    std::task::Poll::Ready(())
+                } else {
+                    std::task::Poll::Pending
+                }
+            }),
+        )
+        .await
+        .expect("job 1 must drain while job 0 is pending");
+        assert_eq!(transport.issued(), 2);
+
+        let count = RangeReduceResponse {
+            results: vec![RangeReduceResult {
+                value: Some(KvReducedValue::UInt64(5)),
+            }],
+            groups: vec![],
+        };
+        senders[0]
+            .unbounded_send(Ok(reduce_frame(count, 7)))
+            .unwrap();
+        senders[0].unbounded_send(Ok(reduce_end())).unwrap();
+        poll_until_issued(&mut output, &mut batches, &transport, 3).await;
+        // Job 2 starts after both responses, so it carries the floor they raised.
+        assert_eq!(
+            transport.requests.lock().unwrap()[2].min_sequence_number,
+            Some(11)
+        );
+
+        senders[2]
+            .unbounded_send(Ok(reduce_frame(sum(1000), 13)))
+            .unwrap();
+        senders[2].unbounded_send(Ok(reduce_end())).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(batch) = output.next().await {
+                batches.push(batch.unwrap());
+            }
+        })
+        .await
+        .expect("the stream must finish");
+
+        // Output keeps job order even though job 1 finished before job 0.
+        let rows = batch_values(&batches).unwrap();
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_eq!(rows[0][0], ScalarValue::Int64(Some(5)), "{rows:?}");
+        assert_eq!(rows[1][1], ScalarValue::Int64(Some(100)), "{rows:?}");
+        assert_eq!(rows[2][2], ScalarValue::Int64(Some(1000)), "{rows:?}");
+    }
+
+    #[tokio::test]
+    async fn seeded_reduce_jobs_share_one_window_and_cancel_cleanly() {
+        let transport = IssueOrderReduceTransport::default();
+        let senders = transport.queue(4);
+        // A seed job over two ranges, then one single-range job per guarded SUM.
+        let (node, context) = pending_jobs_reduce_node(
+            &transport,
+            "SELECT category, SUM(CASE WHEN bucket = 1 THEN id END), SUM(CASE WHEN bucket = 3 THEN id END) FROM pending_jobs WHERE bucket IN (1, 3) GROUP BY category",
+            2,
+        )
+        .await;
+        let mut output = node.execute(0, context.datafusion().task_ctx()).unwrap();
+        let mut batches = Vec::new();
+        poll_until_issued(&mut output, &mut batches, &transport, 2).await;
+
+        // Once the seed's first range is drained, the first aggregate job opens
+        // while the seed's second range is still pending.
+        let seed_group = || RangeReduceResponse {
+            results: vec![],
+            groups: vec![RangeReduceGroup {
+                group_values: vec![Some(KvReducedValue::Int64(1))],
+                results: vec![],
+            }],
+        };
+        senders[0]
+            .unbounded_send(Ok(reduce_frame(seed_group(), 7)))
+            .unwrap();
+        senders[0].unbounded_send(Ok(reduce_end())).unwrap();
+        poll_until_issued(&mut output, &mut batches, &transport, 3).await;
+
+        // While the seed's second range streams, it and the first aggregate job are
+        // the two open requests, so the last job still waits.
+        senders[1]
+            .unbounded_send(Ok(reduce_frame(seed_group(), 7)))
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while batches.len() < 2 {
+                batches.push(
+                    output
+                        .next()
+                        .await
+                        .expect("the stream must stay open")
+                        .unwrap(),
+                );
+            }
+        })
+        .await
+        .expect("the seed's second range must stream");
+        assert_eq!(transport.issued(), 3);
+
+        drop(output);
+        assert!(senders[1].is_closed(), "current range body must be dropped");
+        assert!(
+            senders[2].is_closed(),
+            "prefetched job body must be dropped"
+        );
     }
 
     #[tokio::test]
