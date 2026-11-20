@@ -80,6 +80,12 @@ schema with the same tables in the same order. A schema supports at most 16
 tables, each with at most 15 secondary indexes. The
 [key layout](../docs/query-planning.md#key-layout) explains these limits.
 
+A table's name is exact and case-sensitive, and has 1 to 255 characters. In SQL,
+a double-quoted identifier always names the table, as in
+`SELECT * FROM "Orders"`. The quotes are optional for a lower-case identifier,
+because SQL folds unquoted identifiers to lower case. The `Tables` and
+`Subscribe` RPCs use the name as declared.
+
 When several SQL schemas, or SQL and [QMDB](../../qmdb/README.md), share a Store,
 give each a disjoint SDK `StoreKeyPrefix`. SQL scans are bounded by the schema's
 prefix, so overlapping prefixes can expose one tenant's keys in another's tables.
@@ -304,10 +310,22 @@ let app = axum::Router::new().fallback_service(sql_stack(server));
 can decode with Arrow's `StreamReader`. Its Store reads share a new monotonic
 session starting at the request's optional minimum sequence. The response also
 reports the highest Store sequence observed, omitting it when the statement read
-nothing from the Store.
+nothing from the Store. A result whose encoded stream exceeds 256 MiB fails with
+`RESOURCE_EXHAUSTED`.
 
+`Query` accepts queries and `EXPLAIN`, `INSERT INTO` registered tables, `SET`
+and `RESET` of options outside `datafusion.runtime` and `datafusion.catalog`,
+`PREPARE`, `EXECUTE`, `DEALLOCATE`, `CREATE FUNCTION`, and `DROP FUNCTION`.
 Session commands such as `SET`, `PREPARE`, and `CREATE FUNCTION` modify the
 server's shared context, so their effects persist into later requests.
+`CREATE FUNCTION` needs a function factory installed on the server's context.
+
+`Query` rejects catalog DDL such as `CREATE TABLE`, `CREATE VIEW`, and
+`DROP TABLE` because every caller shares the catalog. It rejects `COPY` and
+`CREATE EXTERNAL TABLE` because they reach the server's files, and `DELETE`,
+`UPDATE`, and other writes because `INSERT INTO` is the only write the service
+offers. Register tables and views and set runtime options through
+`server.context()`.
 
 `Subscribe` streams rows from each Store batch that writes to a table and matches
 a scalar SQL predicate. Predicates cannot use subqueries, aggregates, window

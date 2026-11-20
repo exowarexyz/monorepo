@@ -585,6 +585,274 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn boolean_predicates_use_index_ranges_and_reduce() {
+        use datafusion::{arrow::array::BooleanArray, datasource::MemTable};
+
+        let state = MockState {
+            kv: Arc::new(Mutex::new(BTreeMap::new())),
+            range_calls: Arc::new(AtomicUsize::new(0)),
+            range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+            sequence_number: Arc::new(AtomicU64::new(0)),
+        };
+        let (base_url, shutdown_tx) = spawn_mock_server(state.clone()).await;
+        let client = StoreClient::new(&base_url);
+        let mut schema = KvSchema::new(client.unprefixed());
+        for (name, nullable) in [("flags", false), ("nullable_flags", true)] {
+            schema = schema
+                .table(
+                    name,
+                    vec![
+                        TableColumnConfig::new("id", DataType::Int64, false),
+                        TableColumnConfig::new("b", DataType::Boolean, nullable),
+                    ],
+                    vec!["id".into()],
+                    if nullable {
+                        vec![]
+                    } else {
+                        vec![IndexSpec::new("b_idx", vec!["b".into()]).unwrap()]
+                    },
+                )
+                .unwrap();
+        }
+        let native = DataFusionSessionContext::new();
+
+        // Write the same rows to the Store and to in-memory tables that serve as the reference.
+        let mut writer = schema.batch_writer();
+        for (name, table) in schema.tables() {
+            let mut values = vec![Some(false), Some(true)];
+            if name == "nullable_flags" {
+                values.push(None);
+            }
+            for (id, value) in values.iter().enumerate() {
+                writer
+                    .insert(
+                        name,
+                        vec![
+                            CellValue::Int64(id as i64),
+                            value.map_or(CellValue::Null, CellValue::Boolean),
+                        ],
+                    )
+                    .unwrap();
+            }
+            let batch = RecordBatch::try_new(
+                table.model.schema.clone(),
+                vec![
+                    Arc::new(Int64Array::from_iter_values(0..values.len() as i64)),
+                    Arc::new(BooleanArray::from(values)),
+                ],
+            )
+            .unwrap();
+            native
+                .register_table(
+                    name,
+                    Arc::new(MemTable::try_new(batch.schema(), vec![vec![batch]]).unwrap()),
+                )
+                .unwrap();
+        }
+        writer.flush().await.unwrap();
+        let ctx = SqlContext::new(client.unprefixed());
+        ctx.register_schema(schema).unwrap();
+
+        // Each Boolean predicate matches DataFusion, and on the indexed table it reads a
+        // constrained range of the index.
+        for table in ["flags", "nullable_flags"] {
+            for predicate in [
+                "b",
+                "b = true",
+                "NOT b",
+                "b = false",
+                "b IS TRUE",
+                "b IS FALSE",
+            ] {
+                let sql = format!("SELECT id FROM {table} WHERE {predicate} ORDER BY id");
+                let actual = ctx.sql(&sql).await.unwrap().collect().await.unwrap();
+                let expected = native.sql(&sql).await.unwrap().collect().await.unwrap();
+                assert_eq!(
+                    collect_i64_column(&actual, 0),
+                    collect_i64_column(&expected, 0)
+                );
+                if table == "flags" {
+                    let plan = physical_plan_text(&explain_plan_rows(&ctx, &sql).await);
+                    assert!(
+                        plan.contains("secondary_index(b_idx, lexicographic)"),
+                        "{plan}"
+                    );
+                    assert!(!plan.contains("predicate=<none>"), "{plan}");
+                    assert!(!plan.contains("full_scan_like=true"), "{plan}");
+                }
+            }
+
+            // A count under a Boolean predicate runs as a Reduce without reading rows.
+            let sql = format!("SELECT COUNT(*) FROM {table} WHERE b");
+            let plan = physical_plan_text(&explain_plan_rows(&ctx, &sql).await);
+            assert!(plan.contains("KvAggregateExec"), "{plan}");
+            state.range_calls.store(0, AtomicOrdering::SeqCst);
+            state.range_reduce_calls.store(0, AtomicOrdering::SeqCst);
+            let actual = ctx.sql(&sql).await.unwrap().collect().await.unwrap();
+            assert_count_scalar(&actual[0], 0, 0, 1);
+            assert_eq!(state.range_calls.load(AtomicOrdering::SeqCst), 0);
+            assert!(state.range_reduce_calls.load(AtomicOrdering::SeqCst) > 0);
+        }
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn literal_predicates_skip_store_reads_for_contradictions() {
+        let state = MockState {
+            kv: Arc::new(Mutex::new(BTreeMap::new())),
+            range_calls: Arc::new(AtomicUsize::new(0)),
+            range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+            sequence_number: Arc::new(AtomicU64::new(0)),
+        };
+        let (base_url, shutdown_tx) = spawn_mock_server(state.clone()).await;
+        let client = StoreClient::new(&base_url);
+        let schema = KvSchema::new(client.unprefixed())
+            .table(
+                "t",
+                vec![
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("s", DataType::Utf8, false),
+                    TableColumnConfig::new("x", DataType::Int64, false),
+                ],
+                vec!["id".into()],
+                vec![],
+            )
+            .unwrap();
+        let mut writer = schema.batch_writer();
+        writer
+            .insert(
+                "t",
+                vec![
+                    CellValue::Int64(1),
+                    CellValue::Utf8("a".into()),
+                    CellValue::Int64(7),
+                ],
+            )
+            .unwrap();
+        writer.flush().await.unwrap();
+        let ctx = SqlContext::new(client.unprefixed());
+        ctx.register_schema(schema).unwrap();
+
+        // Contradictory equalities on a value column plan an empty scan and read nothing.
+        let sql = "SELECT id FROM t WHERE s = 'a' AND s = 'b'";
+        let plan = physical_plan_text(&explain_plan_rows(&ctx, sql).await);
+        assert!(plan.contains("mode=empty"), "{plan}");
+        assert!(plan.contains("ranges=0"), "{plan}");
+        let batches = ctx.sql(sql).await.unwrap().collect().await.unwrap();
+        assert!(batches.iter().all(|batch| batch.num_rows() == 0));
+        assert_eq!(state.range_calls.load(AtomicOrdering::SeqCst), 0);
+
+        // A contradictory aggregate returns a zero count and a null sum without a range read.
+        let batches = ctx
+            .sql("SELECT COUNT(*), SUM(x) FROM t WHERE id = 1 AND id = 2")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        assert_count_scalar(&batches[0], 0, 0, 0);
+        assert_eq!(
+            ScalarValue::try_from_array(batches[0].column(1), 0).unwrap(),
+            ScalarValue::Int64(None)
+        );
+        assert_eq!(state.range_calls.load(AtomicOrdering::SeqCst), 0);
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn exclusive_float_bounds_keep_limit_requests_bounded() {
+        let state = MockState {
+            kv: Arc::new(Mutex::new(BTreeMap::new())),
+            range_calls: Arc::new(AtomicUsize::new(0)),
+            range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+            sequence_number: Arc::new(AtomicU64::new(0)),
+        };
+        let (base_url, shutdown_tx) = spawn_mock_server(state.clone()).await;
+        let client = StoreClient::new(&base_url);
+        let tables = [
+            ("one_boundary", 1, true),
+            ("many_boundaries", 64, true),
+            ("reverse_rows", 64, false),
+        ];
+        let mut schema = KvSchema::new(client.unprefixed());
+        for (name, _, indexed) in tables {
+            schema = schema
+                .table(
+                    name,
+                    vec![
+                        TableColumnConfig::new("id", DataType::Int64, false),
+                        TableColumnConfig::new("x", DataType::Float64, false),
+                    ],
+                    vec!["id".into()],
+                    if indexed {
+                        vec![IndexSpec::new("x_idx", vec!["x".into()]).unwrap()]
+                    } else {
+                        vec![]
+                    },
+                )
+                .unwrap();
+        }
+
+        // Each table holds one row at 0.0, `boundary_rows` rows at 1.0, and one row at 2.0.
+        let mut writer = schema.batch_writer();
+        for (name, boundary_rows, _) in tables {
+            for id in 0..=boundary_rows + 1 {
+                let x = if id == 0 {
+                    0.0
+                } else if id == boundary_rows + 1 {
+                    2.0
+                } else {
+                    1.0
+                };
+                writer
+                    .insert(name, vec![CellValue::Int64(id), CellValue::Float64(x)])
+                    .unwrap();
+            }
+        }
+        writer.flush().await.unwrap();
+        let ctx = SqlContext::new(client.unprefixed());
+        ctx.register_schema(schema).unwrap();
+
+        // A strict bound's index range also holds the rows equal to the bound, so the LIMIT
+        // does not size the request, and one request serves any number of boundary rows.
+        let mut request_counts = Vec::new();
+        let mut plans = Vec::new();
+        for (name, boundary_rows, _) in &tables[..2] {
+            for (predicate, expected) in [("x > 1.0", boundary_rows + 1), ("x < 1.0", 0)] {
+                let sql = format!("SELECT id FROM {name} WHERE {predicate} LIMIT 1");
+                state.range_calls.store(0, AtomicOrdering::SeqCst);
+                let batches = ctx.sql(&sql).await.unwrap().collect().await.unwrap();
+                assert_eq!(collect_i64_column(&batches, 0), vec![expected]);
+                request_counts.push(state.range_calls.load(AtomicOrdering::SeqCst));
+                plans.push(physical_plan_text(&explain_plan_rows(&ctx, &sql).await));
+            }
+        }
+        assert_eq!(request_counts[0], request_counts[2], "{request_counts:?}");
+        assert!(
+            request_counts.iter().all(|&count| count == 1),
+            "{request_counts:?}"
+        );
+        for plan in plans {
+            assert!(
+                plan.contains("secondary_index(x_idx, lexicographic)"),
+                "{plan}"
+            );
+            assert!(plan.contains("exact=false, row_recheck=true"), "{plan}");
+        }
+
+        // A reverse primary-key scan rechecks the bound on each row and also needs one request.
+        let sql = "SELECT id FROM reverse_rows WHERE x < 1.0 ORDER BY id DESC LIMIT 1";
+        let plan = physical_plan_text(&explain_plan_rows(&ctx, sql).await);
+        assert!(plan.contains("direction=Some(Reverse)"), "{plan}");
+        assert!(plan.contains("exact=false, row_recheck=true"), "{plan}");
+        state.range_calls.store(0, AtomicOrdering::SeqCst);
+        let batches = ctx.sql(sql).await.unwrap().collect().await.unwrap();
+        assert_eq!(collect_i64_column(&batches, 0), vec![0]);
+        assert_eq!(state.range_calls.load(AtomicOrdering::SeqCst), 1);
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
     async fn explain_reports_secondary_index_scan_and_row_recheck() {
         let state = MockState {
             kv: Arc::new(Mutex::new(BTreeMap::new())),

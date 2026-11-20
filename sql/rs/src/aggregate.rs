@@ -218,8 +218,22 @@ pub(crate) struct CombinedAggregateJob {
 
 /// Compiled Store reductions that produce partial aggregate states for one SQL aggregate.
 ///
+/// Expressions whose jobs read the same ranges with the same group keys and row filter share one
+/// job, and a job sends one Reduce request per range:
+///
+/// ```text
+///   expressions   jobs                Reduce requests
+///
+///   expr 0 --+                   +--> range A --+
+///            +--> job 0 ---------+              |
+///   expr 1 --+                   +--> range B --+--> partial state rows
+///                                               |
+///   expr 2 -----> job 1 ------------> range C --+
+/// ```
+///
 /// Each job runs independently with its own access path and ranges. The same group can
 /// therefore appear in several rows, and DataFusion merges those rows in its final aggregate.
+/// `seed_job`, when present, sends its requests the same way.
 #[derive(Debug, Clone)]
 pub(crate) struct AggregatePushdownSpec {
     /// Store client for the table's key prefix.
@@ -268,9 +282,23 @@ impl KvAggregatePushdownRule {
         plan: LogicalPlan,
         limited: bool,
     ) -> DataFusionResult<Transformed<LogicalPlan>> {
-        // DataFusion only stops distinct aggregation early when the limit sits directly above it.
-        let input_limited = matches!(plan, LogicalPlan::Limit(_)) && plan.fetch()?.is_some();
-        plan.map_children(|input| self.rewrite_with_limit(input, input_limited))?
+        // DataFusion only stops distinct aggregation early when the limit sits directly above
+        // it. Its limit pushdown moves a limit below a projection or a subquery alias, so a
+        // limit above either of them reaches their input.
+        let input_limited = match &plan {
+            LogicalPlan::Limit(_) => plan.fetch()?.is_some(),
+            LogicalPlan::Projection(_) | LogicalPlan::SubqueryAlias(_) => limited,
+            _ => false,
+        };
+
+        // A plan embedded in an expression, such as a scalar subquery, is a query of its own
+        // with no limit above it.
+        let rewritten = plan.map_subqueries(|subquery| self.rewrite_with_limit(subquery, false))?;
+
+        rewritten
+            .transform_sibling(|plan| {
+                plan.map_children(|input| self.rewrite_with_limit(input, input_limited))
+            })?
             .transform_data(|node| {
                 if limited
                     && matches!(&node, LogicalPlan::Aggregate(aggregate) if aggregate.aggr_expr.is_empty())
@@ -660,7 +688,10 @@ impl ExecutionPlan for KvAggregateExec {
         let session = read_session(context.session_config(), &self.spec.store)?;
         let source = Arc::new(self.clone());
         let concurrency = context.session_config().target_partitions().max(1);
-        let jobs = self
+
+        // The ranges of every job share one concurrency bound. Responses are consumed in job
+        // order and then range order, so the final merge order stays stable.
+        let requests = self
             .spec
             .seed_job
             .clone()
@@ -669,12 +700,18 @@ impl ExecutionPlan for KvAggregateExec {
                 job,
                 expr_plans: Vec::new(),
             })
-            .chain(self.spec.aggregate_jobs.clone());
-        let batches = futures::stream::iter(jobs)
-            .map(move |job| {
-                execute_reduce_job(session.clone(), Arc::new(job), source.clone(), concurrency)
+            .chain(self.spec.aggregate_jobs.clone())
+            .flat_map(|job| {
+                let ranges = job.job.ranges.clone();
+                let job = Arc::new(job);
+                ranges.into_iter().map(move |range| (job.clone(), range))
+            });
+        let batches = futures::stream::iter(requests)
+            .map(move |(job, range)| {
+                execute_reduce_range(session.clone(), job, source.clone(), range)
             })
-            .flatten();
+            .buffered(concurrency)
+            .try_flatten();
         Ok(Box::pin(RecordBatchStreamAdapter::new(
             self.schema(),
             batches,
@@ -730,18 +767,6 @@ pub(crate) fn cast_scalar_value(
         return Ok(value);
     }
     value.cast_to(data_type)
-}
-
-fn execute_reduce_job(
-    session: ReadSession,
-    job: Arc<CombinedAggregateJob>,
-    source: Arc<KvAggregateExec>,
-    concurrency: usize,
-) -> impl futures::Stream<Item = DataFusionResult<RecordBatch>> {
-    futures::stream::iter(job.job.ranges.clone())
-        .map(move |range| execute_reduce_range(session.clone(), job.clone(), source.clone(), range))
-        .buffered(concurrency)
-        .try_flatten()
 }
 
 async fn execute_reduce_range(
@@ -2460,6 +2485,10 @@ mod tests {
         for (sql, unordered_input) in [
             ("SELECT DISTINCT id FROM orders LIMIT 1", false),
             ("SELECT DISTINCT status FROM orders LIMIT 1", true),
+            (
+                "SELECT x FROM (SELECT DISTINCT status AS x, region FROM orders) d LIMIT 1",
+                true,
+            ),
         ] {
             let native_plan = fixture
                 .native
@@ -2531,6 +2560,9 @@ mod tests {
         for sql in [
             "SELECT region FROM orders GROUP BY region ORDER BY region LIMIT 10",
             "SELECT region FROM orders GROUP BY region ORDER BY region DESC LIMIT 1",
+            "SELECT DISTINCT region FROM orders ORDER BY region LIMIT 1",
+            "SELECT x FROM (SELECT DISTINCT region AS x, status FROM orders ORDER BY x, status \
+             LIMIT 3) d LIMIT 1 OFFSET 1",
         ] {
             fixture.check(sql, 1).await;
         }
@@ -2556,6 +2588,54 @@ mod tests {
             1,
             "{sql}: {paths:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn subquery_expression_aggregates_use_reduce() {
+        let fixture = Fixture::new().await;
+
+        // Decorrelation turns the first subquery into a join input. The others stay in
+        // expressions, where DataFusion plans each as a query of its own.
+        for (sql, scans) in [
+            (
+                "SELECT id FROM orders o WHERE amount = \
+                 (SELECT MAX(amount) FROM orders i WHERE i.status = o.status) ORDER BY id",
+                1,
+            ),
+            (
+                "SELECT id FROM orders WHERE amount > (SELECT AVG(amount) FROM orders)",
+                1,
+            ),
+            ("SELECT (SELECT COUNT(*) FROM orders)", 0),
+        ] {
+            let expected = values(&fixture.native, sql).await.unwrap();
+            let physical = fixture
+                .context
+                .sql(sql)
+                .await
+                .unwrap()
+                .create_physical_plan()
+                .await
+                .unwrap();
+            fixture.rows.paths.lock().unwrap().clear();
+            let actual = values(fixture.context.datafusion(), sql).await.unwrap();
+            assert_eq!(actual, expected, "{sql}");
+            let paths = fixture.rows.paths.lock().unwrap().clone();
+            assert_eq!(
+                paths.iter().filter(|p| p.ends_with("/Reduce")).count(),
+                1,
+                "{sql}: {paths:?}\n{}",
+                datafusion::physical_plan::displayable(physical.as_ref()).indent(true),
+            );
+            assert_eq!(
+                paths.iter().filter(|p| p.ends_with("/Range")).count(),
+                scans,
+                "{sql}: {paths:?}"
+            );
+            assert!(physical
+                .exists(|node| Ok(node.downcast_ref::<KvAggregateExec>().is_some()))
+                .unwrap());
+        }
     }
 
     #[tokio::test]
@@ -3938,55 +4018,63 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn unseeded_reduce_ranges_start_concurrently_and_cancel_cleanly() {
-        use datafusion::execution::memory_pool::MemoryPool;
+    type ReduceBody = Result<Bytes, std::convert::Infallible>;
 
-        type BodyReceiver =
-            futures::channel::mpsc::UnboundedReceiver<Result<Bytes, std::convert::Infallible>>;
+    /// Store transport that records each Reduce request and streams its response body from the
+    /// sender registered for the range start. The body stays open until the test drops that
+    /// sender, so the test controls when each range responds and finishes.
+    #[derive(Clone)]
+    struct ControlledReduceTransport {
+        bodies:
+            Arc<Mutex<BTreeMap<Vec<u8>, futures::channel::mpsc::UnboundedReceiver<ReduceBody>>>>,
+        requests: Arc<Mutex<Vec<exoware_sdk::query::ReduceRequest>>>,
+    }
 
-        #[derive(Clone)]
-        struct ControlledReduceTransport {
-            bodies: Arc<Mutex<BTreeMap<Vec<u8>, BodyReceiver>>>,
-            requests: Arc<Mutex<Vec<exoware_sdk::query::ReduceRequest>>>,
+    impl connectrpc::client::ClientTransport for ControlledReduceTransport {
+        type ResponseBody = axum::body::Body;
+        type Error = connectrpc::ConnectError;
+
+        fn send(
+            &self,
+            request: axum::http::Request<connectrpc::client::ClientBody>,
+        ) -> connectrpc::client::BoxFuture<
+            'static,
+            Result<axum::http::Response<Self::ResponseBody>, Self::Error>,
+        > {
+            let transport = self.clone();
+            Box::pin(async move {
+                assert_eq!(request.uri().path(), "/store.query.v1.Service/Reduce");
+                let bytes =
+                    axum::body::to_bytes(axum::body::Body::new(request.into_body()), usize::MAX)
+                        .await
+                        .unwrap();
+                let request = crate::tests::decode_reduce_request(&bytes);
+                let receiver = transport
+                    .bodies
+                    .lock()
+                    .unwrap()
+                    .remove(&request.start)
+                    .expect("unexpected range or retry");
+                transport.requests.lock().unwrap().push(request);
+                Ok(axum::http::Response::builder()
+                    .header("content-type", "application/connect+proto")
+                    .body(axum::body::Body::from_stream(receiver))
+                    .unwrap())
+            })
         }
+    }
 
-        impl connectrpc::client::ClientTransport for ControlledReduceTransport {
-            type ResponseBody = axum::body::Body;
-            type Error = connectrpc::ConnectError;
-
-            fn send(
-                &self,
-                request: axum::http::Request<connectrpc::client::ClientBody>,
-            ) -> connectrpc::client::BoxFuture<
-                'static,
-                Result<axum::http::Response<Self::ResponseBody>, Self::Error>,
-            > {
-                let transport = self.clone();
-                Box::pin(async move {
-                    assert_eq!(request.uri().path(), "/store.query.v1.Service/Reduce");
-                    let bytes = axum::body::to_bytes(
-                        axum::body::Body::new(request.into_body()),
-                        usize::MAX,
-                    )
-                    .await
-                    .unwrap();
-                    let request = crate::tests::decode_reduce_request(&bytes);
-                    let receiver = transport
-                        .bodies
-                        .lock()
-                        .unwrap()
-                        .remove(&request.start)
-                        .expect("unexpected range or retry");
-                    transport.requests.lock().unwrap().push(request);
-                    Ok(axum::http::Response::builder()
-                        .header("content-type", "application/connect+proto")
-                        .body(axum::body::Body::from_stream(receiver))
-                        .unwrap())
-                })
-            }
-        }
-
+    /// Registers `pending_ranges`, keyed by `(bucket, id)`, on a Store whose Reduce responses
+    /// the test controls. Returns the transport with the range start and the response body
+    /// sender of each bucket.
+    async fn pending_ranges(
+        fixture: &Fixture,
+        buckets: &[i64],
+    ) -> (
+        ControlledReduceTransport,
+        Vec<Vec<u8>>,
+        Vec<futures::channel::mpsc::UnboundedSender<ReduceBody>>,
+    ) {
         let transport = ControlledReduceTransport {
             bodies: Arc::new(Mutex::new(BTreeMap::new())),
             requests: Arc::new(Mutex::new(Vec::new())),
@@ -3997,7 +4085,6 @@ mod tests {
             .client_transport(transport.clone())
             .build()
             .unwrap();
-        let fixture = Fixture::new().await;
         let schema = crate::KvSchema::new(client.unprefixed())
             .table(
                 "pending_ranges",
@@ -4019,7 +4106,7 @@ mod tests {
         let model = &provider.downcast_ref::<KvTable>().unwrap().model;
         let mut starts = Vec::new();
         let mut senders = Vec::new();
-        for bucket in [1, 3, 5, 7] {
+        for &bucket in buckets {
             let start = crate::codec::encode_primary_key_bound(
                 model.table_prefix,
                 &[&CellValue::Int64(bucket)],
@@ -4036,6 +4123,17 @@ mod tests {
             starts.push(start.to_vec());
             senders.push(sender);
         }
+        (transport, starts, senders)
+    }
+
+    #[tokio::test]
+    async fn unseeded_reduce_ranges_start_concurrently_and_cancel_cleanly() {
+        use datafusion::execution::memory_pool::MemoryPool;
+
+        let fixture = Fixture::new().await;
+        let (transport, starts, senders) = pending_ranges(&fixture, &[1, 3, 5, 7]).await;
+
+        // A Reduce response body with one counted group per key, tagged with a Store sequence.
         let frame = |keys: std::ops::Range<i64>, sequence_number| {
             let (results, groups) = exoware_sdk::to_proto_reduce_response(RangeReduceResponse {
                 results: vec![],
@@ -4060,6 +4158,8 @@ mod tests {
             };
             connectrpc::envelope::Envelope::data(response.encode_to_bytes()).encode()
         };
+
+        // Five buckets give five ranges, and two target partitions allow two requests in flight.
         let sql = "SELECT category, COUNT(*) FROM pending_ranges WHERE bucket IN (1, 3, 5, 7, 9) GROUP BY category";
         let (context, pool) = aggregate_session_with_pool(&fixture, 4 * 1024 * 1024, 2);
         let session = context.read_session();
@@ -4073,6 +4173,7 @@ mod tests {
         final_reduce_plan(plan.clone());
         let mut output = plan.execute(0, context.datafusion().task_ctx()).unwrap();
 
+        // Two ranges open before any response arrives, and neither sends a minimum sequence.
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 assert!(futures::poll!(output.next()).is_pending());
@@ -4095,6 +4196,7 @@ mod tests {
                 .all(|request| starts[..2].contains(&request.start)));
         }
 
+        // The second range finishes first and records sequence 11 in the session.
         senders[1].unbounded_send(Ok(frame(1..2, 11))).unwrap();
         senders[1]
             .unbounded_send(Ok(connectrpc::envelope::Envelope::end_stream(
@@ -4114,6 +4216,7 @@ mod tests {
         .await
         .unwrap();
 
+        // The first range finishes at the older sequence 7, and the next two open at minimum 11.
         senders[0].unbounded_send(Ok(frame(0..1, 7))).unwrap();
         senders[0]
             .unbounded_send(Ok(connectrpc::envelope::Envelope::end_stream(
@@ -4144,6 +4247,7 @@ mod tests {
             }
         }
 
+        // The third range streams 1,024 groups at sequence 13 and reserves pool memory.
         senders[2].unbounded_send(Ok(frame(2..1026, 13))).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
@@ -4156,6 +4260,9 @@ mod tests {
         })
         .await
         .unwrap();
+
+        // The current and prefetched bodies stay open until the output drops. Dropping it closes
+        // both, frees the pool, and opens no fifth range.
         assert!(!senders[2].is_closed());
         assert!(!senders[3].is_closed());
         drop(output);
@@ -4167,6 +4274,54 @@ mod tests {
         assert_eq!(pool.reserved(), 0);
         let requests = transport.requests.lock().unwrap();
         assert_eq!(requests.len(), 4, "the fifth range must not open");
+    }
+
+    #[tokio::test]
+    async fn reduce_jobs_start_concurrently_and_cancel_cleanly() {
+        let fixture = Fixture::new().await;
+        let (transport, starts, senders) = pending_ranges(&fixture, &[1, 3, 5]).await;
+
+        // Each filter selects another bucket, so each aggregate is a job with its own range.
+        let sql = "SELECT COUNT(*) FILTER (WHERE bucket = 1), \
+                   COUNT(*) FILTER (WHERE bucket = 3), \
+                   COUNT(*) FILTER (WHERE bucket = 5) FROM pending_ranges";
+        let (context, _) = aggregate_session_with_pool(&fixture, 4 * 1024 * 1024, 2);
+        let plan = context
+            .sql(sql)
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        final_reduce_plan(plan.clone());
+        let mut output = plan.execute(0, context.datafusion().task_ctx()).unwrap();
+
+        // Two target partitions let the first two jobs open their ranges before any response.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                assert!(futures::poll!(output.next()).is_pending());
+                if transport.requests.lock().unwrap().len() == 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("two jobs must have a request in flight before any response arrives");
+        assert!(transport
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| starts[..2].contains(&request.start)));
+        assert!(senders.iter().all(|sender| !sender.is_closed()));
+
+        // Dropping the output closes both open bodies and never opens the third job.
+        drop(output);
+        assert!(senders[0].is_closed(), "first job body must be dropped");
+        assert!(senders[1].is_closed(), "second job body must be dropped");
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2, "the third job must not open");
     }
 
     #[tokio::test]
