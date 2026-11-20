@@ -2,10 +2,11 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { StoreClient, ReadSession, StoreKeyPrefix } from '@exowarexyz/sdk';
 import {
   bytesToHex,
+  decodeSimplexBlockData,
   hexToBytes,
   type SimplexHeaderVerification,
   type SimplexIdentity,
-  type SimplexPayload,
+  type SimplexPayloadKind,
   type SimplexScheme,
   SimplexReader,
   SimplexSubscriptions,
@@ -14,11 +15,11 @@ import {
   type VerifiedSimplexCertificate,
   type VerifiedSimplexCertificateStreamEntry,
 } from '@simplex-ts';
-import { createWasmSimplexVerifier } from '@simplex-ts/wasm';
+import { loadWasmSimplexCertificateVerifier } from '@simplex-ts/wasm';
 
 const MAX_EVENTS = 10;
 const SIMPLEX_DEMO_SCHEME: SimplexScheme = 'bls12381-threshold-vrf-min-sig';
-const SIMPLEX_DEMO_PAYLOAD: SimplexPayload = 'sha256';
+const SIMPLEX_DEMO_PAYLOAD_KIND: SimplexPayloadKind = 'sha256';
 const SIMPLEX_DEMO_IDENTITY: SimplexIdentity = 'ed25519';
 const SIMPLEX_DEMO_NAMESPACE = '_EXOWARE_SIMPLEX_DEMO';
 const SIMPLEX_DEMO_VERIFICATION_MATERIAL =
@@ -74,10 +75,16 @@ async function sha256(bytes: Uint8Array): Promise<Uint8Array> {
   return new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
 }
 
+// `simplex seed` proposes height h in view h, so the signed view stands in for the header's height.
 async function verifyDemoHeader({
+  certificate,
+  context,
   payload,
   header,
 }: SimplexHeaderVerification): Promise<boolean> {
+  if (context.kind === 'finalization' && context.index !== 'round' && certificate.view !== context.height) {
+    return false;
+  }
   return bytesEqual(payload, await sha256(header));
 }
 
@@ -163,18 +170,14 @@ export function SimplexPanel({
     [simplexStoreUrl, storePrefix],
   );
   const session = useMemo(() => ReadSession.monotonic(store), [store]);
-  const client = useMemo(
-    () =>
-      SimplexReader.withSession<
-        VerifiedSimplexCertificate,
-        VerifiedSimplexCertificate
-      >(session, verifier ? { verifier } : {}),
-    [session, verifier],
-  );
-  const subscriptions = useMemo(
-    () => new SimplexSubscriptions(store, verifier ? { verifier } : {}),
-    [store, verifier],
-  );
+  const reader = useMemo(() => SimplexReader.withSession(session), [session]);
+  const subscriptions = useMemo(() => new SimplexSubscriptions(store), [store]);
+  const readyVerifier = () => {
+    if (!verifier) {
+      throw new Error('Simplex verifier is not ready');
+    }
+    return verifier;
+  };
 
   const [isConnected, setIsConnected] = useState(false);
   const [isReadingBlock, setIsReadingBlock] = useState(false);
@@ -216,9 +219,9 @@ export function SimplexPanel({
     setVerifierStatus('loading');
     void (async () => {
       try {
-        const nextVerifier = await createWasmSimplexVerifier({
+        const nextVerifier = await loadWasmSimplexCertificateVerifier({
           scheme: appliedVerifierConfig.scheme,
-          payload: SIMPLEX_DEMO_PAYLOAD,
+          payloadKind: SIMPLEX_DEMO_PAYLOAD_KIND,
           identity: SIMPLEX_DEMO_IDENTITY,
           namespace: new TextEncoder().encode(appliedVerifierConfig.namespace),
           verificationMaterial: hexToBytes(appliedVerifierConfig.verificationMaterialHex),
@@ -287,7 +290,8 @@ export function SimplexPanel({
     setHeaderReadResult(null);
     setBlockReadResult(null);
     try {
-      const block = await client.getBlock(hexToBytes(blockReadDigestHex));
+      const raw = await reader.getBlockRaw(hexToBytes(blockReadDigestHex));
+      const block = raw === null ? null : decodeSimplexBlockData(raw);
       setBlockReadResult(block);
       showNotification(
         'success',
@@ -308,7 +312,7 @@ export function SimplexPanel({
     setHeaderReadResult(null);
     setBlockReadResult(null);
     try {
-      const header = await client.getHeader(hexToBytes(blockReadDigestHex));
+      const header = await reader.getHeaderRaw(hexToBytes(blockReadDigestHex));
       setHeaderReadResult(header);
       showNotification(
         'success',
@@ -333,7 +337,7 @@ export function SimplexPanel({
     try {
       const epoch = readNonNegativeInteger(notarizationEpoch, 'Notarization epoch');
       const view = readNonNegativeInteger(notarizationView, 'Notarization view');
-      const nextNotarization = await client.getNotarizationByRound(epoch, view);
+      const nextNotarization = await reader.getNotarizedByRound(readyVerifier(), epoch, view);
       setNotarization(nextNotarization);
       showNotification(
         'success',
@@ -358,7 +362,7 @@ export function SimplexPanel({
       return next;
     });
     try {
-      const finalization = await client.latestFinalization();
+      const finalization = await reader.latestFinalized(readyVerifier());
       setLatestFinalization(finalization);
       showNotification(
         'success',
@@ -383,7 +387,7 @@ export function SimplexPanel({
     try {
       const epoch = readNonNegativeInteger(finalizationEpoch, 'Finalization epoch');
       const view = readNonNegativeInteger(finalizationIndex, 'Finalization view');
-      const finalization = await client.getFinalizationByRound(epoch, view);
+      const finalization = await reader.getFinalizedByRound(readyVerifier(), epoch, view);
       setRoundFinalization(finalization);
       showNotification(
         'success',
@@ -409,7 +413,7 @@ export function SimplexPanel({
     });
     try {
       const height = readNonNegativeInteger(finalizationIndex, 'Finalization height');
-      const finalization = await client.getFinalizationByHeight(height);
+      const finalization = await reader.getFinalizedByHeight(readyVerifier(), height);
       setHeightFinalization(finalization);
       showNotification(
         'success',
@@ -436,7 +440,8 @@ export function SimplexPanel({
       return next;
     });
     try {
-      const block = await client.getBlock(certificate.payload);
+      const raw = await reader.getBlockRaw(certificate.payload);
+      const block = raw === null ? null : decodeSimplexBlockData(raw);
       if (!block) {
         throw new Error(`No full block for digest ${bytesToHex(certificate.payload)}`);
       }
@@ -480,8 +485,9 @@ export function SimplexPanel({
           ? BigInt(sinceSequenceNumber.trim())
           : undefined;
         for await (const batch of subscriptions.subscribeCertificates(
+          readyVerifier(),
           {
-            includeFinalizedByHeight: true,
+            includeFinalizationByHeight: true,
             sinceSequenceNumber: since,
           },
           { signal: controller.signal },
@@ -879,7 +885,7 @@ export function SimplexPanel({
               {streamEvents.map(({ sequenceNumber, entry }) => {
                 const eventId = streamEventId({ sequenceNumber, entry });
                 const title =
-                  entry.type === 'notarization'
+                  entry.kind === 'notarization'
                     ? `notarization round ${formatRound(entry.epoch, entry.view)}`
                     : `finalization ${entry.index} ${
                         entry.index !== 'height'

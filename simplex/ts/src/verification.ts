@@ -4,7 +4,7 @@ export type MaybePromise<T> = T | Promise<T>;
 
 export interface SimplexVerificationContext {
   key: Uint8Array;
-  value: Uint8Array;
+  raw: Uint8Array;
   source: 'get' | 'stream';
 }
 
@@ -22,11 +22,11 @@ export type SimplexFinalizationVerificationContext = SimplexVerificationContext 
 );
 
 export interface SimplexCertificateVerifier<TNotarization = unknown, TFinalization = unknown> {
-  verifyNotarization(
+  verifyNotarized(
     bytes: Uint8Array,
     context: SimplexNotarizationVerificationContext,
   ): MaybePromise<TNotarization | null | undefined | false>;
-  verifyFinalization(
+  verifyFinalized(
     bytes: Uint8Array,
     context: SimplexFinalizationVerificationContext,
   ): MaybePromise<TFinalization | null | undefined | false>;
@@ -42,7 +42,7 @@ export type SimplexScheme =
   | 'bls12381-threshold-vrf-min-pk'
   | 'bls12381-threshold-vrf-min-sig';
 
-export type SimplexPayload =
+export type SimplexPayloadKind =
   | 'sha256'
   | 'blake3'
   | 'transcript-summary'
@@ -50,6 +50,11 @@ export type SimplexPayload =
 
 export type SimplexIdentity = 'ed25519' | 'secp256r1';
 
+/**
+ * Signature-verified certificate fields. `header` holds the bytes stored after
+ * the certificate, and results returned by
+ * `createWasmSimplexCertificateVerifier` have also passed `verifyHeader`.
+ */
 export interface VerifiedSimplexCertificate {
   epoch: bigint;
   scheme: SimplexScheme;
@@ -104,26 +109,26 @@ export interface SimplexWasmBlockVerifierModule {
   ) => boolean | null | undefined;
 }
 
-export interface SimplexVerifierOptions {
+export interface SimplexCertificateVerifierOptions {
   scheme: SimplexScheme;
-  payload: SimplexPayload;
+  payloadKind: SimplexPayloadKind;
   identity: SimplexIdentity;
   namespace: BytesLike;
   verificationMaterial: BytesLike;
-  verifyHeader?: SimplexHeaderVerifier;
+  verifyHeader: SimplexHeaderVerifier;
 }
 
-export interface SimplexPayloadWasmVerifierModule {
-  verify_notarized_payload: (
-    payload: string,
+export interface SimplexWasmCertificateVerifierModule {
+  verify_notarized: (
+    payloadKind: string,
     identity: string,
     scheme: string,
     namespace: Uint8Array,
     verificationMaterial: Uint8Array,
     bytes: Uint8Array,
   ) => unknown;
-  verify_finalized_payload: (
-    payload: string,
+  verify_finalized: (
+    payloadKind: string,
     identity: string,
     scheme: string,
     namespace: Uint8Array,
@@ -132,6 +137,11 @@ export interface SimplexPayloadWasmVerifierModule {
   ) => unknown;
 }
 
+/**
+ * Adapts an application WASM check of `header` against `payload`. The check
+ * receives no verification context, so it cannot match the header's height to
+ * `context.height`.
+ */
 export function createWasmSimplexHeaderVerifier(
   module: SimplexWasmHeaderVerifierModule,
 ): SimplexHeaderVerifier {
@@ -142,6 +152,7 @@ export function createWasmSimplexHeaderVerifier(
     module.verify_header(copyBytes(payload), copyBytes(header)) === true;
 }
 
+/** Adapts an application WASM check of `header` and `body` against `payload`. */
 export function createWasmSimplexBlockVerifier(
   module: SimplexWasmBlockVerifierModule,
 ): SimplexBlockVerifier {
@@ -152,21 +163,27 @@ export function createWasmSimplexBlockVerifier(
     module.verify_block(copyBytes(payload), copyBytes(header), copyBytes(body)) === true;
 }
 
-export function createSimplexVerifier(
-  module: SimplexPayloadWasmVerifierModule,
-  options: SimplexVerifierOptions,
+/**
+ * Builds a certificate verifier from the bundled WASM module. It checks
+ * signatures and, for round reads, the signed epoch and view. `verifyHeader`
+ * must authenticate `header` against `payload` and, for height and latest
+ * reads, match the header's height to `context.height`.
+ */
+export function createWasmSimplexCertificateVerifier(
+  module: SimplexWasmCertificateVerifierModule,
+  options: SimplexCertificateVerifierOptions,
 ): SimplexCertificateVerifier<VerifiedSimplexCertificate, VerifiedSimplexCertificate> {
   const namespace = toSimplexBytes(options.namespace);
   const verificationMaterial = toSimplexBytes(options.verificationMaterial);
-  if (!module.verify_notarized_payload || !module.verify_finalized_payload) {
-    throw new Error('simplex WASM verifier missing payload support');
+  if (!module.verify_notarized || !module.verify_finalized) {
+    throw new Error('simplex WASM certificate verifier missing verify_notarized or verify_finalized');
   }
   return {
-    verifyNotarization: (bytes, context) => {
+    verifyNotarized: (bytes, context) => {
       const scheme = options.scheme;
       return normalizeAndVerifyCertificate(
-        module.verify_notarized_payload(
-          options.payload,
+        module.verify_notarized(
+          options.payloadKind,
           options.identity,
           scheme,
           copyBytes(namespace),
@@ -179,11 +196,11 @@ export function createSimplexVerifier(
         options.verifyHeader,
       );
     },
-    verifyFinalization: (bytes, context) => {
+    verifyFinalized: (bytes, context) => {
       const scheme = options.scheme;
       return normalizeAndVerifyCertificate(
-        module.verify_finalized_payload(
-          options.payload,
+        module.verify_finalized(
+          options.payloadKind,
           options.identity,
           scheme,
           copyBytes(namespace),
@@ -204,7 +221,7 @@ async function normalizeAndVerifyCertificate(
   scheme: SimplexScheme,
   raw: Uint8Array,
   context: SimplexCertificateVerificationContext,
-  verifyHeader?: SimplexHeaderVerifier,
+  verifyHeader: SimplexHeaderVerifier,
 ): Promise<VerifiedSimplexCertificate | null> {
   const certificate = normalizeVerifiedCertificate(value, scheme);
   if (!certificate) {
@@ -215,19 +232,14 @@ async function normalizeAndVerifyCertificate(
       return null;
     }
   }
-  if (verifyHeader) {
-    const verified = await verifyHeader({
-      certificate,
-      context,
-      raw: copyBytes(raw),
-      payload: copyBytes(certificate.payload),
-      header: copyBytes(certificate.header),
-    });
-    if (!verified) {
-      return null;
-    }
-  }
-  return certificate;
+  const verified = await verifyHeader({
+    certificate,
+    context,
+    raw: copyBytes(raw),
+    payload: copyBytes(certificate.payload),
+    header: copyBytes(certificate.header),
+  });
+  return verified ? certificate : null;
 }
 
 function normalizeVerifiedCertificate(

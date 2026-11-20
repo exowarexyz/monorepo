@@ -11,7 +11,7 @@ pub enum RecordKind {
     BlockByDigest = 2,
     NotarizationByRound = 3,
     FinalizationByRound = 4,
-    FinalizedByHeight = 5,
+    FinalizationByHeight = 5,
 }
 
 impl RecordKind {
@@ -50,12 +50,15 @@ pub fn finalization_by_round(round: Round) -> Key {
     round_key(RecordKind::FinalizationByRound, round)
 }
 
-pub fn finalized_by_height(height: Height) -> Key {
-    key_from_parts(RecordKind::FinalizedByHeight, &height.get().to_be_bytes())
+pub fn finalization_by_height(height: Height) -> Key {
+    key_from_parts(
+        RecordKind::FinalizationByHeight,
+        &height.get().to_be_bytes(),
+    )
 }
 
-pub fn finalized_height_from_key(key: &[u8]) -> Option<Height> {
-    let suffix = key.strip_prefix(&[RecordKind::FinalizedByHeight.as_u8()])?;
+pub fn finalization_height_from_key(key: &[u8]) -> Option<Height> {
+    let suffix = key.strip_prefix(&[RecordKind::FinalizationByHeight.as_u8()])?;
     Some(Height::new(u64::from_be_bytes(suffix.try_into().ok()?)))
 }
 
@@ -94,18 +97,18 @@ mod tests {
         );
         let height = Height::new(258);
         assert_eq!(
-            hex::encode(finalized_by_height(height)),
+            hex::encode(finalization_by_height(height)),
             "050000000000000102"
         );
         assert_eq!(
-            finalized_height_from_key(&finalized_by_height(height)),
+            finalization_height_from_key(&finalization_by_height(height)),
             Some(height)
         );
         assert_eq!(
-            finalized_height_from_key(&notarization_by_round(round)),
+            finalization_height_from_key(&notarization_by_round(round)),
             None
         );
-        let (start, end) = range_for_kind(RecordKind::FinalizedByHeight);
+        let (start, end) = range_for_kind(RecordKind::FinalizationByHeight);
         assert_eq!((start.as_ref(), end.as_ref()), (&[5u8][..], &[6u8][..]));
     }
 }

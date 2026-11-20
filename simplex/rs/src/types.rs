@@ -99,7 +99,7 @@ where
 /// A Simplex notarization plus the header bytes for its payload digest.
 #[derive(Clone, Debug)]
 pub struct Notarized<B, S: certificate::Scheme, D: Digest> {
-    pub proof: types::Notarization<S, D>,
+    pub notarization: types::Notarization<S, D>,
     pub header: B,
 }
 
@@ -110,7 +110,7 @@ where
     D: Digest,
 {
     fn eq(&self, other: &Self) -> bool {
-        self.proof == other.proof && self.header == other.header
+        self.notarization == other.notarization && self.header == other.header
     }
 }
 
@@ -128,14 +128,17 @@ where
     S: certificate::Scheme,
     D: Digest,
 {
-    pub fn new(proof: types::Notarization<S, D>, header: B) -> Result<Self, Error> {
-        if proof.proposal.payload != header.digest() {
+    pub fn new(notarization: types::Notarization<S, D>, header: B) -> Result<Self, Error> {
+        if notarization.proposal.payload != header.digest() {
             return Err(Error::Invalid(
                 "exoware_simplex::Notarized",
-                "proof payload does not match header digest",
+                "certificate payload does not match header digest",
             ));
         }
-        Ok(Self { proof, header })
+        Ok(Self {
+            notarization,
+            header,
+        })
     }
 }
 
@@ -146,7 +149,7 @@ where
     D: Digest,
 {
     fn write(&self, buf: &mut impl BufMut) {
-        self.proof.write(buf);
+        self.notarization.write(buf);
         self.header.write(buf);
     }
 }
@@ -161,8 +164,8 @@ where
     type Cfg = (<S::Certificate as Read>::Cfg, <B as Read>::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
-        let (proof, header) = <(types::Notarization<S, D>, B) as Read>::read_cfg(buf, cfg)?;
-        Self::new(proof, header)
+        let (notarization, header) = <(types::Notarization<S, D>, B) as Read>::read_cfg(buf, cfg)?;
+        Self::new(notarization, header)
     }
 }
 
@@ -173,14 +176,14 @@ where
     D: Digest,
 {
     fn encode_size(&self) -> usize {
-        self.proof.encode_size() + self.header.encode_size()
+        self.notarization.encode_size() + self.header.encode_size()
     }
 }
 
 /// A Simplex finalization plus the header bytes for its payload digest.
 #[derive(Clone, Debug)]
 pub struct Finalized<B, S: certificate::Scheme, D: Digest> {
-    pub proof: types::Finalization<S, D>,
+    pub finalization: types::Finalization<S, D>,
     pub header: B,
 }
 
@@ -191,7 +194,7 @@ where
     D: Digest,
 {
     fn eq(&self, other: &Self) -> bool {
-        self.proof == other.proof && self.header == other.header
+        self.finalization == other.finalization && self.header == other.header
     }
 }
 
@@ -209,14 +212,17 @@ where
     S: certificate::Scheme,
     D: Digest,
 {
-    pub fn new(proof: types::Finalization<S, D>, header: B) -> Result<Self, Error> {
-        if proof.proposal.payload != header.digest() {
+    pub fn new(finalization: types::Finalization<S, D>, header: B) -> Result<Self, Error> {
+        if finalization.proposal.payload != header.digest() {
             return Err(Error::Invalid(
                 "exoware_simplex::Finalized",
-                "proof payload does not match header digest",
+                "certificate payload does not match header digest",
             ));
         }
-        Ok(Self { proof, header })
+        Ok(Self {
+            finalization,
+            header,
+        })
     }
 }
 
@@ -227,7 +233,7 @@ where
     D: Digest,
 {
     fn write(&self, buf: &mut impl BufMut) {
-        self.proof.write(buf);
+        self.finalization.write(buf);
         self.header.write(buf);
     }
 }
@@ -242,8 +248,8 @@ where
     type Cfg = (<S::Certificate as Read>::Cfg, <B as Read>::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
-        let (proof, header) = <(types::Finalization<S, D>, B) as Read>::read_cfg(buf, cfg)?;
-        Self::new(proof, header)
+        let (finalization, header) = <(types::Finalization<S, D>, B) as Read>::read_cfg(buf, cfg)?;
+        Self::new(finalization, header)
     }
 }
 
@@ -254,7 +260,7 @@ where
     D: Digest,
 {
     fn encode_size(&self) -> usize {
-        self.proof.encode_size() + self.header.encode_size()
+        self.finalization.encode_size() + self.header.encode_size()
     }
 }
 
@@ -264,7 +270,7 @@ pub struct UploadSummary {
     pub blocks: usize,
     pub notarizations: usize,
     pub finalizations: usize,
-    pub finalized_height_indexes: usize,
+    pub finalization_height_indexes: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
