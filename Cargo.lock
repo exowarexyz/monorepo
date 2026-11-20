@@ -2050,9 +2050,9 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "crypto-bigint"
-version = "0.7.5"
+version = "0.7.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a52aa3fcda4e6302a9f48734f234d35d4721b96f8fe07d073f07ce9df4f0271"
+checksum = "914c195c4d7fbc5ed7f88d14cbf85914d5c664967658d43404b263913a477e82"
 dependencies = [
  "cpubits",
  "ctutils",
@@ -2108,9 +2108,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.2"
+version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
+checksum = "261af4dc7a06ea8a527a8717d8cbba3417530d6ea14e1edb3de6b67806be474f"
 dependencies = [
  "cmov",
  "subtle",
@@ -3067,7 +3067,7 @@ dependencies = [
 
 [[package]]
 name = "exoware-integration"
-version = "2026.9.0"
+version = "2026.11.0"
 dependencies = [
  "axum",
  "bytes",
@@ -3091,7 +3091,7 @@ dependencies = [
 
 [[package]]
 name = "exoware-qmdb"
-version = "2026.9.0"
+version = "2026.11.0"
 dependencies = [
  "axum",
  "buffa",
@@ -3130,7 +3130,7 @@ dependencies = [
 
 [[package]]
 name = "exoware-qmdb-wasm"
-version = "2026.9.0"
+version = "2026.11.0"
 dependencies = [
  "buffa",
  "commonware-codec",
@@ -3147,7 +3147,7 @@ dependencies = [
 
 [[package]]
 name = "exoware-sdk"
-version = "2026.9.0"
+version = "2026.11.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3184,7 +3184,7 @@ dependencies = [
 
 [[package]]
 name = "exoware-server"
-version = "2026.9.0"
+version = "2026.11.0"
 dependencies = [
  "axum",
  "buffa",
@@ -3213,7 +3213,7 @@ dependencies = [
 
 [[package]]
 name = "exoware-simplex"
-version = "2026.9.0"
+version = "2026.11.0"
 dependencies = [
  "bytes",
  "clap",
@@ -3239,7 +3239,7 @@ dependencies = [
 
 [[package]]
 name = "exoware-simplex-wasm"
-version = "2026.9.0"
+version = "2026.11.0"
 dependencies = [
  "commonware-codec",
  "commonware-coding",
@@ -3257,7 +3257,7 @@ dependencies = [
 
 [[package]]
 name = "exoware-simulator"
-version = "2026.9.0"
+version = "2026.11.0"
 dependencies = [
  "axum",
  "buffa",
@@ -3284,7 +3284,7 @@ dependencies = [
 
 [[package]]
 name = "exoware-sql"
-version = "2026.9.0"
+version = "2026.11.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -3313,7 +3313,7 @@ dependencies = [
 
 [[package]]
 name = "exoware-validation"
-version = "2026.9.0"
+version = "2026.11.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -7325,13 +7325,14 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "wnaf"
-version = "0.14.0"
+version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab12e7090f27e2ffd9322651492942d50c2926094af30601e1964337db39daf1"
+checksum = "795ca18b3fdb5e62bf982199278341ddcf7ebf7d32e25e212ad05d496e95f6fa"
 dependencies = [
  "ff",
  "group",
  "hybrid-array",
+ "primefield",
 ]
 
 [[package]]
