@@ -31,9 +31,9 @@ use std::{fmt::Debug, num::NonZeroU64, sync::Arc};
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
 
-/// One uploaded state of the source database. A database without current state uploads the
-/// range proof and pins in `range`. A current database uploads `publication`, verified against
-/// its own root.
+/// One uploaded state of the source database. A database without current state uploads its new
+/// operations as a range built from the proof and pins in `range`. A current database uploads
+/// `publication`, verified against its own root.
 struct Snapshot<F: Graftable, K: QmdbKey, E: ValueEncoding> {
     start: Location<F>,
     range: Option<(Proof<F, Digest>, Vec<Digest>)>,
@@ -122,6 +122,9 @@ async fn check_mirror<F, K, V, E>(
                 prepare_publication::<F, Sha256, _, _, N>(&decoded, &publication.root, &Sequential)
                     .expect("publication must prepare")
             }
+
+            // Without current state, the new operations and the range's pins are authenticated
+            // against the source's operation-log root.
             None => {
                 let (proof, pinned_nodes) = snapshot
                     .range

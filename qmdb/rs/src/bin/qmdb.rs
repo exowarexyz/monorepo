@@ -210,8 +210,9 @@ async fn seed(
             .await
             .expect("init local ordered db");
 
-            // A new database's initial commit belongs to no batch, so upload its publication
-            // before the first batch.
+            // A new database's initial commit belongs to no batch, so it has a publication of its
+            // own. Every upload publishes a watermark, and every watermark covers location 0, so
+            // this publication is uploaded first.
             let end = source_db.bounds().end;
             if end == Location::new(1) {
                 let initial = Publication::initial(&source_db)

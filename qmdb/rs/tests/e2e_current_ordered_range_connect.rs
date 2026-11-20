@@ -166,7 +166,7 @@ fn latest_inactivity_floor(operations: &[BatchOperation]) -> Location<mmr::Famil
             BatchOperation::Commit(_, floor) => Some(*floor),
             _ => None,
         })
-        .expect("batch has Commit")
+        .expect("operations must contain a commit")
 }
 
 async fn build_source_batch() -> SourceBatch {
@@ -248,7 +248,7 @@ fn latest_mmb_inactivity_floor(operations: &[MmbBatchOperation]) -> Location<mmb
             MmbBatchOperation::Commit(_, floor) => Some(*floor),
             _ => None,
         })
-        .expect("batch has Commit")
+        .expect("operations must contain a commit")
 }
 
 async fn build_mmb_source_batch() -> MmbSourceBatch {

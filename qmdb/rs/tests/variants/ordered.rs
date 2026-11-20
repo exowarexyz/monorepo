@@ -345,6 +345,9 @@ async fn verify_snapshots<F, K, V, E>(
                     snapshot.root
                 );
             }
+
+            // Without current state, the packet's operations and pins are authenticated against the
+            // source's operation-log root.
             None => {
                 let packet = snapshot
                     .packet

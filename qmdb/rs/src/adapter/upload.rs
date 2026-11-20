@@ -1,28 +1,38 @@
 //! Prepare Store rows for Commonware QMDB uploads.
 //!
-//! [`prepare_authenticated_range`] and [`prepare_publication`] each check their input against a
-//! trusted root before they prepare any row, and [`prepare_publication`] adds the batch's
-//! current-state rows. [`stage_authenticated_range`] adds prepared rows to a Store write batch,
-//! and [`stage_watermark`] adds the watermark that makes the durable prefix visible to readers.
-//! Nothing here reads the Store or keeps state between calls.
+//! An upload starts at [`prepare_authenticated_range`] or [`prepare_publication`]. Each
+//! authenticates its operations against a trusted root before it prepares any row, and
+//! [`prepare_publication`] adds the batch's current-state rows. [`stage_authenticated_range`] adds
+//! prepared rows to a Store write batch, and [`stage_watermark`] adds the watermark that makes the
+//! durable prefix visible to readers. The application commits the batch. Nothing here reads the
+//! Store or keeps state between calls.
 //!
 //! ```text
-//!     AuthenticatedOperationRange                           Publication
-//!   and a trusted operation-log root                 and a trusted current root
-//!                  |                                             |
-//!     prepare_authenticated_range                       prepare_publication
-//!                  |                                             |
-//!                  '--------> PreparedAuthenticatedRange <-------'
-//!                                         |
-//!                             stage_authenticated_range                      watermark
-//!                                         |                                      |
-//!                                         v                               stage_watermark
-//!                                  StoreWriteBatch <-----------------------------'
+//!     AuthenticatedOperationRange                          Publication
+//!  and a trusted operation-log root                and a trusted current root
+//!                  |                                            |
+//!                  v                                            v
+//!   +-----------------------------+                  +---------------------+
+//!   | prepare_authenticated_range |                  | prepare_publication |
+//!   +-----------------------------+                  +---------------------+
+//!                  |                                            |
+//!                  +-------> PreparedAuthenticatedRange <-------+
+//!                                         |                                 watermark
+//!                                         |                                     |
+//!                                         v                                     v
+//!                           +---------------------------+              +-----------------+
+//!                           | stage_authenticated_range |              | stage_watermark |
+//!                           +---------------------------+              +-----------------+
+//!                                         |                                     |
+//!                                         v                                     |
+//!                                  StoreWriteBatch <----------------------------+
 //! ```
 //!
-//! Ranges may overlap and contain several commits, and every upload to a namespace must belong
-//! to the same operation history, so repeated operation and Merkle node keys carry identical
-//! values and any upload can be retried.
+//! Uploads may overlap, and an authenticated operation range may contain several commits. Every
+//! upload to a namespace must belong to the same operation history, so a repeated operation or
+//! operation-log node key always carries the same value and a range can be uploaded again. Retry a
+//! publication's upload from the same [`Publication`]. One rebuilt after the source prunes can
+//! carry a different pruned chunk count, and the Store expects one value per key.
 
 use crate::{
     adapter::{
@@ -227,9 +237,9 @@ impl<F: Graftable, D: Digest, U: Update, const N: usize> Publication<F, D, U, N>
 where
     AnyOperation<F, U>: Codec,
 {
-    /// Build `batch`'s publication from the batch and `db`. Call this before applying `batch`, so
-    /// a later flush cannot discard frontier nodes it needs. Nodes appended by unapplied
-    /// ancestors come from records `batch` kept when it was merkleized.
+    /// Build `batch`'s publication, reading from `db` the frontier nodes below the batch's chain.
+    /// Call this before applying `batch`, because a flush after the apply can discard those nodes.
+    /// Nodes appended by unapplied ancestors come from `batch`.
     pub fn from_batch<E, C, I, H, S>(
         batch: &MerkleizedBatch<F, D, U, N, S>,
         db: &Db<F, E, C, I, H, U, N, S>,
@@ -255,8 +265,10 @@ where
         })
     }
 
-    /// Build the publication of a new database's initial commit. No batch includes that commit,
-    /// so upload this publication before the one of the database's first batch.
+    /// Build the publication of a new database's initial commit. No batch includes that commit, so
+    /// it needs a publication of its own. `db` must hold only that commit. Every watermark covers
+    /// location 0, so this publication's rows must be durable by the time the first watermark is
+    /// published.
     pub fn initial<E, C, I, H, S>(db: &Db<F, E, C, I, H, U, N, S>) -> Result<Self, QmdbError>
     where
         E: Context,
@@ -418,9 +430,9 @@ where
             kind: ProofKind::Publication,
         });
     }
-    let mut prepared = prepare_rows(&authenticated, extension, operations)?;
 
-    // Add the current-state rows at the range's final location.
+    // Prepare the range's rows, then add the current-state rows at its final location.
+    let mut prepared = prepare_rows(&authenticated, extension, operations)?;
     let latest_location = prepared.latest_location;
     let rows = &mut prepared.rows;
     rows.reserve(2 + publication.chunks.len() + publication.grafted_nodes.len());
@@ -444,8 +456,10 @@ where
         ));
     }
 
-    // `grafting::ops_to_grafted_pos` panics for a node below the grafting height, and its position
-    // arithmetic assumes a position within the node limit. A node that breaks either is rejected.
+    // `grafting::ops_to_grafted_pos` panics for a node below the grafting height, and its
+    // arithmetic assumes a position within the family's node limit. A publication can carry any
+    // position, so a node below that height, or less than two positions below the limit, is
+    // rejected before the conversion.
     let grafting_height = grafting::height::<N>();
     for &(ops_position, digest) in &publication.grafted_nodes {
         if ops_position.checked_add(2).is_none() {
@@ -520,9 +534,9 @@ where
     )
 }
 
-/// Prepare the operation, index, and Merkle node rows of a range whose rebuilt root the caller
-/// has checked against its trusted root. `operations` are the range's canonical encodings,
-/// decoded, in order. The range's shape was validated when it was reconstructed.
+/// Prepare the operation, index, Merkle node, and presence rows of a range. `extension` must be
+/// what [`reconstruct_range`] returned for `authenticated`, with its root already authenticated.
+/// `operations` must hold the decoding of each of `authenticated.encoded_operations`, in order.
 fn prepare_rows<F, D, Op>(
     authenticated: &AuthenticatedOperationRange<'_, D, F>,
     extension: MerkleExtension<F, D>,
@@ -1113,7 +1127,9 @@ mod tests {
                 batches.push(staged);
             }
 
-            // Admitted predecessors can finish last, so the watermark waits for all prefix data
+            // Merge the staged batches out of order. Their union must equal the rows staged without
+            // omission and hold no watermark for location 12. That watermark is staged after every
+            // batch is merged.
             let client = PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:1"));
             let latest = Location::<F>::new(12);
             let mut durable = BTreeMap::new();
@@ -1129,7 +1145,8 @@ mod tests {
             }
             assert!(durable.contains_key(&encode_watermark_key(latest)));
 
-            // Reconstruct the retained Store frontier to serve a proof after the watermark
+            // The durable rows rebuild the Merkle structure from the bootstrap start. It must have
+            // the final root and frontier, and its range proof must verify with the bootstrap pins.
             let end = Location::new(encoded.len() as u64);
             let start_size = Position::try_from(bootstrap.start_location).unwrap();
             let end_size = Position::try_from(end).unwrap();
@@ -1263,6 +1280,7 @@ mod tests {
         assert_parallel_preparation::<mmb::Family>();
     }
 
+    /// A publication whose operations, chunks, and grafted nodes exactly fill `codec_cfg`'s limits.
     fn codec_publication<F: Graftable>() -> CodecPublication<F>
     where
         F::PendingChunk<Sha256Digest>: Default,
@@ -1293,6 +1311,7 @@ mod tests {
         }
     }
 
+    /// Decoding limits equal to the vector lengths of `codec_publication`.
     fn codec_cfg() -> PublicationCfg<()> {
         PublicationCfg {
             operation: (),
@@ -1302,6 +1321,8 @@ mod tests {
         }
     }
 
+    /// A publication of family `F` round-trips at the limits of `codec_cfg`. Decoding fails when
+    /// any vector limit is lowered or a frontier pin is added.
     fn publication_codec_round_trips_and_enforces_limits<F: Graftable>()
     where
         F::PendingChunk<Sha256Digest>: Default,
@@ -1343,6 +1364,7 @@ mod tests {
         ));
     }
 
+    /// The publication codec round-trips and enforces its limits for MMR and MMB.
     #[test]
     fn test_publication_codec_round_trips_and_enforces_limits() {
         publication_codec_round_trips_and_enforces_limits::<mmr::Family>();
@@ -1413,8 +1435,12 @@ mod tests {
         );
     }
 
+    /// Staging a range adds its rows under the client's namespace without adding a watermark at its
+    /// final location. Staging that watermark appends one row with an empty value, and staging
+    /// `MAX_LEAVES` fails without changing the batch.
     #[test]
     fn test_staging_keeps_watermark_explicit_and_uses_the_client_namespace() {
+        // Prepare a committed range and a client under a namespace prefix.
         let operations = committed_encoded_operations::<mmr::Family>();
         let prepared = authenticated_range_fixture::<mmr::Family>(&operations, 0, 0)
             .prepare()
@@ -1423,7 +1449,8 @@ mod tests {
         let client = StoreClient::new("http://127.0.0.1:1")
             .prefixed(StoreKeyPrefix::new(b"authenticated-range/".to_vec()).expect("prefix"));
 
-        // Staging the range writes its presence row under the client's prefix and no watermark.
+        // Every staged row lies in the client's namespace. The range's presence row is among them,
+        // and the watermark for its final location is not.
         let mut batch = StoreWriteBatch::new();
         stage_authenticated_range(&client, prepared, &mut batch).expect("stage range");
         let mut has_boundary = false;
@@ -1434,9 +1461,9 @@ mod tests {
         }
         assert!(has_boundary);
 
-        // Staging the watermark adds exactly one empty row after the data rows.
+        // Staging the watermark appends exactly one row, with an empty value, after the data rows.
         let data_rows = batch.len();
-        stage_watermark(&client, latest, &mut batch).expect("stage watermark");
+        stage_watermark(&client, latest, &mut batch).expect("watermark must stage");
         let watermark = &batch.entries()[data_rows..];
         assert_eq!(watermark.len(), 1);
         assert_eq!(
