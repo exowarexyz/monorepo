@@ -13,10 +13,7 @@ use commonware_codec::{Encode, EncodeSize, Write as CodecWrite};
 use commonware_cryptography::Digest;
 use commonware_storage::{
     merkle::Graftable,
-    qmdb::{
-        any::{ordered, value::ValueEncoding},
-        operation::Key as QmdbKey,
-    },
+    qmdb::{any::ordered, operation::Key as QmdbKey, value::ValueEncoding},
 };
 use connectrpc::PreEncoded;
 

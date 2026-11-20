@@ -14,9 +14,10 @@ use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::Graftable,
     qmdb::{
-        any::{ordered, value::ValueEncoding},
+        any::ordered,
         current::{ordered::proof::constant::ExclusionProof, proof::constant::OperationProof},
         operation::{Key as QmdbKey, Operation},
+        value::ValueEncoding,
     },
 };
 

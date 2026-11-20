@@ -19,12 +19,10 @@ use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::{Graftable, Location},
     qmdb::{
-        any::{
-            unordered,
-            value::{ValueEncoding, VariableEncoding},
-        },
+        any::unordered,
         operation::Key as QmdbKey,
         sync::Target as SyncTarget,
+        value::{ValueEncoding, VariableEncoding},
     },
 };
 use commonware_utils::range::NonEmptyRange;
