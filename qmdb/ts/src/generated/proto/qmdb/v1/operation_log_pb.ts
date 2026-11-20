@@ -114,7 +114,8 @@ export type GetOperationRangeRequest = Message<"qmdb.v1.GetOperationRangeRequest
   maxLocations: number;
 
   /**
-   * Minimum Store sequence for checking publication of the requested watermark.
+   * Minimum Store sequence for checking that the published watermark covers
+   * the requested tip.
    *
    * @generated from field: optional uint64 min_sequence_number = 4;
    */
@@ -163,7 +164,8 @@ export type GetOperationsRequest = Message<"qmdb.v1.GetOperationsRequest"> & {
   locations: bigint[];
 
   /**
-   * Minimum Store sequence for checking publication of the requested watermark.
+   * Minimum Store sequence for checking that the published watermark covers
+   * the requested tip.
    *
    * @generated from field: optional uint64 min_sequence_number = 3;
    */

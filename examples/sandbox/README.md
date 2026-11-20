@@ -126,7 +126,7 @@ With the simulator running:
    - **Subscribe** displays each streamed operation-log proof with its tip and
      decoded operations. These streamed proofs are not verified against a
      trusted root.
-   - **Get Proof** verifies a current key/value proof against the supplied root.
+   - **Get** verifies a key's current value against the supplied root.
    - **Get Many** verifies current hit/miss lookup proofs against that root.
    - **Get Range** verifies an ordered current range and its start boundary
      proof against that root.

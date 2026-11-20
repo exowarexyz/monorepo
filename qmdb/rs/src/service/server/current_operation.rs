@@ -2,7 +2,7 @@
 
 use super::{encode, qmdb_error_to_connect};
 use crate::{
-    proof::CurrentOperationRangeProofResult,
+    proof::CurrentOperationRangeProof,
     service::proto::qmdb::v1::{
         CurrentOperationService, GetCurrentOperationRangeRequest, GetCurrentOperationRangeResponse,
     },
@@ -19,15 +19,15 @@ pub(crate) trait CurrentOperationReader<const N: usize>: Send + Sync + 'static {
     type Digest: commonware_cryptography::Digest;
     type Operation: commonware_codec::Codec;
 
-    fn current_operation_range(
+    fn current_operation_range_proof(
         &self,
-        watermark: Location<Self::Family>,
+        tip: Location<Self::Family>,
         start_location: Location<Self::Family>,
         max_locations: u32,
         min_sequence_number: Option<u64>,
     ) -> impl Future<
         Output = Result<
-            CurrentOperationRangeProofResult<Self::Digest, Self::Operation, N, Self::Family>,
+            CurrentOperationRangeProof<Self::Digest, Self::Operation, N, Self::Family>,
             QmdbError,
         >,
     > + Send;
@@ -66,7 +66,7 @@ where
         let reader = self.reader.clone();
         async move {
             let proof = reader
-                .current_operation_range(
+                .current_operation_range_proof(
                     Location::new(request.tip),
                     Location::new(request.start_location),
                     request.max_locations,

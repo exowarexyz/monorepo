@@ -8,14 +8,14 @@ use super::{
 use crate::{
     adapter::Ordered,
     proof::{
-        CurrentOperationRangeProofResult, MultiProofOperations, OperationRangeCheckpoint,
-        RawBatchMultiProof, RawKeyLookupProof, RawKeyRangeProof, RawKeyValueProof,
+        CurrentOperationRangeProof, KeyLookupProof, KeyRangeProof, KeyValueProof,
+        MultiProofOperations, OperationMultiProof, OperationRangeProof,
     },
     service::proto::qmdb::v1::{
         CurrentOperationServiceServer, KeyLookupServiceServer, OperationLogServiceServer,
         OrderedKeyRangeServiceServer,
     },
-    PublishedWatermark, QmdbError,
+    QmdbError, ResolvedTip,
 };
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::Hasher;
@@ -51,34 +51,33 @@ where
         Self::inspect_operation_kv(self, location, bytes, inspect)
     }
 
-    fn resolve_watermark(
+    fn resolve_tip(
         &self,
-        watermark: Location<F>,
+        tip: Location<F>,
         min_sequence_number: Option<u64>,
-    ) -> impl Future<Output = Result<PublishedWatermark<F>, QmdbError>> + Send {
-        Self::resolve_watermark(self, watermark, min_sequence_number)
+    ) -> impl Future<Output = Result<ResolvedTip<F>, QmdbError>> + Send {
+        Self::resolve_tip(self, tip, min_sequence_number)
     }
 
     fn observe_published(&self, location: Location<F>, sequence: u64) {
         Self::observe_published(self, location, sequence)
     }
 
-    fn operation_range_checkpoint_at(
+    fn operation_range_proof_at(
         &self,
-        watermark: PublishedWatermark<F>,
+        resolved: ResolvedTip<F>,
         start_location: Location<F>,
         max_locations: u32,
-    ) -> impl Future<Output = Result<OperationRangeCheckpoint<Self::Digest, F>, QmdbError>> + Send
-    {
-        Self::operation_range_checkpoint_at(self, watermark, start_location, max_locations)
+    ) -> impl Future<Output = Result<OperationRangeProof<Self::Digest, F>, QmdbError>> + Send {
+        Self::operation_range_proof_at(self, resolved, start_location, max_locations)
     }
 
-    fn multi_proof_at(
+    fn operation_multi_proof_at(
         &self,
-        watermark: PublishedWatermark<F>,
+        resolved: ResolvedTip<F>,
         operations: MultiProofOperations<'_, F>,
-    ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest, F>, QmdbError>> + Send {
-        Self::multi_proof_at(self, watermark, operations)
+    ) -> impl Future<Output = Result<OperationMultiProof<Self::Digest, F>, QmdbError>> + Send {
+        Self::operation_multi_proof_at(self, resolved, operations)
     }
 }
 
@@ -95,21 +94,18 @@ where
     type Digest = H::Digest;
     type Operation = ordered::Operation<F, K, E>;
 
-    fn current_operation_range(
+    fn current_operation_range_proof(
         &self,
-        watermark: Location<F>,
+        tip: Location<F>,
         start_location: Location<F>,
         max_locations: u32,
         min_sequence_number: Option<u64>,
     ) -> impl Future<
-        Output = Result<
-            CurrentOperationRangeProofResult<Self::Digest, Self::Operation, N, F>,
-            QmdbError,
-        >,
+        Output = Result<CurrentOperationRangeProof<Self::Digest, Self::Operation, N, F>, QmdbError>,
     > + Send {
-        Self::current_operation_range_raw(
+        Self::current_operation_range_proof(
             self,
-            watermark,
+            tip,
             start_location,
             max_locations,
             min_sequence_number,
@@ -131,16 +127,16 @@ where
     type Digest = H::Digest;
     type Key = K;
     type Operation = ordered::Operation<F, K, E>;
-    type Lookup = RawKeyLookupProof<H::Digest, K, V, N, F, E>;
+    type Lookup = KeyLookupProof<H::Digest, K, V, N, F, E>;
 
     fn key_value_proof(
         &self,
         tip: Location<F>,
         key: &K,
         min_sequence_number: Option<u64>,
-    ) -> impl Future<Output = Result<RawKeyValueProof<Self::Digest, Self::Operation, N, F>, QmdbError>>
-           + Send {
-        Self::get_raw(self, tip, key.as_ref(), min_sequence_number)
+    ) -> impl Future<Output = Result<KeyValueProof<Self::Digest, Self::Operation, N, F>, QmdbError>> + Send
+    {
+        Self::get_proof(self, tip, key, min_sequence_number)
     }
 
     fn key_lookup_proofs(
@@ -149,7 +145,7 @@ where
         keys: &[K],
         min_sequence_number: Option<u64>,
     ) -> impl Future<Output = Result<Vec<Self::Lookup>, QmdbError>> + Send {
-        Self::get_many_raw(self, tip, keys, min_sequence_number)
+        Self::get_many_proofs(self, tip, keys, min_sequence_number)
     }
 }
 
@@ -176,9 +172,9 @@ where
         end_key: Option<K>,
         limit: u32,
         min_sequence_number: Option<u64>,
-    ) -> impl Future<Output = Result<RawKeyRangeProof<H::Digest, K, V, N, F, E>, QmdbError>> + Send
+    ) -> impl Future<Output = Result<KeyRangeProof<H::Digest, K, V, N, F, E>, QmdbError>> + Send
     {
-        Self::get_range_raw(self, tip, start_key, end_key, limit, min_sequence_number)
+        Self::get_range_proof(self, tip, start_key, end_key, limit, min_sequence_number)
     }
 }
 
@@ -192,7 +188,7 @@ pub fn ordered_stack<
     const N: usize,
     E: ValueEncoding<Value = V> + Send + Sync + 'static,
 >(
-    raw_store: PrefixedStoreClient,
+    store: PrefixedStoreClient,
     op_cfg: <ordered::Operation<F, K, E> as Read>::Cfg,
     key_cfg: K::Cfg,
 ) -> ConnectRpcService<impl ::connectrpc::Dispatcher>
@@ -201,7 +197,7 @@ where
     ExclusionProof<F, K, E, H::Digest, N>: Encode,
 {
     let reader = Arc::new(Ordered::<F, H, K, V, N, E>::new(
-        raw_store.clone(),
+        store.clone(),
         op_cfg,
         key_cfg.clone(),
     ));
@@ -216,7 +212,7 @@ where
                 CurrentOperationServiceServer::new(CurrentOperationServer::<_, N>::new(
                     reader.clone(),
                 )),
-                OperationLogServiceServer::new(OperationLogServer::new(reader, raw_store)),
+                OperationLogServiceServer::new(OperationLogServer::new(reader, store)),
             ),
         ),
     ))
@@ -231,7 +227,7 @@ pub fn ordered_operation_log_stack<
     const N: usize,
     E: ValueEncoding<Value = V> + Send + Sync + 'static,
 >(
-    raw_store: PrefixedStoreClient,
+    store: PrefixedStoreClient,
     op_cfg: <ordered::Operation<F, K, E> as Read>::Cfg,
     key_cfg: K::Cfg,
 ) -> ConnectRpcService<impl ::connectrpc::Dispatcher>
@@ -239,11 +235,11 @@ where
     ordered::Operation<F, K, E>: Encode + Decode,
 {
     let reader = Arc::new(Ordered::<F, H, K, V, N, E>::new(
-        raw_store.clone(),
+        store.clone(),
         op_cfg,
         key_cfg,
     ));
     super::stack(OperationLogServiceServer::new(OperationLogServer::new(
-        reader, raw_store,
+        reader, store,
     )))
 }

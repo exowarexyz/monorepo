@@ -23,6 +23,7 @@ use commonware_storage::{
     },
 };
 use connectrpc::client::{ClientConfig, ClientTransport};
+use exoware_sdk::proto::PreferZstdHttpClient;
 use http_body::Body;
 use std::{fmt::Display, marker::PhantomData, sync::Arc};
 
@@ -67,6 +68,42 @@ where
             value_cfg: self.value_cfg.clone(),
             _marker: PhantomData,
         }
+    }
+}
+
+impl<F, H, K, V, const N: usize, E> KeyRangeClient<PreferZstdHttpClient, F, H, K, V, N, E>
+where
+    F: Graftable,
+    H: Hasher,
+    H::Digest: DecodeExt<()>,
+    K: QmdbKey + commonware_codec::Codec,
+    V: commonware_codec::Codec + Clone + Send + Sync,
+    E: ValueEncoding<Value = V>,
+    ordered::Operation<F, K, E>: Decode + Encode + Read,
+    ordered::Update<K, E>: Read,
+    ExclusionProof<F, K, E, H::Digest, N>:
+        Read<Cfg = (usize, <ordered::Update<K, E> as Read>::Cfg, V::Cfg)>,
+{
+    /// Client for the endpoint at `base` over plaintext HTTP.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `base` is not a valid URI.
+    pub fn plaintext(
+        base: &str,
+        op_cfg: <ordered::Operation<F, K, E> as Read>::Cfg,
+        update_cfg: <ordered::Update<K, E> as Read>::Cfg,
+        key_cfg: K::Cfg,
+        value_cfg: V::Cfg,
+    ) -> Self {
+        Self::new(
+            PreferZstdHttpClient::plaintext(),
+            ClientConfig::new(base.parse().expect("qmdb uri")),
+            op_cfg,
+            update_cfg,
+            key_cfg,
+            value_cfg,
+        )
     }
 }
 

@@ -17,7 +17,7 @@ pub use current_operation::CurrentOperationClient;
 use exoware_sdk::ClientError;
 pub use key_lookup::{KeyLookupClient, LookupVerifier};
 pub use key_range::KeyRangeClient;
-pub use operation_log::{OperationLogClient, OperationLogSubscribeProof, OperationLogSubscription};
+pub use operation_log::{OperationLogClient, OperationLogSubscription, VerifiedSubscribeFrame};
 
 pub(crate) fn connect_error_to_qmdb(err: ConnectError) -> QmdbError {
     QmdbError::Client(ClientError::Rpc(Box::new(err)))

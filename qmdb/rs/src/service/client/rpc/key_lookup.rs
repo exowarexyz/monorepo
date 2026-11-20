@@ -10,6 +10,7 @@ use crate::{
 };
 use bytes::Bytes;
 use connectrpc::client::{ClientConfig, ClientTransport};
+use exoware_sdk::proto::PreferZstdHttpClient;
 use http_body::Body;
 use std::{collections::BTreeSet, fmt::Display, sync::Arc};
 
@@ -52,6 +53,21 @@ impl<T: Clone, L> Clone for KeyLookupClient<T, L> {
             rpc: self.rpc.clone(),
             verifier: self.verifier.clone(),
         }
+    }
+}
+
+impl<L: LookupVerifier> KeyLookupClient<PreferZstdHttpClient, L> {
+    /// Client for the endpoint at `base` over plaintext HTTP.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `base` is not a valid URI.
+    pub fn plaintext(base: &str, verifier: L) -> Self {
+        Self::new(
+            PreferZstdHttpClient::plaintext(),
+            ClientConfig::new(base.parse().expect("qmdb uri")),
+            verifier,
+        )
     }
 }
 

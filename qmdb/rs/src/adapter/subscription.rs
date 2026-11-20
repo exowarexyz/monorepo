@@ -18,11 +18,11 @@ pub(crate) enum RowFamily {
 }
 
 pub(crate) async fn open_store_subscription(
-    client: &PrefixedStoreClient,
+    store: &PrefixedStoreClient,
     filter: StreamFilter,
     since: Option<u64>,
 ) -> Result<StreamSubscription, QmdbError> {
-    client
+    store
         .stream()
         .subscribe(filter, since)
         .await
@@ -45,7 +45,7 @@ pub(crate) fn classify_row<F: Family>(key: &Key) -> Option<(RowFamily, Location<
     None
 }
 
-/// Select operation and publication rows from a QMDB historical log.
+/// Select operation and watermark rows from a QMDB historical log.
 pub(crate) fn row_filter() -> StreamFilter {
     let payload_regex = Utf8::from("(?s-u)^.{8}$");
     StreamFilter {

@@ -7,13 +7,13 @@ use super::rpc::{
 };
 use crate::{
     proof::{
-        VerifiedCurrentRange, VerifiedKeyLookup, VerifiedKeyRange, VerifiedKeyValue,
-        VerifiedOperationRange,
+        VerifiedCurrentOperationRange, VerifiedKeyLookup, VerifiedKeyRange, VerifiedKeyValue,
+        VerifiedOperationRange, VerifiedOperations,
     },
     service::proto::qmdb::v1::{
         current_key_lookup_result, CurrentKeyLookupResult, CurrentKeyValueProof,
-        GetCurrentOperationRangeRequest, GetManyRequest, GetOperationRangeRequest, GetRangeRequest,
-        GetRequest, SubscribeRequest,
+        GetCurrentOperationRangeRequest, GetManyRequest, GetOperationRangeRequest,
+        GetOperationsRequest, GetRangeRequest, GetRequest, SubscribeRequest,
     },
     QmdbError,
 };
@@ -108,7 +108,7 @@ where
         };
         if update.key != *requested_key {
             return Err(QmdbError::ProofVerification {
-                kind: crate::ProofKind::CurrentKeyValue,
+                kind: crate::ProofKind::KeyValue,
             });
         }
         Ok(verified)
@@ -151,7 +151,7 @@ where
     ) -> Result<Vec<Self::Lookup>, QmdbError> {
         if results.len() != requested_keys.len() {
             return Err(QmdbError::ProofVerification {
-                kind: crate::ProofKind::CurrentKeyValue,
+                kind: crate::ProofKind::KeyValue,
             });
         }
         results
@@ -223,6 +223,11 @@ where
     ExclusionProof<F, K, E, H::Digest, N>:
         Read<Cfg = (usize, <ordered::Update<K, E> as Read>::Cfg, V::Cfg)>,
 {
+    /// Client for the endpoint at `base` over plaintext HTTP.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `base` is not a valid URI.
     pub fn plaintext(
         base: &str,
         op_cfg: <ordered::Operation<F, K, E> as Read>::Cfg,
@@ -293,13 +298,13 @@ where
         }
     }
 
-    /// Verified current-state proof for `key` at `tip`.
+    /// Verified current-state value for `key` at `tip`.
     pub async fn get(
         &self,
         tip: Location<F>,
         key: &K,
         min_sequence_number: Option<u64>,
-        root: &H::Digest,
+        expected_root: &H::Digest,
     ) -> Result<VerifiedKeyValue<H::Digest, ordered::Operation<F, K, E>, F>, QmdbError> {
         self.key_lookup
             .get(
@@ -309,7 +314,7 @@ where
                     min_sequence_number,
                     ..Default::default()
                 },
-                root,
+                expected_root,
             )
             .await
     }
@@ -321,7 +326,7 @@ where
         tip: Location<F>,
         keys: &[K],
         min_sequence_number: Option<u64>,
-        root: &H::Digest,
+        expected_root: &H::Digest,
     ) -> Result<Vec<VerifiedKeyLookup<H::Digest, K, V, F, E>>, QmdbError> {
         self.key_lookup
             .get_many(
@@ -331,7 +336,7 @@ where
                     min_sequence_number,
                     ..Default::default()
                 },
-                root,
+                expected_root,
             )
             .await
     }
@@ -345,7 +350,7 @@ where
         end_key: Option<K>,
         limit: u32,
         min_sequence_number: Option<u64>,
-        root: &H::Digest,
+        expected_root: &H::Digest,
     ) -> Result<VerifiedKeyRange<H::Digest, K, V, F, E>, QmdbError> {
         self.key_range
             .get_range(
@@ -357,7 +362,7 @@ where
                     min_sequence_number,
                     ..Default::default()
                 },
-                root,
+                expected_root,
             )
             .await
     }
@@ -370,10 +375,13 @@ where
         start_location: Location<F>,
         max_locations: u32,
         min_sequence_number: Option<u64>,
-        root: &H::Digest,
-    ) -> Result<VerifiedCurrentRange<H::Digest, ordered::Operation<F, K, E>, N, F>, QmdbError> {
+        expected_root: &H::Digest,
+    ) -> Result<
+        VerifiedCurrentOperationRange<H::Digest, ordered::Operation<F, K, E>, N, F>,
+        QmdbError,
+    > {
         self.current_operation
-            .get_current_operation_range(
+            .current_operation_range(
                 GetCurrentOperationRangeRequest {
                     tip: tip.as_u64(),
                     start_location: start_location.as_u64(),
@@ -381,19 +389,21 @@ where
                     min_sequence_number,
                     ..Default::default()
                 },
-                root,
+                expected_root,
             )
             .await
     }
 
     /// Commonware sync target for `range`, authenticated against the trusted
-    /// current `root`.
+    /// current `expected_root`.
     pub async fn current_sync_target(
         &self,
         range: NonEmptyRange<Location<F>>,
-        root: &H::Digest,
+        expected_root: &H::Digest,
     ) -> Result<SyncTarget<F, H::Digest>, QmdbError> {
-        self.operation_log.current_sync_target(range, root).await
+        self.operation_log
+            .current_sync_target(range, expected_root)
+            .await
     }
 
     /// Verified contiguous operations `[start_location, start_location + max_locations)`,
@@ -404,10 +414,10 @@ where
         start_location: Location<F>,
         max_locations: u32,
         min_sequence_number: Option<u64>,
-        root: &H::Digest,
+        expected_root: &H::Digest,
     ) -> Result<VerifiedOperationRange<H::Digest, ordered::Operation<F, K, E>, F>, QmdbError> {
         self.operation_log
-            .get_operation_range(
+            .operation_range(
                 GetOperationRangeRequest {
                     tip: tip.as_u64(),
                     start_location: start_location.as_u64(),
@@ -415,12 +425,34 @@ where
                     min_sequence_number,
                     ..Default::default()
                 },
-                root,
+                expected_root,
             )
             .await
     }
 
-    /// Subscribe to proof-carrying batches of the operation log.
+    /// Verified operations at `locations` of `tip`, in request order.
+    pub async fn operations(
+        &self,
+        tip: Location<F>,
+        locations: &[Location<F>],
+        min_sequence_number: Option<u64>,
+        expected_root: &H::Digest,
+    ) -> Result<VerifiedOperations<H::Digest, ordered::Operation<F, K, E>, F>, QmdbError> {
+        self.operation_log
+            .operations(
+                GetOperationsRequest {
+                    tip: tip.as_u64(),
+                    locations: locations.iter().map(|location| location.as_u64()).collect(),
+                    min_sequence_number,
+                    ..Default::default()
+                },
+                expected_root,
+            )
+            .await
+    }
+
+    /// Subscribe to proof-carrying batches of the operation log. `request` is passed
+    /// through to the service unchanged.
     pub async fn subscribe(
         &self,
         request: SubscribeRequest,
