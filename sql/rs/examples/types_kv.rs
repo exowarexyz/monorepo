@@ -80,26 +80,26 @@ fn demo_batch_writer_insert() {
         )
         .unwrap();
 
-    let mut batch = schema.batch_writer();
+    let mut writer = schema.batch_writer();
 
     // Insert a wallet with a 20-byte Ethereum address
     let alice_addr = vec![0xAA; 20];
     let bob_addr = vec![0xBB; 20];
-    batch
+    writer
         .insert(
             "wallets",
             vec![
-                CellValue::FixedBinary(alice_addr.clone()),
+                CellValue::FixedSizeBinary(alice_addr.clone()),
                 CellValue::Utf8("Alice".to_string()),
                 CellValue::UInt64(1_000_000_000_000_000_000), // 1 ETH in wei
             ],
         )
         .unwrap();
-    batch
+    writer
         .insert(
             "wallets",
             vec![
-                CellValue::FixedBinary(bob_addr.clone()),
+                CellValue::FixedSizeBinary(bob_addr.clone()),
                 CellValue::Null, // no label
                 CellValue::UInt64(500_000_000_000_000_000),
             ],
@@ -108,13 +108,13 @@ fn demo_batch_writer_insert() {
 
     // Insert a transfer with a 32-byte transaction hash
     let tx_hash = vec![0xDE; 32];
-    batch
+    writer
         .insert(
             "transfers",
             vec![
-                CellValue::FixedBinary(tx_hash),
-                CellValue::FixedBinary(alice_addr),
-                CellValue::FixedBinary(bob_addr),
+                CellValue::FixedSizeBinary(tx_hash),
+                CellValue::FixedSizeBinary(alice_addr),
+                CellValue::FixedSizeBinary(bob_addr),
                 CellValue::UInt64(250_000_000_000_000_000),
                 CellValue::UInt64(18_500_000),
             ],
@@ -123,7 +123,7 @@ fn demo_batch_writer_insert() {
 
     println!(
         "  Queued {} KV entries across wallets + transfers (atomic batch)",
-        batch.pending_count()
+        writer.pending_entry_count()
     );
     println!("  (skipping flush -- no server in this demo)");
 }

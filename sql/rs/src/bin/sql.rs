@@ -1,7 +1,8 @@
 use axum::{routing::get, serve::ListenerExt, Router};
 use clap::{Parser, Subcommand};
+use datafusion::arrow::datatypes::DataType;
 use exoware_sdk::{transport::set_tcp_nodelay, PreferZstdLayer, StoreClient, StoreKeyPrefix};
-use exoware_sql::{default_orders_index_specs, sql_connect_stack, KvSchema, SqlServer};
+use exoware_sql::{sql_stack, IndexSpec, KvSchema, SqlServer, TableColumnConfig};
 use std::{
     net::{IpAddr, SocketAddr},
     sync::Arc,
@@ -48,10 +49,22 @@ fn build_server(
     store_url: &str,
     store_prefix: String,
 ) -> Result<Arc<SqlServer>, Box<dyn std::error::Error + Send + Sync>> {
-    let client = StoreClient::new(store_url).prefixed(StoreKeyPrefix::new(store_prefix)?);
-    let schema = KvSchema::new(client)
-        .orders_table(TABLE_NAME, default_orders_index_specs())
-        .map_err(|e| format!("configure schema: {e}"))?;
+    let store = StoreClient::new(store_url).prefixed(StoreKeyPrefix::new(store_prefix)?);
+    let schema = KvSchema::new(store).table(
+        TABLE_NAME,
+        vec![
+            TableColumnConfig::new("region", DataType::Utf8, false),
+            TableColumnConfig::new("customer_id", DataType::Int64, false),
+            TableColumnConfig::new("order_id", DataType::Int64, false),
+            TableColumnConfig::new("amount_cents", DataType::Int64, false),
+            TableColumnConfig::new("status", DataType::Utf8, false),
+        ],
+        vec!["order_id".to_string()],
+        vec![IndexSpec::lexicographic(
+            "region_customer",
+            vec!["region".to_string(), "customer_id".to_string()],
+        )?],
+    )?;
     let server = SqlServer::new(schema)?;
     Ok(Arc::new(server))
 }
@@ -65,7 +78,7 @@ async fn run(
     let server = build_server(store_url, store_prefix)?;
     let app = Router::new()
         .route("/health", get(health))
-        .fallback_service(sql_connect_stack(server))
+        .fallback_service(sql_stack(server))
         .layer(PreferZstdLayer)
         .layer(CorsLayer::very_permissive());
 
@@ -121,7 +134,7 @@ async fn seed(
         );
         offset = offset.saturating_add(5);
 
-        let df = server.session().sql(&sql).await?;
+        let df = server.context().sql(&sql).await?;
         let _ = df.collect().await?;
         println!("seeded 5 rows at order_id base {}", offset - 5);
     }

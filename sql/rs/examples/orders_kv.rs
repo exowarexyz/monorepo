@@ -1,6 +1,9 @@
-use datafusion::{arrow::util::pretty::print_batches, common::Result as DataFusionResult};
+use datafusion::{
+    arrow::{datatypes::DataType, util::pretty::print_batches},
+    common::Result as DataFusionResult,
+};
 use exoware_sdk::StoreClient;
-use exoware_sql::{default_orders_index_specs, KvSchema, SqlContext};
+use exoware_sql::{IndexSpec, KvSchema, SqlContext, TableColumnConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -8,11 +11,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("EXOWARE_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
     let client = StoreClient::new(&base_url);
     let ctx = SqlContext::new(client.unprefixed());
-    let index_specs = default_orders_index_specs();
 
-    let schema = KvSchema::new(client.unprefixed())
-        .orders_table("orders_kv", index_specs)
-        .map_err(datafusion::common::DataFusionError::Execution)?;
+    let schema = KvSchema::new(client.unprefixed()).table(
+        "orders_kv",
+        vec![
+            TableColumnConfig::new("region", DataType::Utf8, false),
+            TableColumnConfig::new("customer_id", DataType::Int64, false),
+            TableColumnConfig::new("order_id", DataType::Int64, false),
+            TableColumnConfig::new("amount_cents", DataType::Int64, false),
+            TableColumnConfig::new("status", DataType::Utf8, false),
+        ],
+        vec!["order_id".to_string()],
+        vec![IndexSpec::lexicographic(
+            "region_customer",
+            vec!["region".to_string(), "customer_id".to_string()],
+        )?],
+    )?;
     ctx.register_schema(schema)?;
 
     let seed_sample = std::env::var("EXOWARE_SEED_SAMPLE")

@@ -466,9 +466,9 @@ impl Fixture {
             writer.flush().await.unwrap();
         });
         let sql_server = Arc::new(exoware_sql::SqlServer::new(schema).unwrap());
-        let ctx = sql_server.session().clone();
+        let ctx = sql_server.context().clone();
         let app = Router::new()
-            .fallback_service(exoware_sql::sql_connect_stack(sql_server))
+            .fallback_service(exoware_sql::sql_stack(sql_server))
             .layer(axum::middleware::from_fn_with_state(
                 (traffic.clone(), true),
                 measure_traffic,

@@ -9,8 +9,8 @@ import {
   TimeUnit,
   Vector,
   type Table,
-  type DecodedSubscribeFrame,
-  type DecodedTable,
+  type SubscribeFrame,
+  type TableInfo,
 } from '@sql-ts';
 
 const MAX_EVENTS = 10;
@@ -128,10 +128,10 @@ export function SqlPanel({
   const [table, setTable] = useState(DEFAULT_TABLE);
   const [whereSql, setWhereSql] = useState(DEFAULT_WHERE);
   const [sinceSequenceNumber, setSinceSequenceNumber] = useState('');
-  const [events, setEvents] = useState<DecodedSubscribeFrame[]>([]);
+  const [events, setEvents] = useState<SubscribeFrame[]>([]);
   const [isSubscribing, setIsSubscribing] = useState(false);
 
-  const [tables, setTables] = useState<DecodedTable[] | null>(null);
+  const [tables, setTables] = useState<TableInfo[] | null>(null);
   const [tablesError, setTablesError] = useState<string | null>(null);
 
   const [querySql, setQuerySql] = useState(DEFAULT_QUERY);

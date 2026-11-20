@@ -134,7 +134,7 @@ impl TableStream {
 
 /// SQL server bound to a single [`KvSchema`].
 ///
-/// Construct with [`SqlServer::new`], pass to [`sql_connect_stack`] to mount
+/// Construct with [`SqlServer::new`], pass to [`sql_stack`] to mount
 /// on an axum router.
 pub struct SqlServer {
     /// Shared context for all requests. `Query` reads through a per-request copy with its own
@@ -153,7 +153,7 @@ impl SqlServer {
     /// in a new [`SqlContext`] that drives both unary `Query` and the
     /// scalar predicate compilation on `Subscribe`.
     pub fn new(schema: KvSchema) -> DataFusionResult<Self> {
-        let store = schema.client().clone();
+        let store = schema.store().clone();
         let streams = schema
             .tables()
             .iter()
@@ -174,7 +174,7 @@ impl SqlServer {
     }
 
     /// Borrow the SQL context for direct queries and table registration.
-    pub fn session(&self) -> &SqlContext {
+    pub fn context(&self) -> &SqlContext {
         &self.ctx
     }
 
@@ -254,7 +254,7 @@ const fn proto_index_layout(layout: IndexLayout) -> ProtoIndexLayout {
 
 /// Turn a [`SqlServer`] into a mounted Connect service stack ready to hand to
 /// axum's `fallback_service`.
-pub fn sql_connect_stack(server: Arc<SqlServer>) -> ConnectRpcService<ServiceServer<SqlConnect>> {
+pub fn sql_stack(server: Arc<SqlServer>) -> ConnectRpcService<ServiceServer<SqlConnect>> {
     ConnectRpcService::new(ServiceServer::new(SqlConnect::new(server)))
         .with_limits(
             connectrpc::Limits::default()
@@ -640,7 +640,7 @@ mod tests {
                 FixedSizeBinaryBuilder, Int64Array, LargeListArray, StringArray, StringViewArray,
             },
             compute::concat_batches,
-            datatypes::{i256, Int64Type, Schema},
+            datatypes::{i256, Int64Type, Schema, TimeUnit},
             ipc::reader::StreamReader,
             record_batch::RecordBatchOptions,
         },
@@ -693,6 +693,47 @@ mod tests {
             assert_eq!(server.stream(name).unwrap().model.columns[0].name, name);
         }
         assert!(server.stream("unknown").is_err());
+    }
+
+    #[test]
+    fn table_metadata_reports_arrow_display_data_types() {
+        let schema = KvSchema::new(StoreClient::new("http://127.0.0.1:1").unprefixed())
+            .table(
+                "events",
+                vec![
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new(
+                        "at",
+                        DataType::Timestamp(TimeUnit::Microsecond, None),
+                        false,
+                    ),
+                    TableColumnConfig::new(
+                        "at_utc",
+                        DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                        false,
+                    ),
+                    TableColumnConfig::new("tags", DataType::new_list(DataType::Int64, true), true),
+                ],
+                vec!["id".into()],
+                vec![],
+            )
+            .unwrap();
+        let server = SqlServer::new(schema).unwrap();
+        let tables = server.describe_tables();
+        let data_types = tables[0]
+            .columns
+            .iter()
+            .map(|column| column.data_type.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            data_types,
+            [
+                "Int64",
+                "Timestamp(µs)",
+                "Timestamp(µs, \"UTC\")",
+                "List(Int64)"
+            ]
+        );
     }
 
     #[derive(Clone)]
@@ -845,7 +886,7 @@ mod tests {
                 .unwrap()
                 .tap_io(set_tcp_nodelay);
             let address = listener.local_addr().unwrap();
-            let app = axum::Router::new().fallback_service(sql_connect_stack(server));
+            let app = axum::Router::new().fallback_service(sql_stack(server));
             let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
             let client = ServiceClient::new(
                 HttpClient::plaintext(),
@@ -891,7 +932,7 @@ mod tests {
         let server = Arc::new(SqlServer::new(schema).unwrap());
         let layouts = ipc_layout_batch();
         server
-            .session()
+            .context()
             .register_table(
                 "layouts",
                 Arc::new(
@@ -910,7 +951,7 @@ mod tests {
         )
         .unwrap();
         server
-            .session()
+            .context()
             .register_table(
                 "zero_columns",
                 Arc::new(
@@ -923,7 +964,7 @@ mod tests {
             .unwrap()
             .tap_io(set_tcp_nodelay);
         let address = listener.local_addr().unwrap();
-        let app = axum::Router::new().fallback_service(sql_connect_stack(server.clone()));
+        let app = axum::Router::new().fallback_service(sql_stack(server.clone()));
         let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let client = ServiceClient::new(
             HttpClient::plaintext(),
@@ -961,7 +1002,7 @@ mod tests {
                     .to_string(),
             ),
         ] {
-            let frame = server.session().sql(&sql).await.unwrap();
+            let frame = server.context().sql(&sql).await.unwrap();
             let stream = frame.execute_stream().await.unwrap();
             let schema = stream.schema();
             let expected: Vec<_> = stream.try_collect().await.unwrap();
@@ -1135,7 +1176,7 @@ mod tests {
             .build();
         ctx.register_table(
             "counts",
-            server.session().table_provider("counts").await.unwrap(),
+            server.context().table_provider("counts").await.unwrap(),
         )
         .unwrap();
         server.ctx = Arc::new(ctx);
@@ -1145,7 +1186,7 @@ mod tests {
             .unwrap()
             .tap_io(set_tcp_nodelay);
         let address = listener.local_addr().unwrap();
-        let app = axum::Router::new().fallback_service(sql_connect_stack(server));
+        let app = axum::Router::new().fallback_service(sql_stack(server));
         let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let client = ServiceClient::new(
             HttpClient::plaintext(),

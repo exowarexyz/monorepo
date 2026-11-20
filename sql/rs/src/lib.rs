@@ -1,3 +1,12 @@
+//! SQL over an Exoware Store, built on DataFusion.
+//!
+//! Names starting with `Kv` belong to the Store-backed key-layout layer. [`KvSchema`]
+//! declares tables and maps rows and indexes to Store keys, and the `KvScanExec` and
+//! `KvAggregateExec` plan nodes read them. Names starting with `Sql` belong to the session
+//! and serving layer. [`SqlContext`] runs queries and [`SqlServer`] serves them over Connect.
+//! Within a table, [`TableColumnConfig`] declares a column and [`IndexSpec`] declares a
+//! secondary index.
+
 pub mod proto;
 mod prune;
 pub mod server;
@@ -16,13 +25,13 @@ mod writer;
 
 pub use aggregate::KvAggregateExtensionPlanner;
 pub use schema::KvSchema;
-pub use server::{sql_connect_stack, SqlConnect, SqlServer};
+pub use server::{sql_stack, SqlConnect, SqlServer};
 pub use session::{SqlContext, SqlContextBuilder};
 pub use types::{
-    default_orders_index_specs, CellValue, IndexBackfillEvent, IndexBackfillOptions,
-    IndexBackfillReport, IndexLayout, IndexSpec, TableColumnConfig,
+    CellValue, IndexBackfillEvent, IndexBackfillOptions, IndexBackfillReport, IndexLayout,
+    IndexSpec, TableColumnConfig,
 };
-pub use writer::{BatchReceipt, BatchWriter, PreparedBatch, TableWriter};
+pub use writer::{BatchWriter, PreparedUpload, UploadReceipt};
 
 #[cfg(test)]
 mod tests {
@@ -50,7 +59,7 @@ mod tests {
             datatypes::{i256, DataType, Field, TimeUnit},
             record_batch::RecordBatch,
         },
-        common::{config::ConfigOptions, ScalarValue},
+        common::{config::ConfigOptions, DataFusionError, ScalarValue},
         functions_aggregate::expr_fn::sum,
         logical_expr::{col, expr::Case, in_list, Cast, Expr, Operator, TryCast},
         physical_expr::{expressions::Column, LexOrdering, PhysicalSortExpr},
@@ -128,7 +137,7 @@ mod tests {
         fetch: Option<usize>,
     ) -> KvScanExec {
         let table = KvTable {
-            client: client.unprefixed(),
+            store: client.unprefixed(),
             model,
             index_specs: Arc::new(Vec::new()),
         };
@@ -513,7 +522,7 @@ mod tests {
                 vec![],
             )
             .expect("schema must build");
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("schema must register");
 
         // Complete primary-key points are read directly, so the plan reports the key
@@ -557,7 +566,7 @@ mod tests {
                     .with_cover_columns(vec!["amount_cents".to_string()])],
             )
             .expect("schema");
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
 
         let explain =
@@ -600,7 +609,7 @@ mod tests {
                     .with_cover_columns(vec!["amount_cents".to_string()])],
             )
             .expect("schema");
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
 
         let explain = physical_plan_text(
@@ -653,7 +662,7 @@ mod tests {
                 ],
             )
             .expect("schema");
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
 
         let explain = physical_plan_text(
@@ -697,7 +706,7 @@ mod tests {
                     .with_cover_columns(vec!["amount_cents".to_string()])],
             )
             .expect("schema");
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
 
         let explain = physical_plan_text(
@@ -723,7 +732,7 @@ mod tests {
     }
 
     #[test]
-    fn index_spec_constructor_sets_name_and_keys() {
+    fn index_spec_constructor_sets_name_and_keys_and_rejects_empty_arguments() {
         let spec = IndexSpec::new(
             "status_customer",
             vec!["status".to_string(), "customer_id".to_string()],
@@ -732,6 +741,14 @@ mod tests {
         assert_eq!(spec.name(), "status_customer");
         assert_eq!(spec.key_columns(), &["status", "customer_id"]);
         assert!(spec.cover_columns().is_empty());
+        assert!(matches!(
+            IndexSpec::new(" ", vec!["status".to_string()]),
+            Err(DataFusionError::Plan(msg)) if msg == "index name must not be empty"
+        ));
+        assert!(matches!(
+            IndexSpec::new("status_customer", vec![]),
+            Err(DataFusionError::Plan(msg)) if msg == "key_columns must not be empty"
+        ));
     }
 
     #[test]
@@ -1944,7 +1961,7 @@ mod tests {
             assert!(!pred.contradiction);
             assert!(matches!(
                 pred.constraints.get(&hash_idx),
-                Some(PredicateConstraint::FixedBinaryEq(v)) if v == &vec![0xAA, 0xAA]
+                Some(PredicateConstraint::FixedSizeBinaryEq(v)) if v == &vec![0xAA, 0xAA]
             ));
         }
     }
@@ -3034,7 +3051,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
 
         for (name, expected_age) in [("alice", 30i64), ("bob", 25), ("", 99)] {
@@ -3137,7 +3154,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
 
         for table in ["orders_nc", "orders_cov"] {
@@ -3340,7 +3357,7 @@ mod tests {
             let mut bucket = vec![0u8; 16];
             bucket[0] = first_byte;
 
-            let pk = CellValue::FixedBinary(id.clone());
+            let pk = CellValue::FixedSizeBinary(id.clone());
             let primary = encode_primary_key(model.table_prefix, &[&pk], &model).unwrap();
             // The family prefix bytes are fixed; the payload begins byte-aligned
             // immediately after them.
@@ -3352,8 +3369,8 @@ mod tests {
 
             let row = KvRow {
                 values: vec![
-                    CellValue::FixedBinary(id),
-                    CellValue::FixedBinary(bucket.clone()),
+                    CellValue::FixedSizeBinary(id),
+                    CellValue::FixedSizeBinary(bucket.clone()),
                 ],
             };
             let index =
@@ -3429,7 +3446,7 @@ mod tests {
         match overflow {
             Ok(_) => panic!("overflow table should be rejected"),
             Err(err) => assert!(
-                err.contains(&format!(
+                err.to_string().contains(&format!(
                     "too many tables for key layout (max {MAX_TABLES})"
                 )),
                 "overflow table should be rejected with key-layout error"
@@ -3505,10 +3522,10 @@ mod tests {
 
     #[tokio::test]
     async fn kv_schema_register_all_enables_join() {
-        let client = StoreClient::new("http://localhost:8080").unprefixed();
-        let ctx = SqlContext::new(client.clone());
+        let store = StoreClient::new("http://localhost:8080").unprefixed();
+        let ctx = SqlContext::new(store.clone());
 
-        let result = KvSchema::new(client)
+        let result = KvSchema::new(store)
             .table(
                 "customers",
                 vec![
@@ -3605,22 +3622,6 @@ mod tests {
             )
             .await;
         assert!(plan.is_ok(), "three-way JOIN must plan: {:?}", plan.err());
-    }
-
-    #[test]
-    fn kv_schema_orders_table_convenience() {
-        let client = StoreClient::new("http://localhost:8080");
-        let schema = KvSchema::new(client.unprefixed())
-            .orders_table(
-                "my_orders",
-                vec![IndexSpec::new(
-                    "region_customer",
-                    vec!["region".to_string(), "customer_id".to_string()],
-                )
-                .unwrap()],
-            )
-            .unwrap();
-        assert_eq!(schema.table_count(), 1);
     }
 
     #[test]
@@ -3863,7 +3864,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_fixed_binary_in_values_deduplicated() {
+    fn duplicate_fixed_size_binary_in_values_deduplicated() {
         let config = KvTableConfig::new(
             0,
             vec![
@@ -3898,7 +3899,7 @@ mod tests {
         assert_eq!(
             ranges.len(),
             2,
-            "duplicate FixedBinary IN values must be deduped"
+            "duplicate FixedSizeBinary IN values must be deduped"
         );
     }
 
@@ -4029,14 +4030,14 @@ mod tests {
             )
             .unwrap();
 
-        let mut batch = schema.batch_writer();
-        batch
+        let mut writer = schema.batch_writer();
+        writer
             .insert(
                 "customers",
                 vec![CellValue::Int64(1), CellValue::Utf8("Alice".to_string())],
             )
             .unwrap();
-        batch
+        writer
             .insert(
                 "orders",
                 vec![
@@ -4046,7 +4047,7 @@ mod tests {
                 ],
             )
             .unwrap();
-        batch
+        writer
             .insert(
                 "orders",
                 vec![
@@ -4058,7 +4059,7 @@ mod tests {
             .unwrap();
 
         // 1 customer base row + 2 order base rows + 2 order index rows = 5
-        assert_eq!(batch.pending_count(), 5);
+        assert_eq!(writer.pending_entry_count(), 5);
     }
 
     #[test]
@@ -4073,10 +4074,10 @@ mod tests {
             )
             .unwrap();
 
-        let mut batch = schema.batch_writer();
-        let result = batch.insert("nonexistent", vec![CellValue::Int64(1)]);
+        let mut writer = schema.batch_writer();
+        let result = writer.insert("nonexistent", vec![CellValue::Int64(1)]);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("unknown table"));
+        assert!(result.unwrap_err().to_string().contains("unknown table"));
     }
 
     #[test]
@@ -4094,10 +4095,10 @@ mod tests {
             )
             .unwrap();
 
-        let mut batch = schema.batch_writer();
-        let result = batch.insert("t1", vec![CellValue::Int64(1)]);
+        let mut writer = schema.batch_writer();
+        let result = writer.insert("t1", vec![CellValue::Int64(1)]);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("expected 2"));
+        assert!(result.unwrap_err().to_string().contains("expected 2"));
     }
 
     #[test]
@@ -4115,14 +4116,17 @@ mod tests {
             )
             .unwrap();
 
-        let mut batch = schema.batch_writer();
-        let result = batch.insert(
+        let mut writer = schema.batch_writer();
+        let result = writer.insert(
             "t1",
             vec![CellValue::Int64(1), CellValue::Utf8("bad".to_string())],
         );
-        assert!(result.is_err());
         assert!(
-            result.unwrap_err().contains("type mismatch"),
+            matches!(
+                result.unwrap_err(),
+                DataFusionError::Plan(msg)
+                    if msg == "column 'amount' type mismatch (expected Int64, got Utf8(\"bad\"))"
+            ),
             "non-PK schema-invalid values must be rejected at insert-time"
         );
     }
@@ -4146,17 +4150,17 @@ mod tests {
             )
             .unwrap();
 
-        let mut batch = schema.batch_writer();
-        batch.insert("a", vec![CellValue::Int64(42)]).unwrap();
-        batch.insert("b", vec![CellValue::Int64(42)]).unwrap();
+        let mut writer = schema.batch_writer();
+        writer.insert("a", vec![CellValue::Int64(42)]).unwrap();
+        writer.insert("b", vec![CellValue::Int64(42)]).unwrap();
 
-        assert_eq!(batch.pending_count(), 2);
+        assert_eq!(writer.pending_entry_count(), 2);
         assert_ne!(
-            batch.pending_entries[0].0, batch.pending_entries[1].0,
+            writer.pending_entries[0].0, writer.pending_entries[1].0,
             "same PK in different tables must produce different keys"
         );
         assert_ne!(
-            batch.pending_entries[0].0[0], batch.pending_entries[1].0[0],
+            writer.pending_entries[0].0[0], writer.pending_entries[1].0[0],
             "table prefix byte must differ"
         );
     }
@@ -4173,21 +4177,21 @@ mod tests {
             )
             .unwrap();
 
-        let mut batch = schema.batch_writer();
-        batch.insert("t", vec![CellValue::Int64(1)]).unwrap();
-        let prepared = batch.prepare_flush().unwrap().expect("prepared row");
+        let mut writer = schema.batch_writer();
+        writer.insert("t", vec![CellValue::Int64(1)]).unwrap();
+        let prepared = writer.prepare_upload().unwrap().expect("prepared row");
         assert_eq!(prepared.request_id(), 0);
         assert_eq!(prepared.entry_count(), 1);
 
-        batch.insert("t", vec![CellValue::Int64(2)]).unwrap();
-        StoreWriteBatchUpload::mark_upload_failed(&batch, prepared, "commit failed".to_string())
+        writer.insert("t", vec![CellValue::Int64(2)]).unwrap();
+        StoreWriteBatchUpload::mark_upload_failed(&writer, prepared, "commit failed".to_string())
             .await;
-        assert_eq!(batch.pending_count(), 2);
+        assert_eq!(writer.pending_entry_count(), 2);
 
-        let retry = batch.prepare_flush().unwrap().expect("retry row");
+        let retry = writer.prepare_upload().unwrap().expect("retry row");
         assert_eq!(retry.request_id(), 0);
         assert_eq!(retry.entry_count(), 1);
-        let next = batch.prepare_flush().unwrap().expect("new pending row");
+        let next = writer.prepare_upload().unwrap().expect("new pending row");
         assert_eq!(next.request_id(), 1);
         assert_eq!(next.entry_count(), 1);
     }
@@ -4207,11 +4211,11 @@ mod tests {
             )
             .unwrap();
 
-        let mut batch = schema.batch_writer();
-        batch
+        let mut writer = schema.batch_writer();
+        writer
             .insert("t", vec![CellValue::Int64(1), CellValue::Null])
             .unwrap();
-        assert_eq!(batch.pending_count(), 1);
+        assert_eq!(writer.pending_entry_count(), 1);
     }
 
     #[test]
@@ -4231,8 +4235,8 @@ mod tests {
             .unwrap();
 
         // NULL in non-nullable column "name" must fail
-        let mut batch = schema.batch_writer();
-        let result = batch.insert(
+        let mut writer = schema.batch_writer();
+        let result = writer.insert(
             "t",
             vec![
                 CellValue::Int64(1),
@@ -4240,15 +4244,18 @@ mod tests {
                 CellValue::Utf8("ok".to_string()),
             ],
         );
-        assert!(result.is_err());
         assert!(
-            result.unwrap_err().contains("not nullable"),
-            "error should mention non-nullable constraint"
+            matches!(
+                result.unwrap_err(),
+                DataFusionError::Plan(msg)
+                    if msg == "column 'name' is not nullable but received NULL"
+            ),
+            "NULL in a non-nullable column must be rejected at insert-time"
         );
 
         // NULL in nullable column "note" must succeed
-        let mut batch = schema.batch_writer();
-        batch
+        let mut writer = schema.batch_writer();
+        writer
             .insert(
                 "t",
                 vec![
@@ -4258,11 +4265,11 @@ mod tests {
                 ],
             )
             .unwrap();
-        assert_eq!(batch.pending_count(), 1);
+        assert_eq!(writer.pending_entry_count(), 1);
 
         // All non-null values must succeed
-        let mut batch = schema.batch_writer();
-        batch
+        let mut writer = schema.batch_writer();
+        writer
             .insert(
                 "t",
                 vec![
@@ -4272,7 +4279,7 @@ mod tests {
                 ],
             )
             .unwrap();
-        assert_eq!(batch.pending_count(), 1);
+        assert_eq!(writer.pending_entry_count(), 1);
     }
 
     #[test]
@@ -4334,7 +4341,7 @@ mod tests {
     }
 
     #[test]
-    fn fixed_binary_primary_key_round_trip() {
+    fn fixed_size_binary_primary_key_round_trip() {
         let config = KvTableConfig::new(
             0,
             vec![
@@ -4349,7 +4356,7 @@ mod tests {
         let hash_val = vec![0xABu8; 32];
         let row = KvRow {
             values: vec![
-                CellValue::FixedBinary(hash_val.clone()),
+                CellValue::FixedSizeBinary(hash_val.clone()),
                 CellValue::Int64(100),
             ],
         };
@@ -4360,11 +4367,11 @@ mod tests {
             .cloned()
             .collect::<Vec<_>>();
         let decoded = decode_base_row(pk, &encoded, &model).unwrap();
-        assert!(matches!(&decoded.values[0], CellValue::FixedBinary(v) if *v == hash_val));
+        assert!(matches!(&decoded.values[0], CellValue::FixedSizeBinary(v) if *v == hash_val));
     }
 
     #[test]
-    fn fixed_binary_key_rejects_wrong_length() {
+    fn fixed_size_binary_key_rejects_wrong_length() {
         let config = KvTableConfig::new(
             0,
             vec![
@@ -4379,7 +4386,10 @@ mod tests {
 
         // Too short (10 bytes for a 16-byte column)
         let short_row = KvRow {
-            values: vec![CellValue::FixedBinary(vec![0xAB; 10]), CellValue::Int64(1)],
+            values: vec![
+                CellValue::FixedSizeBinary(vec![0xAB; 10]),
+                CellValue::Int64(1),
+            ],
         };
         let result = encode_primary_key_from_row(model.table_prefix, &short_row, &model);
         assert!(result.is_err());
@@ -4390,7 +4400,10 @@ mod tests {
 
         // Too long (20 bytes for a 16-byte column)
         let long_row = KvRow {
-            values: vec![CellValue::FixedBinary(vec![0xCD; 20]), CellValue::Int64(2)],
+            values: vec![
+                CellValue::FixedSizeBinary(vec![0xCD; 20]),
+                CellValue::Int64(2),
+            ],
         };
         let result = encode_primary_key_from_row(model.table_prefix, &long_row, &model);
         assert!(result.is_err());
@@ -4398,13 +4411,16 @@ mod tests {
 
         // Exact length (16 bytes) must succeed.
         let ok_row = KvRow {
-            values: vec![CellValue::FixedBinary(vec![0xEF; 16]), CellValue::Int64(3)],
+            values: vec![
+                CellValue::FixedSizeBinary(vec![0xEF; 16]),
+                CellValue::Int64(3),
+            ],
         };
         assert!(encode_primary_key_from_row(model.table_prefix, &ok_row, &model).is_ok());
     }
 
     #[test]
-    fn fixed_binary_index_key_rejects_wrong_length() {
+    fn fixed_size_binary_index_key_rejects_wrong_length() {
         let config = KvTableConfig::new(
             0,
             vec![
@@ -4420,7 +4436,10 @@ mod tests {
 
         // Wrong length (4 bytes for an 8-byte column)
         let bad_row = KvRow {
-            values: vec![CellValue::Int64(1), CellValue::FixedBinary(vec![0x01; 4])],
+            values: vec![
+                CellValue::Int64(1),
+                CellValue::FixedSizeBinary(vec![0x01; 4]),
+            ],
         };
         let result = encode_secondary_index_key(model.table_prefix, &specs[0], &model, &bad_row);
         assert!(result.is_err());
@@ -4428,7 +4447,10 @@ mod tests {
 
         // Correct length (8 bytes)
         let ok_row = KvRow {
-            values: vec![CellValue::Int64(1), CellValue::FixedBinary(vec![0x02; 8])],
+            values: vec![
+                CellValue::Int64(1),
+                CellValue::FixedSizeBinary(vec![0x02; 8]),
+            ],
         };
         assert!(encode_secondary_index_key(model.table_prefix, &specs[0], &model, &ok_row).is_ok());
     }
@@ -4528,7 +4550,7 @@ mod tests {
     }
 
     #[test]
-    fn fixed_binary_primary_key_encode_decode() {
+    fn fixed_size_binary_primary_key_encode_decode() {
         let config = KvTableConfig::new(
             7,
             vec![
@@ -4541,10 +4563,10 @@ mod tests {
         .unwrap();
         let model = TableModel::from_config(&config).unwrap();
         let data = vec![0xDE, 0xAD, 0xBE, 0xEF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let pk = CellValue::FixedBinary(data.clone());
+        let pk = CellValue::FixedSizeBinary(data.clone());
         let key = encode_primary_key(7, &[&pk], &model).expect("pk key encodes");
         let decoded = decode_primary_key(7, &key, &model).unwrap();
-        assert!(matches!(&decoded[0], CellValue::FixedBinary(v) if *v == data));
+        assert!(matches!(&decoded[0], CellValue::FixedSizeBinary(v) if *v == data));
     }
 
     #[test]
@@ -4678,14 +4700,14 @@ mod tests {
         let model = TableModel::from_config(&config).unwrap();
 
         let entity = vec![0xAA; 32];
-        let pk_entity = CellValue::FixedBinary(entity.clone());
+        let pk_entity = CellValue::FixedSizeBinary(entity.clone());
         let pk_version = CellValue::UInt64(42);
         let key =
             encode_primary_key(1, &[&pk_entity, &pk_version], &model).expect("pk key encodes");
 
         let decoded = decode_primary_key(1, &key, &model).unwrap();
         assert_eq!(decoded.len(), 2);
-        assert!(matches!(&decoded[0], CellValue::FixedBinary(v) if *v == entity));
+        assert!(matches!(&decoded[0], CellValue::FixedSizeBinary(v) if *v == entity));
         assert!(matches!(&decoded[1], CellValue::UInt64(42)));
     }
 
@@ -4704,7 +4726,7 @@ mod tests {
         let model = TableModel::from_config(&config).unwrap();
 
         let entity = vec![0xBB; 32];
-        let pk_entity = CellValue::FixedBinary(entity);
+        let pk_entity = CellValue::FixedSizeBinary(entity);
 
         let key_v1 = encode_primary_key(0, &[&pk_entity, &CellValue::UInt64(1)], &model)
             .expect("pk key encodes");
@@ -4735,7 +4757,7 @@ mod tests {
 
         let row = KvRow {
             values: vec![
-                CellValue::FixedBinary(vec![0xCC; 16]),
+                CellValue::FixedSizeBinary(vec![0xCC; 16]),
                 CellValue::UInt64(7),
                 CellValue::Utf8("hello".to_string()),
             ],
@@ -4743,12 +4765,15 @@ mod tests {
         let encoded = encode_base_row_value(&row, &model).unwrap();
         // Both PK columns should be None in stored value
         let decoded = decode_base_row(
-            vec![CellValue::FixedBinary(vec![0xCC; 16]), CellValue::UInt64(7)],
+            vec![
+                CellValue::FixedSizeBinary(vec![0xCC; 16]),
+                CellValue::UInt64(7),
+            ],
             &encoded,
             &model,
         )
         .unwrap();
-        assert!(matches!(&decoded.values[0], CellValue::FixedBinary(v) if v.len() == 16));
+        assert!(matches!(&decoded.values[0], CellValue::FixedSizeBinary(v) if v.len() == 16));
         assert!(matches!(&decoded.values[1], CellValue::UInt64(7)));
         assert!(matches!(&decoded.values[2], CellValue::Utf8(v) if v == "hello"));
     }
@@ -4772,7 +4797,7 @@ mod tests {
         let entity_data = vec![0xDD; 16];
         let row = KvRow {
             values: vec![
-                CellValue::FixedBinary(entity_data.clone()),
+                CellValue::FixedSizeBinary(entity_data.clone()),
                 CellValue::UInt64(99),
                 CellValue::Int64(42),
             ],
@@ -4784,7 +4809,7 @@ mod tests {
         assert_eq!(decoded.primary_key_values.len(), 2);
         assert!(matches!(
             &decoded.primary_key_values[0],
-            CellValue::FixedBinary(v) if *v == entity_data
+            CellValue::FixedSizeBinary(v) if *v == entity_data
         ));
         assert!(matches!(
             &decoded.primary_key_values[1],
@@ -4798,10 +4823,10 @@ mod tests {
     }
 
     #[test]
-    fn table_versioned_convenience() {
+    fn versioned_table_convenience() {
         let client = StoreClient::new("http://localhost:8080");
         let schema = KvSchema::new(client.unprefixed())
-            .table_versioned(
+            .versioned_table(
                 "documents",
                 vec![
                     TableColumnConfig::new("doc_id", DataType::FixedSizeBinary(32), false),
@@ -4814,6 +4839,37 @@ mod tests {
             )
             .unwrap();
         assert_eq!(schema.table_count(), 1);
+    }
+
+    #[test]
+    fn versioned_table_rejects_invalid_version_columns() {
+        let versioned = |version_type: DataType, entity: &str, version: &str| {
+            KvSchema::new(StoreClient::new("http://localhost:8080").unprefixed()).versioned_table(
+                "documents",
+                vec![
+                    TableColumnConfig::new("doc_id", DataType::UInt64, false),
+                    TableColumnConfig::new("version", version_type, false),
+                ],
+                entity,
+                version,
+                vec![],
+            )
+        };
+
+        let err = versioned(DataType::Int64, "doc_id", "version")
+            .err()
+            .expect("Int64 version must be rejected");
+        assert!(
+            matches!(&err, DataFusionError::Plan(msg) if msg.contains("UInt64 version")),
+            "{err}"
+        );
+        let err = versioned(DataType::UInt64, "doc_id", "doc_id")
+            .err()
+            .expect("entity reused as version must be rejected");
+        assert!(
+            matches!(&err, DataFusionError::Plan(msg) if msg.contains("distinct")),
+            "{err}"
+        );
     }
 
     #[test]
@@ -4860,7 +4916,7 @@ mod tests {
         let model = TableModel::from_config(&config).unwrap();
         assert_eq!(model.primary_key_width, 24); // 16 + 8
 
-        let entity = CellValue::FixedBinary(vec![0xAA; 16]);
+        let entity = CellValue::FixedSizeBinary(vec![0xAA; 16]);
         // Partial prefix: only entity, no version
         let upper =
             encode_primary_key_bound(0, &[&entity], &model, true).expect("pk bound encodes");
@@ -4922,7 +4978,7 @@ mod tests {
         // Simulate predicate: entity = X'CC..CC' AND version <= 42
         let mut pred = QueryPredicate::default();
         pred.constraints
-            .insert(0, PredicateConstraint::FixedBinaryEq(vec![0xCC; 16]));
+            .insert(0, PredicateConstraint::FixedSizeBinaryEq(vec![0xCC; 16]));
         pred.constraints.insert(
             1,
             PredicateConstraint::UInt64Range {
@@ -4942,7 +4998,7 @@ mod tests {
         let expected_start = encode_primary_key(
             0,
             &[
-                &CellValue::FixedBinary(vec![0xCC; 16]),
+                &CellValue::FixedSizeBinary(vec![0xCC; 16]),
                 &CellValue::UInt64(0),
             ],
             &model,
@@ -4957,7 +5013,7 @@ mod tests {
         let expected_end_prefix = encode_primary_key(
             0,
             &[
-                &CellValue::FixedBinary(vec![0xCC; 16]),
+                &CellValue::FixedSizeBinary(vec![0xCC; 16]),
                 &CellValue::UInt64(42),
             ],
             &model,
@@ -5009,7 +5065,7 @@ mod tests {
 
         let mut pred = QueryPredicate::default();
         pred.constraints
-            .insert(0, PredicateConstraint::FixedBinaryEq(vec![0xDD; 16]));
+            .insert(0, PredicateConstraint::FixedSizeBinaryEq(vec![0xDD; 16]));
 
         let ranges = pred
             .primary_key_ranges(&model, exoware_sdk::keys::MAX_KEY_LEN)
@@ -5035,7 +5091,7 @@ mod tests {
     }
 
     #[test]
-    fn fixed_binary_eq_constraint_extracted() {
+    fn fixed_size_binary_eq_constraint_extracted() {
         let config = KvTableConfig::new(
             0,
             vec![
@@ -5062,9 +5118,9 @@ mod tests {
         assert!(
             matches!(
                 pred.constraints.get(&0),
-                Some(PredicateConstraint::FixedBinaryEq(v)) if *v == vec![0xAA; 16]
+                Some(PredicateConstraint::FixedSizeBinaryEq(v)) if *v == vec![0xAA; 16]
             ),
-            "should extract FixedBinaryEq constraint"
+            "should extract FixedSizeBinaryEq constraint"
         );
     }
 
@@ -5265,7 +5321,7 @@ mod tests {
     }
 
     #[test]
-    fn fixed_binary_in_list_pushdown() {
+    fn fixed_size_binary_in_list_pushdown() {
         let config = KvTableConfig::new(
             0,
             vec![
@@ -5292,9 +5348,9 @@ mod tests {
         assert!(
             matches!(
                 pred.constraints.get(&0),
-                Some(PredicateConstraint::FixedBinaryIn(v)) if v.len() == 2
+                Some(PredicateConstraint::FixedSizeBinaryIn(v)) if v.len() == 2
             ),
-            "should extract FixedBinaryIn with 2 values"
+            "should extract FixedSizeBinaryIn with 2 values"
         );
 
         // Verify range generation produces 2 ranges (one per entity)
@@ -5646,7 +5702,7 @@ mod tests {
     }
 
     #[test]
-    fn choose_index_plan_uses_fixed_binary_leading_constraint() {
+    fn choose_index_plan_uses_fixed_size_binary_leading_constraint() {
         let config = KvTableConfig::new(
             0,
             vec![
@@ -5668,7 +5724,7 @@ mod tests {
         let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &pred);
         let plan = pred
             .choose_index_plan(&model, &specs, &access_plan)
-            .expect("fixed-binary equality should choose an index");
+            .expect("fixed-size-binary equality should choose an index");
 
         assert_eq!(plan.constrained_prefix_len, 1);
         assert_eq!(plan.ranges.len(), 1);
@@ -5786,7 +5842,7 @@ mod tests {
                 &[],
                 IndexBackfillOptions {
                     row_batch_size: 2,
-                    start_from_primary_key: None,
+                    start_cursor: None,
                 },
             )
             .await
@@ -5877,7 +5933,7 @@ mod tests {
                 CellValue::Timestamp(-1 - i),
                 CellValue::Decimal128(-12_345 * i as i128),
                 CellValue::Decimal256(i256::from_i128(7 - i as i128)),
-                CellValue::FixedBinary(vec![0xFF, i as u8]),
+                CellValue::FixedSizeBinary(vec![0xFF, i as u8]),
                 CellValue::UInt64(if odd { u64::MAX } else { i as u64 }),
                 if odd {
                     CellValue::Null
@@ -5925,7 +5981,7 @@ mod tests {
                         &[],
                         IndexBackfillOptions {
                             row_batch_size: 4,
-                            start_from_primary_key: None,
+                            start_cursor: None,
                         },
                     )
                     .await
@@ -6005,7 +6061,7 @@ mod tests {
                 &[],
                 IndexBackfillOptions {
                     row_batch_size: 2,
-                    start_from_primary_key: None,
+                    start_cursor: None,
                 },
             )
             .await
@@ -6079,9 +6135,14 @@ mod tests {
             .backfill_added_indexes("orders", &previous_specs)
             .await
             .expect_err("non-append-only evolution should be rejected");
-        assert!(err
-            .to_string()
-            .contains("index evolution must be append-only"));
+        assert!(
+            matches!(
+                &err,
+                DataFusionError::Plan(msg)
+                    if msg.contains("index evolution must be append-only")
+            ),
+            "{err}"
+        );
     }
 
     /// Backfill rejects changes to an existing index's cover columns or layout.
@@ -6136,9 +6197,14 @@ mod tests {
             let err = table(previous)
                 .await
                 .expect_err("changed cover columns or layout must be rejected");
-            assert!(err
-                .to_string()
-                .contains("index evolution must be append-only"));
+            assert!(
+                matches!(
+                    &err,
+                    DataFusionError::Plan(msg)
+                        if msg.contains("index evolution must be append-only")
+                ),
+                "{err}"
+            );
         }
     }
 
@@ -6171,7 +6237,7 @@ mod tests {
                 "orders",
                 &[existing],
                 IndexBackfillOptions::default(),
-                Some(&progress_tx),
+                &progress_tx,
             )
             .await
             .expect("no-op backfill should succeed");
@@ -6211,12 +6277,19 @@ mod tests {
                 &[],
                 IndexBackfillOptions {
                     row_batch_size: 0,
-                    start_from_primary_key: None,
+                    start_cursor: None,
                 },
             )
             .await
             .expect_err("row_batch_size=0 should fail");
-        assert!(err.to_string().contains("row_batch_size must be > 0"));
+        assert!(
+            matches!(
+                &err,
+                DataFusionError::Plan(msg)
+                    if msg.contains("row_batch_size must be > 0")
+            ),
+            "{err}"
+        );
     }
 
     #[tokio::test]
@@ -6277,9 +6350,9 @@ mod tests {
                 &[],
                 IndexBackfillOptions {
                     row_batch_size: 2,
-                    start_from_primary_key: None,
+                    start_cursor: None,
                 },
-                Some(&progress_tx),
+                &progress_tx,
             )
             .await
             .expect("backfill should succeed");
@@ -6336,12 +6409,12 @@ mod tests {
         };
         let (base_url, shutdown_tx) = spawn_mock_server(state.clone()).await;
         let prefix = exoware_sdk::StoreKeyPrefix::new(vec![42; 245]).unwrap();
-        let client = StoreClient::new(&base_url).prefixed(prefix.clone());
+        let store = StoreClient::new(&base_url).prefixed(prefix.clone());
         let columns = vec![
             TableColumnConfig::new("id", DataType::Int64, false),
             TableColumnConfig::new("tag", DataType::FixedSizeBinary(0), false),
         ];
-        let seed = KvSchema::new(client.clone())
+        let seed = KvSchema::new(store.clone())
             .table("rows", columns.clone(), vec!["id".into()], vec![])
             .unwrap();
         let mut writer = seed.batch_writer();
@@ -6349,12 +6422,12 @@ mod tests {
             writer
                 .insert(
                     "rows",
-                    vec![CellValue::Int64(id), CellValue::FixedBinary(vec![])],
+                    vec![CellValue::Int64(id), CellValue::FixedSizeBinary(vec![])],
                 )
                 .unwrap();
         }
         writer.flush().await.unwrap();
-        let schema = KvSchema::new(client)
+        let schema = KvSchema::new(store)
             .table(
                 "rows",
                 columns,
@@ -6369,9 +6442,9 @@ mod tests {
                 &[],
                 IndexBackfillOptions {
                     row_batch_size: 1,
-                    start_from_primary_key: None,
+                    start_cursor: None,
                 },
-                Some(&tx),
+                &tx,
             )
             .await
             .unwrap();
@@ -6398,7 +6471,7 @@ mod tests {
                 &[],
                 IndexBackfillOptions {
                     row_batch_size: 1,
-                    start_from_primary_key: Some(cursor),
+                    start_cursor: Some(cursor),
                 },
             )
             .await
@@ -6413,7 +6486,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn backfill_added_indexes_can_resume_from_primary_key() {
+    async fn backfill_added_indexes_can_resume_from_start_cursor() {
         let state = MockState {
             kv: Arc::new(Mutex::new(BTreeMap::new())),
             range_calls: Arc::new(AtomicUsize::new(0)),
@@ -6485,7 +6558,7 @@ mod tests {
                 &[],
                 IndexBackfillOptions {
                     row_batch_size: 2,
-                    start_from_primary_key: Some(resume_key.clone()),
+                    start_cursor: Some(resume_key.clone()),
                 },
             )
             .await
@@ -6516,12 +6589,15 @@ mod tests {
                 &[],
                 IndexBackfillOptions {
                     row_batch_size: 2,
-                    start_from_primary_key: Some(wrong_prefix),
+                    start_cursor: Some(wrong_prefix),
                 },
             )
             .await
             .expect_err("wrong key prefix must be rejected");
-        assert!(err.to_string().contains("primary-key prefix"));
+        assert!(
+            matches!(&err, DataFusionError::Plan(msg) if msg.contains("primary-key prefix")),
+            "{err}"
+        );
 
         let _ = shutdown_tx.send(());
     }
@@ -6576,7 +6652,7 @@ mod tests {
             guard.insert(key, Bytes::new());
         }
 
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
         let df = ctx
             .sql("SELECT amount_cents FROM orders WHERE status = 'open'")
@@ -6643,7 +6719,7 @@ mod tests {
             guard.insert(key, Bytes::from_static(b"not-codec"));
         }
 
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
         let df = ctx
             .sql("SELECT amount_cents FROM orders WHERE status = 'open'")
@@ -6718,7 +6794,7 @@ mod tests {
             .expect("row");
         writer.flush().await.expect("flush");
 
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
 
         let df = ctx
@@ -6825,9 +6901,9 @@ mod tests {
                     &[],
                     IndexBackfillOptions {
                         row_batch_size: 2,
-                        start_from_primary_key: None,
+                        start_cursor: None,
                     },
-                    Some(&progress_tx),
+                    &progress_tx,
                 )
                 .await
         });
@@ -6849,7 +6925,7 @@ mod tests {
                 &[],
                 IndexBackfillOptions {
                     row_batch_size: 2,
-                    start_from_primary_key: Some(resume_cursor),
+                    start_cursor: Some(resume_cursor),
                 },
             )
             .await
@@ -6949,9 +7025,9 @@ mod tests {
                     &[],
                     IndexBackfillOptions {
                         row_batch_size: 5,
-                        start_from_primary_key: None,
+                        start_cursor: None,
                     },
-                    Some(&progress_tx),
+                    &progress_tx,
                 )
                 .await
         });
@@ -7204,7 +7280,7 @@ mod tests {
             scan.execute(0, missing_session.task_ctx()),
             Err(datafusion::common::DataFusionError::Configuration(_))
         ));
-        let session_ctx = SqlContext::new(scan.client.clone());
+        let session_ctx = SqlContext::new(scan.store.clone());
         let mut stream = scan
             .execute(0, session_ctx.datafusion().task_ctx())
             .expect("scan execute should start");
@@ -7285,7 +7361,7 @@ mod tests {
                 vec![],
             )
             .expect("schema");
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
         let (batches, ()) = tokio::time::timeout(Duration::from_secs(5), async {
             tokio::join!(
@@ -7462,7 +7538,7 @@ mod tests {
                 vec![],
             )
             .expect("schema");
-        let ctx = SqlContext::builder(schema.client().clone())
+        let ctx = SqlContext::builder(schema.store().clone())
             .configure_datafusion(|builder| builder.with_physical_optimizer_rules(vec![]))
             .build();
         ctx.register_schema(schema).expect("register");
@@ -7598,7 +7674,7 @@ mod tests {
                 vec![],
             )
             .expect("schema");
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
 
         let (batches, ()) = tokio::time::timeout(Duration::from_secs(5), async {
@@ -7671,7 +7747,7 @@ mod tests {
                 vec![],
             )
             .expect("schema");
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
 
         let explain = physical_plan_text(
@@ -7727,7 +7803,7 @@ mod tests {
                 vec![],
             )
             .expect("schema");
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
 
         let explain = physical_plan_text(
@@ -7808,7 +7884,7 @@ mod tests {
             .expect("matching lower key");
         writer.flush().await.expect("seed rows");
 
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
         let sql = "SELECT account, height \
                    FROM tx_activity \
@@ -7875,7 +7951,7 @@ mod tests {
         }
         writer.flush().await.expect("seed rows");
 
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
         let sql = "SELECT id \
                    FROM events \
@@ -7933,7 +8009,7 @@ mod tests {
         }
         writer.flush().await.expect("seed rows");
 
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
         let sql = "SELECT id \
                    FROM events \
@@ -7990,7 +8066,7 @@ mod tests {
         }
         writer.flush().await.expect("seed rows");
 
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
 
         // Without an inner ORDER BY, LIMIT constrains the row count but not the selected rows.
@@ -8079,7 +8155,7 @@ mod tests {
             .expect("row");
         writer.flush().await.expect("seed rows");
 
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
 
         let oversized = "a".repeat(
@@ -8147,7 +8223,7 @@ mod tests {
         }
         writer.flush().await.expect("seed rows");
 
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
         // The two-row index frames contain one matching row followed by a rejection,
         // then a row whose residual predicate can either fail or satisfy the limit
@@ -8235,7 +8311,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
 
         let batches = ctx
@@ -8317,7 +8393,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8398,7 +8474,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8495,7 +8571,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8615,7 +8691,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8702,7 +8778,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8789,7 +8865,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8874,7 +8950,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8962,7 +9038,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -9050,7 +9126,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -9132,7 +9208,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -9218,7 +9294,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -9298,7 +9374,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -9399,7 +9475,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -9507,7 +9583,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -9593,7 +9669,7 @@ mod tests {
                 .expect("row");
         }
         writer.flush().await.expect("flush");
-        let ctx = SqlContext::builder(schema.client().clone())
+        let ctx = SqlContext::builder(schema.store().clone())
             .with_config(SessionConfig::new().with_batch_size(2))
             .build();
         ctx.register_schema(schema).expect("register");
@@ -9880,7 +9956,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
 
         // Without an alias the optimizer drops the identity projection above the
@@ -9981,7 +10057,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -10065,7 +10141,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SqlContext::new(schema.client().clone());
+        let ctx = SqlContext::new(schema.store().clone());
         ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -10203,7 +10279,7 @@ mod tests {
             }
             writer.flush().await.expect("flush batch");
 
-            let ctx = SqlContext::new(schema.client().clone());
+            let ctx = SqlContext::new(schema.store().clone());
             ctx.register_schema(schema).expect("register tables");
 
             let batches = ctx

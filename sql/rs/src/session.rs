@@ -24,16 +24,16 @@ pub struct SqlContext {
 
 impl SqlContext {
     /// Creates a context with a monotonic read session and Store aggregate reduction.
-    pub fn new(client: PrefixedStoreClient) -> Self {
-        Self::builder(client).build()
+    pub fn new(store: PrefixedStoreClient) -> Self {
+        Self::builder(store).build()
     }
 
-    pub fn builder(client: PrefixedStoreClient) -> SqlContextBuilder {
+    pub fn builder(store: PrefixedStoreClient) -> SqlContextBuilder {
         SqlContextBuilder {
             state: SessionStateBuilder::new_with_default_features()
                 .with_optimizer_rule(Arc::new(KvAggregatePushdownRule::new()))
                 .with_query_planner(Arc::new(KvQueryPlanner)),
-            session: ReadSession::monotonic(client, None),
+            session: ReadSession::monotonic(store, None),
         }
     }
 
@@ -160,14 +160,14 @@ impl SqlContextBuilder {
     }
 }
 
-// Keep the provider's client while sharing observations from the context.
+// Keep the provider's store while sharing observations from the context.
 pub(crate) fn read_session(
     config: &SessionConfig,
-    client: &PrefixedStoreClient,
+    store: &PrefixedStoreClient,
 ) -> Result<ReadSession> {
     config
         .get_extension::<ReadSession>()
-        .map(|session| session.with_store(client.clone()))
+        .map(|session| session.with_store(store.clone()))
         .ok_or_else(|| {
             DataFusionError::Configuration(
                 "Store reads require a ReadSession; use exoware_sql::SqlContext".into(),
