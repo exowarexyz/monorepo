@@ -300,6 +300,22 @@ impl StoreKeyPrefix {
         Ok(self.inner.encode_key(key)?)
     }
 
+    /// Check that `key` is already a physical Store key under this prefix:
+    /// it starts with the prefix and fits within [`MAX_KEY_LEN`].
+    pub fn check_physical_key(&self, key: &[u8]) -> Result<(), StoreKeyPrefixError> {
+        if !self.matches(key) {
+            return Err(StoreKeyPrefixError::PrefixMismatch);
+        }
+        if key.len() > MAX_KEY_LEN {
+            return Err(PrefixError::KeyTooLong {
+                len: key.len(),
+                max: MAX_KEY_LEN,
+            }
+            .into());
+        }
+        Ok(())
+    }
+
     /// Decode a physical Store key back into the logical keyspace as a
     /// zero-copy slice of `key`'s backing storage.
     pub fn decode_key(&self, key: &Key) -> Result<Key, StoreKeyPrefixError> {
@@ -914,6 +930,26 @@ impl StoreWriteBatch {
         value: impl IntoStoreWriteValue,
     ) -> Result<&mut Self, ClientError> {
         let key = client.encode_store_key(key)?;
+        let value = value.into_store_write_value();
+        self.encoded_len += put_entry_encoded_len(&key, &value);
+        self.entries.push((key, value));
+        Ok(self)
+    }
+
+    /// Stage a row whose key is already physical: it starts with `client`'s
+    /// namespace prefix.
+    ///
+    /// Unlike [`Self::push`], the key is staged as is rather than copied into
+    /// a new buffer behind the prefix, so callers that build keys with the
+    /// namespace in place skip an allocation and a copy per row. Fails when
+    /// the key does not start with the prefix or exceeds [`MAX_KEY_LEN`].
+    pub fn push_physical(
+        &mut self,
+        client: &PrefixedStoreClient,
+        key: Key,
+        value: impl IntoStoreWriteValue,
+    ) -> Result<&mut Self, ClientError> {
+        client.key_prefix().check_physical_key(&key)?;
         let value = value.into_store_write_value();
         self.encoded_len += put_entry_encoded_len(&key, &value);
         self.entries.push((key, value));
@@ -5571,6 +5607,47 @@ mod tests {
 
         let oversize = Key::from(vec![7u8; max + 1]);
         assert!(batch.push(&a, &oversize, b"v").is_err());
+        assert_eq!(batch.len(), 1);
+    }
+
+    #[test]
+    fn push_physical_stages_prefixed_keys_like_push() {
+        let base = StoreClient::new("http://localhost:8080");
+        let a = base.prefixed(StoreKeyPrefix::new(vec![1]).unwrap());
+        let logical = Bytes::from_static(b"logical-key");
+        let physical = a.encode_store_key(&logical).unwrap();
+
+        let mut pushed = StoreWriteBatch::new();
+        pushed.push(&a, &logical, b"v").unwrap();
+        let mut staged = StoreWriteBatch::new();
+        staged.push_physical(&a, physical.clone(), b"v").unwrap();
+        assert_eq!(staged.entries(), pushed.entries());
+        assert_eq!(staged.encoded_len(), pushed.encoded_len());
+
+        // The key is staged without a copy.
+        assert_eq!(staged.entries()[0].0.as_ptr(), physical.as_ptr());
+    }
+
+    #[test]
+    fn push_physical_rejects_foreign_and_oversized_keys() {
+        let base = StoreClient::new("http://localhost:8080");
+        let a = base.prefixed(StoreKeyPrefix::new(vec![1]).unwrap());
+        let mut batch = StoreWriteBatch::new();
+
+        // A logical key, or one from another namespace, does not start with the prefix.
+        let foreign = Key::from(vec![2u8, 7]);
+        assert!(matches!(
+            batch.push_physical(&a, foreign, b"v"),
+            Err(ClientError::Prefix(StoreKeyPrefixError::PrefixMismatch))
+        ));
+
+        let mut at_limit = vec![7u8; MAX_KEY_LEN];
+        at_limit[0] = 1;
+        batch.push_physical(&a, Key::from(at_limit), b"v").unwrap();
+
+        let mut oversize = vec![7u8; MAX_KEY_LEN + 1];
+        oversize[0] = 1;
+        assert!(batch.push_physical(&a, Key::from(oversize), b"v").is_err());
         assert_eq!(batch.len(), 1);
     }
 
