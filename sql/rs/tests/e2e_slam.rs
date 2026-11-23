@@ -680,6 +680,53 @@ async fn connect_requests_enforce_declared_field_lengths() {
 }
 
 #[tokio::test]
+async fn connect_query_runs_long_filters_on_store_tables() {
+    let store = common::local_store_client().await;
+    let schema = items_schema(&store);
+    let mut writer = schema.batch_writer();
+    for id in 0..100 {
+        writer
+            .insert(
+                "items",
+                vec![CellValue::Int64(id), CellValue::Utf8(id.to_string())],
+            )
+            .expect("the insert must succeed");
+    }
+    writer
+        .flush()
+        .await
+        .expect("the flush must succeed")
+        .expect("the writer must hold rows");
+    let server = Arc::new(SqlServer::new(schema).expect("the server must build"));
+    let (client, handle) = serve_sql(server).await;
+
+    // A lookup by a composite key is an OR of ANDs with one branch per key. These are the
+    // most keys and the most AND-ed comparisons the expression limit admits.
+    let keys: Vec<_> = (0..87)
+        .map(|key| format!("(id = {key} AND value = '{key}')"))
+        .collect();
+    let lookup = format!("SELECT value FROM items WHERE {}", keys.join(" OR "));
+    assert_eq!(query_row_count(&client, &lookup).await, 87);
+    let bounds: Vec<_> = (0..92).map(|bound| format!("id >= {bound}")).collect();
+    let filter = format!("SELECT value FROM items WHERE {}", bounds.join(" AND "));
+    assert_eq!(query_row_count(&client, &filter).await, 9);
+
+    // One more key or comparison is rejected as the caller's error.
+    for sql in [
+        format!("{lookup} OR (id = 87 AND value = '87')"),
+        format!("{filter} AND id >= 92"),
+    ] {
+        let error = query_error(&client, &sql).await;
+        assert_eq!(
+            error.code,
+            ErrorCode::InvalidArgument,
+            "{sql:.60}: {error:?}"
+        );
+    }
+    handle.abort();
+}
+
+#[tokio::test]
 async fn connect_query_rejects_changes_to_the_shared_session() {
     let store = common::local_store_client().await;
     let schema = items_schema(&store);

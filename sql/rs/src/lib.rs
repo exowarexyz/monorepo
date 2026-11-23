@@ -16,6 +16,7 @@ mod builder;
 mod codec;
 mod diagnostics;
 mod filter;
+mod nesting;
 mod predicate;
 mod scan;
 mod schema;

@@ -22,6 +22,7 @@ use crate::{
     builder::ProjectedBatchBuilder,
     codec::decode_primary_key_selected,
     filter::ScanAccessPlan,
+    nesting::{plan_statement, verify_predicate_nesting},
     predicate::QueryPredicate,
     proto::sql::v1::{
         Column as ProtoColumn, Index as ProtoIndex, IndexLayout as ProtoIndexLayout, QueryRequest,
@@ -352,10 +353,11 @@ impl Service for SqlConnect {
             let min_sequence_number = request.min_sequence_number;
             let read_session = ReadSession::monotonic(server.store.clone(), min_sequence_number);
             let ctx = server.ctx.with_read_session(read_session.clone());
-            let plan = ctx
-                .datafusion()
-                .state()
-                .create_logical_plan(&sql)
+
+            // A statement is measured while it is parsed and planned, because everything after
+            // that recurses along its nesting.
+            let state = ctx.datafusion().state();
+            let plan = plan_statement(&state, &sql)
                 .await
                 .map_err(datafusion_error_to_connect)?;
             verify_remote_plan(&plan).map_err(datafusion_error_to_connect)?;
@@ -647,6 +649,8 @@ fn compile_subscription_predicate(
     if where_sql.trim().is_empty() {
         return Ok(None);
     }
+    let state = ctx.state();
+    verify_predicate_nesting(&state, where_sql)?;
     let df_schema = DFSchema::try_from_qualified_schema(TableReference::bare(table_name), schema)?;
     let expression = ctx.parse_sql_expr(where_sql, &df_schema)?;
     expression.apply(|expr| {
@@ -670,7 +674,6 @@ fn compile_subscription_predicate(
         }
         Ok(TreeNodeRecursion::Continue)
     })?;
-    let state = ctx.state();
     let context = SimplifyContext::builder()
         .with_schema(Arc::new(df_schema.clone()))
         .with_config_options(state.config_options().clone())
@@ -1337,6 +1340,365 @@ mod tests {
         }
     }
 
+    /// Serves `server` on a local port and returns a client for it.
+    async fn serve(
+        server: Arc<SqlServer>,
+    ) -> (
+        crate::proto::sql::v1::ServiceClient<connectrpc::client::HttpClient>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .tap_io(set_tcp_nodelay);
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().fallback_service(sql_stack(server));
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = crate::proto::sql::v1::ServiceClient::new(
+            connectrpc::client::HttpClient::plaintext(),
+            connectrpc::client::ClientConfig::new(format!("http://{address}").parse().unwrap()),
+        );
+        (client, task)
+    }
+
+    #[tokio::test]
+    async fn query_rejects_statements_nested_past_the_limits() {
+        use crate::nesting::{
+            FILTER_COST, JOIN_COST, MAX_QUERY_DEPTH, MAX_RELATIONS, MAX_TYPE_DEPTH, NESTING_BUDGET,
+            NESTING_COST, OPERATOR_COST, PLAN_BUDGET,
+        };
+
+        let schema = KvSchema::new(StoreClient::new("http://127.0.0.1:1").unprefixed());
+        let server = Arc::new(SqlServer::new(schema).unwrap());
+        let batch = predicate_batch();
+        server
+            .context()
+            .register_table(
+                "items",
+                Arc::new(MemTable::try_new(batch.schema(), vec![vec![batch]]).unwrap()),
+            )
+            .unwrap();
+        let (client, task) = serve(server).await;
+        let query = async |sql: String| {
+            client
+                .query(QueryRequest {
+                    sql,
+                    ..Default::default()
+                })
+                .await
+        };
+        let wrap = |prefix: &str, body: &str, suffix: &str, times: usize| {
+            format!("{}{body}{}", prefix.repeat(times), suffix.repeat(times))
+        };
+
+        // Each shape builds a statement from a count, with the largest count the limits
+        // accept. The statement at that count is planned and run, on a 2 MiB test thread like
+        // the 2 MiB stack of a server worker, and one more is rejected.
+        let operators = (NESTING_BUDGET - NESTING_COST) / OPERATOR_COST;
+        let levels = NESTING_BUDGET / NESTING_COST - 1;
+        let keys = (NESTING_BUDGET - 2 * NESTING_COST - 2 * OPERATOR_COST) / OPERATOR_COST + 1;
+        let whens = (NESTING_BUDGET - 2 * NESTING_COST - OPERATOR_COST) / OPERATOR_COST;
+        // A projection and the relation it reads enclose each chain of plan steps.
+        let steps = PLAN_BUDGET - 2;
+        // The subquery below is a name, a projection of one level, an aggregation of one
+        // level, a filter of one level, and a named table.
+        let subquery = 1 + 2 + (JOIN_COST + 1) + (FILTER_COST + 1) + 2;
+        type Shape<'a> = Box<dyn Fn(usize) -> String + 'a>;
+        let shapes: [(usize, Shape<'_>); 23] = [
+            (
+                operators,
+                Box::new(|n| format!("SELECT id{} FROM items", "+id".repeat(n))),
+            ),
+            (
+                operators,
+                Box::new(|n| format!("SELECT status{} FROM items", " || ','".repeat(n))),
+            ),
+            (
+                operators,
+                Box::new(|n| {
+                    let terms = vec!["id > 0"; n].join(" AND ");
+                    format!("SELECT id FROM items WHERE {terms}")
+                }),
+            ),
+            (
+                keys,
+                Box::new(|n| {
+                    let keys: Vec<_> = (0..n)
+                        .map(|key| format!("(id = {key} AND status = '{key}')"))
+                        .collect();
+                    format!("SELECT id FROM items WHERE {}", keys.join(" OR "))
+                }),
+            ),
+            (
+                levels,
+                Box::new(|n| format!("SELECT {} FROM items", wrap("abs(", "id", ")", n))),
+            ),
+            (
+                levels,
+                Box::new(|n| format!("SELECT {} FROM items", wrap("(", "id", ")", n))),
+            ),
+            (
+                whens,
+                Box::new(|n| {
+                    let whens: String = (0..n)
+                        .map(|when| format!(" WHEN id = {when} THEN false"))
+                        .collect();
+                    format!("SELECT CASE{whens} END FROM items")
+                }),
+            ),
+            (
+                steps,
+                Box::new(|n| format!("SELECT 1{}", " UNION ALL SELECT 1".repeat(n))),
+            ),
+            (
+                steps / (JOIN_COST + 1),
+                Box::new(|n| {
+                    let more = " UNION SELECT id FROM items".repeat(n);
+                    format!("SELECT id FROM items{more}")
+                }),
+            ),
+            (
+                steps / (2 * JOIN_COST),
+                Box::new(|n| {
+                    let more = " INTERSECT SELECT id FROM items".repeat(n);
+                    format!("SELECT id FROM items{more}")
+                }),
+            ),
+            (
+                (steps - 1) / (JOIN_COST + 1),
+                Box::new(|n| {
+                    let joins: String = (1..=n)
+                        .map(|i| format!(" JOIN items a{i} ON a{i}.id = a0.id"))
+                        .collect();
+                    format!("SELECT a0.id FROM items a0{joins}")
+                }),
+            ),
+            (
+                steps / 2,
+                Box::new(|n| {
+                    let tables: String = (1..n)
+                        .map(|i| format!(", c{i} AS (SELECT id FROM c{})", i - 1))
+                        .collect();
+                    format!(
+                        "WITH c0 AS (SELECT id FROM items){tables} SELECT id FROM c{}",
+                        n - 1
+                    )
+                }),
+            ),
+            (
+                steps / 3,
+                Box::new(|n| {
+                    let tables: String = (1..n)
+                        .map(|i| format!(", c{i} AS (SELECT id + 1 AS id FROM c{})", i - 1))
+                        .collect();
+                    format!(
+                        "WITH c0 AS (SELECT id + 1 AS id FROM items){tables} SELECT id FROM c{}",
+                        n - 1
+                    )
+                }),
+            ),
+            (
+                steps,
+                Box::new(|n| {
+                    let renames: String = (0..n).map(|i| format!(" |> AS a{i}")).collect();
+                    format!("SELECT id FROM items{renames}")
+                }),
+            ),
+            (
+                steps / (FILTER_COST + 1),
+                Box::new(|n| {
+                    let filters: String = (0..n).map(|i| format!(" |> WHERE id > -{i}")).collect();
+                    format!("SELECT id FROM items{filters}")
+                }),
+            ),
+            (
+                steps / (JOIN_COST + 2),
+                Box::new(|n| {
+                    let windows: Vec<_> = (0..n)
+                        .map(|i| format!("count(*) OVER (ORDER BY id + {i})"))
+                        .collect();
+                    format!("SELECT {} FROM items", windows.join(", "))
+                }),
+            ),
+            (
+                (PLAN_BUDGET - 1 - subquery) / JOIN_COST,
+                Box::new(|n| {
+                    let subqueries: Vec<_> = (0..n)
+                        .map(|i| format!("(SELECT max(i.id) + {i} FROM items i WHERE i.id = o.id)"))
+                        .collect();
+                    format!("SELECT {} FROM items o", subqueries.join(", "))
+                }),
+            ),
+            (
+                MAX_RELATIONS.ilog(4) as usize,
+                Box::new(|n| {
+                    let tables: String = (1..=n)
+                        .map(|i| {
+                            let last = i - 1;
+                            format!(
+                                ", c{i} AS (SELECT a.x FROM c{last} a, c{last} b, c{last} c, \
+                                 c{last} d)"
+                            )
+                        })
+                        .collect();
+                    format!("WITH c0 AS (SELECT 1 AS x){tables} SELECT count(*) FROM c{n}")
+                }),
+            ),
+            (
+                MAX_QUERY_DEPTH - 1,
+                Box::new(|n| wrap("SELECT id FROM (", "SELECT id FROM items", ") d", n)),
+            ),
+            (
+                MAX_QUERY_DEPTH - 1,
+                Box::new(|n| format!("SELECT {}", wrap("(SELECT ", "max(id) FROM items", ")", n))),
+            ),
+            (
+                MAX_TYPE_DEPTH,
+                Box::new(|n| format!("SELECT CAST(NULL AS INT{})", "[]".repeat(n))),
+            ),
+            (
+                MAX_TYPE_DEPTH,
+                Box::new(|n| format!("SELECT CAST(NULL AS {})", wrap("ARRAY<", "INT", ">", n))),
+            ),
+            (
+                MAX_TYPE_DEPTH,
+                Box::new(|n| format!("SELECT arrow_cast(1, '{}')", wrap("List(", "Int64", ")", n))),
+            ),
+        ];
+        for (accepted, shape) in shapes {
+            let sql = shape(accepted);
+            query(sql.clone())
+                .await
+                .unwrap_or_else(|error| panic!("{sql:.60} must run: {error}"));
+            let sql = shape(accepted + 1);
+            let error = query(sql.clone()).await.unwrap_err();
+            assert_eq!(
+                error.code,
+                connectrpc::ErrorCode::InvalidArgument,
+                "{sql:.60}: {error}"
+            );
+        }
+
+        // Each statement is far past a limit. Planning or parsing it overflowed the stack or
+        // did not finish, and the second is as long as a request may be.
+        let whens: String = (0..800)
+            .map(|when| format!(" WHEN id = {when} THEN false"))
+            .collect();
+        let fan: String = (1..=20)
+            .map(|i| {
+                let last = i - 1;
+                format!(", c{i} AS (SELECT a.x FROM c{last} a, c{last} b, c{last} c)")
+            })
+            .collect();
+        for (sql, what) in [
+            (
+                format!("SELECT id{} FROM items", "+id".repeat(2_047)),
+                "expressions nested",
+            ),
+            (
+                format!("SELECT 1{}", "+1".repeat(32_763)),
+                "expressions nested",
+            ),
+            (
+                format!("SELECT CASE{whens} END FROM items"),
+                "expressions nested",
+            ),
+            (
+                format!("SELECT 1{}", " UNION ALL SELECT 1".repeat(3_000)),
+                "nested more than",
+            ),
+            (
+                format!("SELECT 1 FROM items{}", ", items".repeat(8_000)),
+                "relations",
+            ),
+            (
+                format!("WITH c0 AS (SELECT 1 AS x){fan} SELECT count(*) FROM c20"),
+                "relations",
+            ),
+            (
+                format!("SELECT 1 AS x{}", " |> WHERE true".repeat(4_500)),
+                "plans nested",
+            ),
+            (
+                format!(
+                    "WITH c0 AS (SELECT id FROM items){} SELECT id FROM c1500",
+                    (1..=1_500)
+                        .map(|i| format!(", c{i} AS (SELECT id FROM c{})", i - 1))
+                        .collect::<String>()
+                ),
+                "plans nested",
+            ),
+            (
+                format!(
+                    "SELECT {} FROM items o",
+                    (0..1_000)
+                        .map(|i| format!("(SELECT max(i.id) + {i} FROM items i WHERE i.id = o.id)"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                "plans nested",
+            ),
+            (
+                format!(
+                    "{}SELECT 1{}",
+                    "IF true THEN ".repeat(45),
+                    "; END IF".repeat(45)
+                ),
+                "statements nested",
+            ),
+            (
+                format!("{}SELECT 1", "EXPLAIN ".repeat(100)),
+                "statements nested",
+            ),
+            (
+                format!("SELECT NULL{}", "['a']".repeat(1_000)),
+                "data types nested",
+            ),
+            (
+                format!("SELECT CAST(NULL AS INT{})", "[]".repeat(1_577)),
+                "data types nested",
+            ),
+            (
+                format!("SELECT CAST(NULL AS {})", wrap("ARRAY<", "INT", ">", 3_583)),
+                "data types nested",
+            ),
+            (
+                format!(
+                    "SELECT CAST(NULL AS {})",
+                    wrap("STRUCT<a ", "INT", ">", 1_358)
+                ),
+                "data types nested",
+            ),
+            (
+                format!(
+                    "SELECT arrow_cast(1, '{}')",
+                    wrap("List(", "Int64", ")", 1_577)
+                ),
+                "data types nested",
+            ),
+            (
+                "SELECT arrow_cast(1, repeat('List(', 3000) || 'Int8' || repeat(')', 3000))"
+                    .to_string(),
+                "string literal",
+            ),
+        ] {
+            let error = query(sql.clone()).await.unwrap_err();
+            assert_eq!(
+                error.code,
+                connectrpc::ErrorCode::InvalidArgument,
+                "{sql:.60}: {error}"
+            );
+            let message = error.message.unwrap_or_default();
+            assert!(message.contains(what), "{sql:.60}: {message}");
+        }
+
+        // The server still answers.
+        query("SELECT count(*) FROM items".to_string())
+            .await
+            .unwrap();
+        task.abort();
+    }
+
     #[tokio::test]
     async fn query_rpc_returns_internal_on_count_overflow_and_remains_usable() {
         use crate::{proto::sql::v1::ServiceClient, TableColumnConfig};
@@ -1968,6 +2330,50 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn subscription_predicates_nest_up_to_the_limits() {
+        use crate::nesting::{MAX_TYPE_DEPTH, NESTING_BUDGET, NESTING_COST, OPERATOR_COST};
+
+        let ctx = DataFusionContext::new();
+        let batch = predicate_batch();
+        let compile =
+            |sql: &str| compile_subscription_predicate(&ctx, &batch.schema(), "orders", sql);
+
+        // The comparison is one more operator above the chain.
+        let operators = (NESTING_BUDGET - NESTING_COST) / OPERATOR_COST;
+        let chain = |operators: usize| format!("id{} > 0", "+1".repeat(operators));
+        let predicate = compile(&chain(operators - 1)).unwrap().unwrap();
+        assert_eq!(matching_ids(&predicate, &batch), vec![1, 2, 3, 4]);
+        for (sql, what) in [
+            (chain(operators), "expressions nested"),
+            // The longest predicate a subscription may carry.
+            (chain(2_043), "expressions nested"),
+            (
+                format!("id IN ({})", "SELECT 1 UNION ALL ".repeat(200) + "SELECT 1"),
+                "nested more than",
+            ),
+            (
+                format!("status{} IS NULL", "['a']".repeat(800)),
+                "data types nested",
+            ),
+            (
+                format!("CAST(id AS INT{}) IS NULL", "[]".repeat(MAX_TYPE_DEPTH + 1)),
+                "data types nested",
+            ),
+            (
+                format!(
+                    "arrow_cast(id, '{}Int8{}') IS NULL",
+                    "List(".repeat(600),
+                    ")".repeat(600)
+                ),
+                "data types nested",
+            ),
+        ] {
+            let error = compile(&sql).unwrap_err().to_string();
+            assert!(error.contains(what), "{sql:.40}: {error}");
+        }
     }
 
     #[test]
