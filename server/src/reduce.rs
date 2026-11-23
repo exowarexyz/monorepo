@@ -104,7 +104,7 @@ struct ExtractedReductionRow {
 
 #[derive(Debug)]
 struct ReducePlan {
-    request: Arc<RangeReduceParams>,
+    params: Arc<RangeReduceParams>,
     needs_value: bool,
     fields: Vec<KvFieldRef>,
     field_copies: Vec<usize>,
@@ -124,17 +124,17 @@ pub(crate) enum ResultKind {
 }
 
 impl ReducePlan {
-    fn new(request: Arc<RangeReduceParams>, context: &TaskContext) -> Result<Self, RangeError> {
-        validate_reduce_request(&request)?;
+    fn new(params: Arc<RangeReduceParams>, context: &TaskContext) -> Result<Self, RangeError> {
+        validate_reduce_params(&params)?;
         let mut fields = Vec::new();
         let mut columns = HashMap::new();
-        let group_exprs = request
+        let group_exprs = params
             .group_by
             .iter()
             .map(|expr| lower_expr(expr, &mut fields, &mut columns))
             .collect::<Vec<_>>();
         let count_all_expr = KvExpr::Literal(KvReducedValue::Boolean(true));
-        let arguments = request
+        let arguments = params
             .reducers
             .iter()
             .map(|reducer| {
@@ -148,11 +148,11 @@ impl ReducePlan {
         // Native columns share the input array; only computed expressions
         // need an additional materialization allowance.
         let mut field_copies = vec![0; fields.len()];
-        let literal_bytes = request
+        let literal_bytes = params
             .group_by
             .iter()
             .chain(
-                request
+                params
                     .reducers
                     .iter()
                     .map(|reducer| reducer.expr.as_ref().unwrap_or(&count_all_expr)),
@@ -163,8 +163,8 @@ impl ReducePlan {
         let needs_value = fields
             .iter()
             .any(|field| matches!(field, KvFieldRef::Value { .. }))
-            || request.filter.as_ref().is_some_and(predicate_needs_value)
-            || request
+            || params.filter.as_ref().is_some_and(predicate_needs_value)
+            || params
                 .reducers
                 .iter()
                 .any(|reducer| reducer.filter.as_ref().is_some_and(predicate_needs_value));
@@ -182,7 +182,7 @@ impl ReducePlan {
             })
             .collect::<Vec<_>>();
         let mut filter_predicates = Vec::new();
-        let filters = request
+        let filters = params
             .reducers
             .iter()
             .map(|reducer| {
@@ -250,16 +250,16 @@ impl ReducePlan {
         let groups = PhysicalGroupBy::new_single(
             group_exprs
                 .into_iter()
-                .zip(&request.group_by)
+                .zip(&params.group_by)
                 .enumerate()
                 .map(|(index, (expr, original))| {
                     Ok((compile(expr, Some(original))?, format!("group_{index}")))
                 })
                 .collect::<DfResult<Vec<_>>>()?,
         );
-        let mut result_kinds = Vec::with_capacity(request.reducers.len());
-        let mut aggregates = Vec::with_capacity(request.reducers.len());
-        for (index, (reducer, expr)) in request.reducers.iter().zip(arguments).enumerate() {
+        let mut result_kinds = Vec::with_capacity(params.reducers.len());
+        let mut aggregates = Vec::with_capacity(params.reducers.len());
+        for (index, (reducer, expr)) in params.reducers.iter().zip(arguments).enumerate() {
             result_kinds.push(match reducer.op {
                 RangeReduceOp::CountAll | RangeReduceOp::CountField => ResultKind::Count,
                 _ => ResultKind::Value,
@@ -275,7 +275,7 @@ impl ReducePlan {
             ));
         }
         Ok(Self {
-            request,
+            params,
             needs_value,
             fields,
             field_copies,
@@ -393,10 +393,10 @@ pub(crate) async fn execute_reduce<Q: Query>(
     query: Arc<Q>,
     start: Key,
     end: Key,
-    request: RangeReduceParams,
+    params: RangeReduceParams,
     context: Arc<TaskContext>,
 ) -> Result<ReduceExecution, RangeError> {
-    let plan = Arc::new(ReducePlan::new(Arc::new(request), &context)?);
+    let plan = Arc::new(ReducePlan::new(Arc::new(params), &context)?);
     let RangeScanResult {
         scan,
         sequence_number,
@@ -423,7 +423,7 @@ pub(crate) async fn execute_reduce<Q: Query>(
         batches,
         extra,
         sequence_number,
-        group_count: plan.request.group_by.len(),
+        group_count: plan.params.group_by.len(),
         result_kinds: plan.result_kinds.clone(),
     })
 }
@@ -863,13 +863,13 @@ fn scalar_to_reduced(value: ScalarValue) -> DfResult<Option<KvReducedValue>> {
     }))
 }
 
-fn validate_reduce_request(request: &RangeReduceParams) -> Result<(), RangeError> {
-    if request.reducers.is_empty() && request.group_by.is_empty() {
+fn validate_reduce_params(params: &RangeReduceParams) -> Result<(), RangeError> {
+    if params.reducers.is_empty() && params.group_by.is_empty() {
         return Err(RangeError::Reduce(
             "range reduction request requires at least one reducer or group-by field".to_string(),
         ));
     }
-    for reducer in &request.reducers {
+    for reducer in &params.reducers {
         match reducer.op {
             RangeReduceOp::CountAll => {
                 if reducer.expr.is_some() {
@@ -898,7 +898,7 @@ fn extract_reduce_row(
     value: &Bytes,
     plan: &ReducePlan,
 ) -> Result<Option<ExtractedReductionRow>, RangeError> {
-    let request = &plan.request;
+    let params = &plan.params;
     let decoded = if plan.needs_value {
         Some(
             decode_stored_row(value.as_ref())
@@ -909,7 +909,7 @@ fn extract_reduce_row(
     };
     let archived = decoded.as_ref();
 
-    if let Some(filter) = &request.filter {
+    if let Some(filter) = &params.filter {
         if !eval_predicate(key, archived, filter).map_err(RangeError::Reduce)? {
             return Ok(None);
         }
@@ -1001,7 +1001,7 @@ mod tests {
         })
     }
 
-    fn scalar_request(reducers: Vec<RangeReducerSpec>) -> RangeReduceParams {
+    fn scalar_params(reducers: Vec<RangeReducerSpec>) -> RangeReduceParams {
         RangeReduceParams {
             reducers,
             group_by: Vec::new(),
@@ -1039,10 +1039,10 @@ mod tests {
 
     fn reduce(
         rows: &[(Key, Bytes)],
-        request: &RangeReduceParams,
+        params: &RangeReduceParams,
     ) -> Result<RangeReduceResponse, RangeError> {
         futures::executor::block_on(async {
-            let plan = ReducePlan::new(Arc::new(request.clone()), &TaskContext::default())?;
+            let plan = ReducePlan::new(Arc::new(params.clone()), &TaskContext::default())?;
             let batches = rows
                 .chunks(REDUCE_BATCH_ROWS)
                 .map(|rows| plan.batch(rows))
@@ -1063,8 +1063,8 @@ mod tests {
             let schema = stream.schema();
             let batches = stream.try_collect::<Vec<_>>().await?;
             let mut batch = concat_batches(&schema, &batches).map_err(DataFusionError::from)?;
-            if !request.group_by.is_empty() {
-                let columns = batch.columns()[..request.group_by.len()]
+            if !params.group_by.is_empty() {
+                let columns = batch.columns()[..params.group_by.len()]
                     .iter()
                     .map(|values| SortColumn {
                         values: values.clone(),
@@ -1079,8 +1079,8 @@ mod tests {
                 groups: Vec::new(),
             };
             for row in 0..batch.num_rows() {
-                let group = decode_group(&batch, row, request.group_by.len(), &plan.result_kinds)?;
-                if request.group_by.is_empty() {
+                let group = decode_group(&batch, row, params.group_by.len(), &plan.result_kinds)?;
+                if params.group_by.is_empty() {
                     response.results = group.results;
                 } else {
                     response.groups.push(group);
@@ -1093,24 +1093,24 @@ mod tests {
     #[test]
     fn malformed_rows_and_expression_errors_fail_instead_of_skipping_rows() {
         let sum = reducer(RangeReduceOp::SumField, Some(int64_value_field(0)));
-        let request = scalar_request(vec![reducer(RangeReduceOp::CountAll, None), sum]);
+        let params = scalar_params(vec![reducer(RangeReduceOp::CountAll, None), sum]);
         let malformed = [(Key::from(b"a".to_vec()), Bytes::from_static(b"invalid row"))];
-        assert!(reduce(&malformed, &request).is_err());
+        assert!(reduce(&malformed, &params).is_err());
         let rows = [make_row(b"a", vec![Some(StoredValue::Int64(7))])];
         let divide_zero = KvExpr::Div(
             Box::new(int64_value_field(0)),
             Box::new(KvExpr::Literal(KvReducedValue::Int64(0))),
         );
-        let mut request = scalar_request(vec![
+        let mut params = scalar_params(vec![
             reducer(RangeReduceOp::CountAll, None),
             reducer(RangeReduceOp::SumField, Some(divide_zero.clone())),
         ]);
-        assert!(reduce(&rows, &request).is_err());
-        request.reducers.truncate(1);
-        request.group_by = vec![divide_zero];
-        assert!(reduce(&rows, &request).is_err());
-        request.group_by.clear();
-        request.filter = Some(KvPredicate {
+        assert!(reduce(&rows, &params).is_err());
+        params.reducers.truncate(1);
+        params.group_by = vec![divide_zero];
+        assert!(reduce(&rows, &params).is_err());
+        params.group_by.clear();
+        params.filter = Some(KvPredicate {
             checks: vec![KvPredicateCheck {
                 field: KvFieldRef::Value {
                     index: 2,
@@ -1121,7 +1121,7 @@ mod tests {
             }],
             contradiction: false,
         });
-        assert!(reduce(&rows, &request).is_err());
+        assert!(reduce(&rows, &params).is_err());
     }
 
     #[test]
@@ -1130,7 +1130,7 @@ mod tests {
             make_row(b"a", vec![Some(StoredValue::Int64(i64::MAX))]),
             make_row(b"b", vec![Some(StoredValue::Int64(2))]),
         ];
-        let request = scalar_request(vec![
+        let params = scalar_params(vec![
             reducer(RangeReduceOp::CountAll, None),
             reducer(RangeReduceOp::SumField, Some(int64_value_field(0))),
             reducer(
@@ -1141,7 +1141,7 @@ mod tests {
                 )),
             ),
         ]);
-        let response = reduce(&rows, &request).unwrap();
+        let response = reduce(&rows, &params).unwrap();
         assert_eq!(response.results[0].value, result_u64(2));
         assert_eq!(response.results[1].value, result_i64(i64::MIN + 1));
         assert_eq!(response.results[2].value, result_i64(i64::MIN + 3));
@@ -1303,15 +1303,15 @@ mod tests {
             ),
         ])
         .unwrap();
-        let request = scalar_request(
+        let params = scalar_params(
             cases
                 .iter()
                 .map(|(expr, _)| reducer(RangeReduceOp::MinField, Some(expr.clone())))
                 .collect(),
         );
-        let plan = ReducePlan::new(Arc::new(request.clone()), &TaskContext::default()).unwrap();
+        let plan = ReducePlan::new(Arc::new(params.clone()), &TaskContext::default()).unwrap();
         assert_eq!(plan.fields.len(), 7);
-        let response = reduce(&rows, &request).unwrap();
+        let response = reduce(&rows, &params).unwrap();
         let context = SessionContext::new();
         let schema = DFSchema::try_from(input.schema().as_ref().clone()).unwrap();
         for (index, (_, expr)) in cases.into_iter().enumerate() {
@@ -1374,7 +1374,7 @@ mod tests {
         for (expr, expected) in cases {
             let response = reduce(
                 &[(Key::default(), Bytes::from_static(b"invalid row"))],
-                &scalar_request(vec![reducer(RangeReduceOp::MinField, Some(expr))]),
+                &scalar_params(vec![reducer(RangeReduceOp::MinField, Some(expr))]),
             )
             .unwrap();
             assert_eq!(response.results[0].value, expected);
@@ -1398,7 +1398,7 @@ mod tests {
                 );
                 let response = reduce(
                     &rows,
-                    &scalar_request(vec![reducer(RangeReduceOp::SumField, Some(expr))]),
+                    &scalar_params(vec![reducer(RangeReduceOp::SumField, Some(expr))]),
                 )
                 .unwrap();
                 let Some(KvReducedValue::Float64(actual)) = response.results[0].value else {
@@ -1423,7 +1423,7 @@ mod tests {
                 Box::new(int64_value_field(2)),
             )),
         );
-        let request = scalar_request(vec![reducer(RangeReduceOp::SumField, Some(expr))]);
+        let params = scalar_params(vec![reducer(RangeReduceOp::SumField, Some(expr))]);
         for values in [
             vec![None],
             vec![
@@ -1432,7 +1432,7 @@ mod tests {
                 Some(StoredValue::Int64(0)),
             ],
         ] {
-            assert!(reduce(&[make_row(b"a", values)], &request).is_err());
+            assert!(reduce(&[make_row(b"a", values)], &params).is_err());
         }
     }
 
@@ -1443,7 +1443,7 @@ mod tests {
             kind: KvFieldKind::Int64,
         });
         let expr = KvExpr::Add(Box::new(field.clone()), Box::new(field));
-        let request = RangeReduceParams {
+        let params = RangeReduceParams {
             group_by: vec![expr.clone()],
             reducers: vec![
                 reducer(RangeReduceOp::SumField, Some(expr.clone())),
@@ -1455,13 +1455,13 @@ mod tests {
             ],
             filter: None,
         };
-        let plan = ReducePlan::new(Arc::new(request.clone()), &TaskContext::default()).unwrap();
+        let plan = ReducePlan::new(Arc::new(params.clone()), &TaskContext::default()).unwrap();
         assert_eq!(plan.fields.len(), 1);
         assert!(!plan.needs_value);
         let key = ((3_i64 as u64) ^ (1 << 63)).to_be_bytes().to_vec();
         let response = reduce(
             &[(Key::from(key), Bytes::from_static(b"not a stored row"))],
-            &request,
+            &params,
         )
         .unwrap();
         assert_eq!(response.groups[0].group_values, vec![result_i64(6)]);
@@ -1488,7 +1488,7 @@ mod tests {
             )
             .unwrap();
         let expected = std::panic::catch_unwind(AssertUnwindSafe(|| native.evaluate(&input)));
-        let request = scalar_request(vec![reducer(
+        let params = scalar_params(vec![reducer(
             RangeReduceOp::MinField,
             Some(KvExpr::DateTruncDay(Box::new(KvExpr::Field(
                 KvFieldRef::Value {
@@ -1499,7 +1499,7 @@ mod tests {
             )))),
         )]);
         let context = Arc::new(TaskContext::default());
-        let plan = ReducePlan::new(Arc::new(request), &context).unwrap();
+        let plan = ReducePlan::new(Arc::new(params), &context).unwrap();
         let batch = plan
             .batch(&[make_row(b"a", vec![Some(StoredValue::Int64(i64::MIN))])])
             .unwrap();
@@ -1536,7 +1536,7 @@ mod tests {
             }
         }
         assert!(stream.next().await.is_none());
-        let good = scalar_request(vec![reducer(RangeReduceOp::CountAll, None)]);
+        let good = scalar_params(vec![reducer(RangeReduceOp::CountAll, None)]);
         assert_eq!(
             reduce(&[make_row(b"b", vec![])], &good).unwrap().results[0].value,
             result_u64(1)
@@ -1609,7 +1609,7 @@ mod tests {
                 .unwrap()
                 .into_array(input.num_rows())
                 .unwrap();
-            let request = scalar_request(vec![reducer(
+            let params = scalar_params(vec![reducer(
                 RangeReduceOp::MinField,
                 Some(KvExpr::CastFloat64(Box::new(KvExpr::Field(
                     KvFieldRef::Value {
@@ -1623,7 +1623,7 @@ mod tests {
                 let expected =
                     scalar_to_reduced(ScalarValue::try_from_array(&native, index).unwrap())
                         .unwrap();
-                let response = reduce(&[make_row(b"a", vec![value])], &request).unwrap();
+                let response = reduce(&[make_row(b"a", vec![value])], &params).unwrap();
                 assert_eq!(response.results[0].value, expected, "{kind:?} row {index}");
             }
         }
@@ -1661,17 +1661,17 @@ mod tests {
         ] {
             let mut sum = reducer(RangeReduceOp::SumField, Some(expr));
             sum.filter = Some(filter.clone());
-            let mut request = scalar_request(vec![reducer(RangeReduceOp::CountAll, None), sum]);
-            let response = reduce(&rows, &request).unwrap();
+            let mut params = scalar_params(vec![reducer(RangeReduceOp::CountAll, None), sum]);
+            let response = reduce(&rows, &params).unwrap();
             assert_eq!(response.results[0].value, result_u64(4));
             assert_eq!(response.results[1].value, expected);
 
-            request.group_by = vec![KvExpr::Literal(KvReducedValue::Int64(0))];
-            let error = reduce(&rows, &request).unwrap_err();
+            params.group_by = vec![KvExpr::Literal(KvReducedValue::Int64(0))];
+            let error = reduce(&rows, &params).unwrap_err();
             assert!(error.to_string().contains("Divide by zero"), "{error}");
 
-            request.filter = Some(filter.clone());
-            let response = reduce(&rows, &request).unwrap();
+            params.filter = Some(filter.clone());
+            let response = reduce(&rows, &params).unwrap();
             assert_eq!(response.groups[0].results[0].value, result_u64(3));
             assert_eq!(response.groups[0].results[1].value, expected);
         }
@@ -1694,14 +1694,14 @@ mod tests {
             }],
             contradiction: false,
         });
-        let mut request =
-            scalar_request(vec![filtered_count, reducer(RangeReduceOp::CountAll, None)]);
+        let mut params =
+            scalar_params(vec![filtered_count, reducer(RangeReduceOp::CountAll, None)]);
         let rows = [
             make_row(b"a", vec![Some(StoredValue::Int64(1))]),
             make_row(b"b", vec![None]),
             make_row(b"c", vec![Some(StoredValue::Int64(3))]),
         ];
-        let plan = ReducePlan::new(Arc::new(request.clone()), &TaskContext::default()).unwrap();
+        let plan = ReducePlan::new(Arc::new(params.clone()), &TaskContext::default()).unwrap();
         assert!(plan.needs_value);
         assert!(plan.fields.is_empty());
         let batch = plan.batch(&rows).unwrap();
@@ -1715,17 +1715,13 @@ mod tests {
                 .unwrap(),
             &BooleanArray::from(vec![false, false, true])
         );
-        let response = reduce(&rows, &request).unwrap();
+        let response = reduce(&rows, &params).unwrap();
         assert_eq!(response.results[0].value, result_u64(1));
         assert_eq!(response.results[1].value, result_u64(3));
-        assert!(reduce(
-            &[(Key::default(), Bytes::from_static(b"bad row"))],
-            &request
-        )
-        .is_err());
+        assert!(reduce(&[(Key::default(), Bytes::from_static(b"bad row"))], &params).is_err());
 
-        request.group_by = vec![int64_value_field(0)];
-        let response = reduce(&rows, &request).unwrap();
+        params.group_by = vec![int64_value_field(0)];
+        let response = reduce(&rows, &params).unwrap();
         assert_eq!(response.groups.len(), 3);
         for group in response.groups {
             let accepted = group.group_values[0] == result_i64(3);
@@ -1751,8 +1747,8 @@ mod tests {
             }],
             contradiction: false,
         });
-        let request = scalar_request(vec![filtered, reducer(RangeReduceOp::CountAll, None)]);
-        let plan = ReducePlan::new(Arc::new(request.clone()), &TaskContext::default()).unwrap();
+        let params = scalar_params(vec![filtered, reducer(RangeReduceOp::CountAll, None)]);
+        let plan = ReducePlan::new(Arc::new(params.clone()), &TaskContext::default()).unwrap();
         assert!(!plan.needs_value);
         let rows = [1_i64, 2]
             .into_iter()
@@ -1763,7 +1759,7 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let response = reduce(&rows, &request).unwrap();
+        let response = reduce(&rows, &params).unwrap();
         assert_eq!(response.results[0].value, result_u64(1));
         assert_eq!(response.results[1].value, result_u64(2));
     }
@@ -1800,14 +1796,14 @@ mod tests {
             ],
         ] {
             let outputs = expressions.len();
-            let request = scalar_request(
+            let params = scalar_params(
                 expressions
                     .into_iter()
                     .map(|expr| reducer(RangeReduceOp::MinField, Some(expr)))
                     .collect(),
             );
             cases.push((
-                request,
+                params,
                 literal_bytes * outputs,
                 REDUCE_BATCH_BYTES,
                 context.clone(),
@@ -1826,15 +1822,15 @@ mod tests {
             (vec![KvExpr::Literal(KvReducedValue::Int64(0))], 1024),
             (Vec::new(), 32),
         ] {
-            let request = RangeReduceParams {
+            let params = RangeReduceParams {
                 reducers: vec![reducer(RangeReduceOp::CountAll, None); count],
                 group_by,
                 filter: None,
             };
-            cases.push((request, count / 8, budget, context.clone()));
+            cases.push((params, count / 8, budget, context.clone()));
         }
-        for (request, bytes_per_row, budget, context) in cases {
-            let plan = Arc::new(ReducePlan::new(Arc::new(request), &context).unwrap());
+        for (params, bytes_per_row, budget, context) in cases {
+            let plan = Arc::new(ReducePlan::new(Arc::new(params), &context).unwrap());
             let partition = ReducePartition {
                 scan: Mutex::new(Some(Rows(vec![
                     (Bytes::new(), Bytes::new());
@@ -1861,8 +1857,8 @@ mod tests {
 
     #[test]
     fn count_all_over_empty_rows() {
-        let request = scalar_request(vec![reducer(RangeReduceOp::CountAll, None)]);
-        let response = reduce(&[], &request).unwrap();
+        let params = scalar_params(vec![reducer(RangeReduceOp::CountAll, None)]);
+        let response = reduce(&[], &params).unwrap();
         assert_eq!(response.results.len(), 1);
         assert_eq!(response.results[0].value, result_u64(0));
     }
@@ -1874,8 +1870,8 @@ mod tests {
             make_row(b"b", vec![]),
             make_row(b"c", vec![]),
         ];
-        let request = scalar_request(vec![reducer(RangeReduceOp::CountAll, None)]);
-        let response = reduce(&rows, &request).unwrap();
+        let params = scalar_params(vec![reducer(RangeReduceOp::CountAll, None)]);
+        let response = reduce(&rows, &params).unwrap();
         assert_eq!(response.results[0].value, result_u64(3));
     }
 
@@ -1886,11 +1882,11 @@ mod tests {
             make_row(b"b", vec![None]),
             make_row(b"c", vec![Some(StoredValue::Int64(3))]),
         ];
-        let request = scalar_request(vec![reducer(
+        let params = scalar_params(vec![reducer(
             RangeReduceOp::CountField,
             Some(int64_value_field(0)),
         )]);
-        let response = reduce(&rows, &request).unwrap();
+        let response = reduce(&rows, &params).unwrap();
         assert_eq!(response.results[0].value, result_u64(2));
     }
 
@@ -1901,11 +1897,11 @@ mod tests {
             make_row(b"b", vec![Some(StoredValue::Int64(20))]),
             make_row(b"c", vec![Some(StoredValue::Int64(-5))]),
         ];
-        let request = scalar_request(vec![reducer(
+        let params = scalar_params(vec![reducer(
             RangeReduceOp::SumField,
             Some(int64_value_field(0)),
         )]);
-        let response = reduce(&rows, &request).unwrap();
+        let response = reduce(&rows, &params).unwrap();
         assert_eq!(response.results[0].value, result_i64(25));
     }
 
@@ -1915,11 +1911,11 @@ mod tests {
             make_row(b"a", vec![Some(StoredValue::Float64(1.5))]),
             make_row(b"b", vec![Some(StoredValue::Float64(2.5))]),
         ];
-        let request = scalar_request(vec![reducer(
+        let params = scalar_params(vec![reducer(
             RangeReduceOp::SumField,
             Some(float64_value_field(0)),
         )]);
-        let response = reduce(&rows, &request).unwrap();
+        let response = reduce(&rows, &params).unwrap();
         assert_eq!(response.results[0].value, result_f64(4.0));
     }
 
@@ -1930,11 +1926,11 @@ mod tests {
             make_row(b"b", vec![Some(StoredValue::Int64(10))]),
             make_row(b"c", vec![Some(StoredValue::Int64(20))]),
         ];
-        let request = scalar_request(vec![reducer(
+        let params = scalar_params(vec![reducer(
             RangeReduceOp::MinField,
             Some(int64_value_field(0)),
         )]);
-        let response = reduce(&rows, &request).unwrap();
+        let response = reduce(&rows, &params).unwrap();
         assert_eq!(response.results[0].value, result_i64(10));
     }
 
@@ -1945,11 +1941,11 @@ mod tests {
             make_row(b"b", vec![Some(StoredValue::Int64(10))]),
             make_row(b"c", vec![Some(StoredValue::Int64(50))]),
         ];
-        let request = scalar_request(vec![reducer(
+        let params = scalar_params(vec![reducer(
             RangeReduceOp::MaxField,
             Some(int64_value_field(0)),
         )]);
-        let response = reduce(&rows, &request).unwrap();
+        let response = reduce(&rows, &params).unwrap();
         assert_eq!(response.results[0].value, result_i64(50));
     }
 
@@ -1962,12 +1958,12 @@ mod tests {
             make_row(b"d", vec![Some(StoredValue::Utf8("y".into()))]),
             make_row(b"e", vec![Some(StoredValue::Utf8("x".into()))]),
         ];
-        let request = RangeReduceParams {
+        let params = RangeReduceParams {
             reducers: vec![reducer(RangeReduceOp::CountAll, None)],
             group_by: vec![utf8_value_field(0)],
             filter: None,
         };
-        let response = reduce(&rows, &request).unwrap();
+        let response = reduce(&rows, &params).unwrap();
         assert!(response.results.is_empty());
         assert_eq!(response.groups.len(), 2);
 
@@ -1997,13 +1993,13 @@ mod tests {
     }
 
     #[test]
-    fn validates_empty_request() {
-        let request = RangeReduceParams {
+    fn validates_empty_params() {
+        let params = RangeReduceParams {
             reducers: Vec::new(),
             group_by: Vec::new(),
             filter: None,
         };
-        let err = reduce(&[], &request).unwrap_err();
+        let err = reduce(&[], &params).unwrap_err();
         assert!(
             err.to_string().contains("at least one reducer"),
             "unexpected error: {err}"
@@ -2012,11 +2008,11 @@ mod tests {
 
     #[test]
     fn count_all_rejects_expression() {
-        let request = scalar_request(vec![reducer(
+        let params = scalar_params(vec![reducer(
             RangeReduceOp::CountAll,
             Some(int64_value_field(0)),
         )]);
-        let err = reduce(&[], &request).unwrap_err();
+        let err = reduce(&[], &params).unwrap_err();
         assert!(
             err.to_string()
                 .contains("count_all reducer must not specify an expression"),
@@ -2032,8 +2028,8 @@ mod tests {
             RangeReduceOp::MaxField,
             RangeReduceOp::CountField,
         ] {
-            let request = scalar_request(vec![reducer(op, None)]);
-            let err = reduce(&[], &request).unwrap_err();
+            let params = scalar_params(vec![reducer(op, None)]);
+            let err = reduce(&[], &params).unwrap_err();
             assert!(
                 err.to_string()
                     .contains("expression reducer requires an expression"),
@@ -2049,7 +2045,7 @@ mod tests {
             make_row(b"b", vec![Some(StoredValue::Int64(20))]),
             make_row(b"c", vec![Some(StoredValue::Int64(30))]),
         ];
-        let request = RangeReduceParams {
+        let params = RangeReduceParams {
             reducers: vec![reducer(RangeReduceOp::SumField, Some(int64_value_field(0)))],
             group_by: Vec::new(),
             filter: Some(KvPredicate {
@@ -2067,7 +2063,7 @@ mod tests {
                 contradiction: false,
             }),
         };
-        let response = reduce(&rows, &request).unwrap();
+        let response = reduce(&rows, &params).unwrap();
         assert_eq!(response.results[0].value, result_i64(50));
     }
 
@@ -2078,11 +2074,11 @@ mod tests {
             make_row(b"b", vec![None]),
             make_row(b"c", vec![Some(StoredValue::Int64(30))]),
         ];
-        let request = scalar_request(vec![
+        let params = scalar_params(vec![
             reducer(RangeReduceOp::CountAll, None),
             reducer(RangeReduceOp::SumField, Some(int64_value_field(0))),
         ]);
-        let response = reduce(&rows, &request).unwrap();
+        let response = reduce(&rows, &params).unwrap();
         assert_eq!(response.results.len(), 2);
         assert_eq!(response.results[0].value, result_u64(3));
         assert_eq!(response.results[1].value, result_i64(40));
@@ -2090,12 +2086,12 @@ mod tests {
 
     #[test]
     fn scalar_reducer_handles_all_field_indexes() {
-        let request = scalar_request(
+        let params = scalar_params(
             (0..=u16::MAX)
                 .map(|index| reducer(RangeReduceOp::CountField, Some(int64_value_field(index))))
                 .collect(),
         );
-        let response = reduce(&[], &request).unwrap();
+        let response = reduce(&[], &params).unwrap();
         assert_eq!(response.results.len(), usize::from(u16::MAX) + 1);
         assert!(response
             .results
@@ -2129,12 +2125,12 @@ mod tests {
                 ],
             ),
         ];
-        let request = RangeReduceParams {
+        let params = RangeReduceParams {
             reducers: vec![reducer(RangeReduceOp::SumField, Some(int64_value_field(1)))],
             group_by: vec![utf8_value_field(0)],
             filter: None,
         };
-        let response = reduce(&rows, &request).unwrap();
+        let response = reduce(&rows, &params).unwrap();
         assert!(response.results.is_empty());
         assert_eq!(response.groups.len(), 2);
 
@@ -2170,7 +2166,7 @@ mod tests {
             make_row(b"b", vec![Some(StoredValue::Int64(20))]),
             make_row(b"c", vec![Some(StoredValue::Int64(30))]),
         ];
-        let request = RangeReduceParams {
+        let params = RangeReduceParams {
             reducers: vec![reducer(RangeReduceOp::CountAll, None)],
             group_by: Vec::new(),
             filter: Some(KvPredicate {
@@ -2188,14 +2184,14 @@ mod tests {
                 contradiction: false,
             }),
         };
-        let response = reduce(&rows, &request).unwrap();
+        let response = reduce(&rows, &params).unwrap();
         assert_eq!(response.results.len(), 1);
         assert_eq!(response.results[0].value, result_u64(2));
     }
 
     #[test]
     fn mixed_type_min_max_returns_error() {
-        let request = scalar_request(vec![reducer(
+        let params = scalar_params(vec![reducer(
             RangeReduceOp::MinField,
             Some(int64_value_field(0)),
         )]);
@@ -2203,7 +2199,7 @@ mod tests {
             b"a",
             vec![Some(StoredValue::Utf8("hello".into()))],
         )];
-        assert!(reduce(&rows, &request).is_err());
+        assert!(reduce(&rows, &params).is_err());
     }
     #[test]
     fn grouping_preserves_null_nan_payloads_and_signed_zero() {
@@ -2222,12 +2218,12 @@ mod tests {
             .enumerate()
             .map(|(i, value)| make_row(&i.to_be_bytes(), vec![value.map(StoredValue::Float64)]))
             .collect::<Vec<_>>();
-        let request = RangeReduceParams {
+        let params = RangeReduceParams {
             reducers: vec![reducer(RangeReduceOp::CountAll, None)],
             group_by: vec![float64_value_field(0)],
             filter: None,
         };
-        let response = reduce(&rows, &request).unwrap();
+        let response = reduce(&rows, &params).unwrap();
         assert_eq!(response.groups.len(), 4);
         let groups = response
             .groups
@@ -2339,7 +2335,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                let request = RangeReduceParams {
+                let params = RangeReduceParams {
                     reducers: vec![
                         reducer(RangeReduceOp::MinField, Some(float64_value_field(0))),
                         reducer(RangeReduceOp::MaxField, Some(float64_value_field(0))),
@@ -2352,7 +2348,7 @@ mod tests {
                     },
                     filter: None,
                 };
-                let response = reduce(&rows, &request).unwrap();
+                let response = reduce(&rows, &params).unwrap();
                 let Some(expected) = expected.iter().find(|batch| batch.num_rows() != 0) else {
                     assert!(response.groups.is_empty());
                     continue;
@@ -2406,7 +2402,7 @@ mod tests {
         let decimal128 = field(1, KvFieldKind::Decimal128);
         let decimal256 = field(2, KvFieldKind::Decimal256);
         let float = float64_value_field(3);
-        let request = RangeReduceParams {
+        let params = RangeReduceParams {
             reducers: vec![
                 reducer(RangeReduceOp::CountAll, None),
                 reducer(RangeReduceOp::SumField, Some(decimal128.clone())),
@@ -2450,7 +2446,7 @@ mod tests {
                 })
             })
             .collect::<Vec<_>>();
-        let plan = ReducePlan::new(Arc::new(request), &TaskContext::default()).unwrap();
+        let plan = ReducePlan::new(Arc::new(params), &TaskContext::default()).unwrap();
         let batches = rows
             .chunks(128)
             .map(|rows| plan.batch(rows).unwrap())

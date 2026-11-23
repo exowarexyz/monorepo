@@ -119,7 +119,7 @@ by [its backend configuration](../examples/simulator/src/rocks.rs).
 
 The Reduce RPC uses DataFusion aggregation. By default, group state stays in
 memory, and unordered aggregation consumes its input before returning results.
-To bound that state, use [QueryState::with_runtime](src/connect.rs) to supply
+To bound that state, use [QueryState::with_runtime_env](src/connect.rs) to supply
 a `RuntimeEnv` with a bounded memory pool and spill storage. The pool excludes
 backend, transient input, transport, and client buffers.
 

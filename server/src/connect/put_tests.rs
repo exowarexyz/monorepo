@@ -126,7 +126,7 @@ async fn overcount_precedes_entry_errors() {
     let malformed = Bytes::from_static(&[0x0a, 1, 0x0a, 0x0a, 1, 0x0a]);
     for body in [request.encode_to_vec().into(), malformed] {
         let ingest = Arc::new(TestIngest::default());
-        let state = IngestState::new(ingest.clone()).with_limits(IngestLimits {
+        let state = IngestState::new(ingest.clone()).with_ingest_limits(IngestLimits {
             max_entries: 1,
             ..Default::default()
         });

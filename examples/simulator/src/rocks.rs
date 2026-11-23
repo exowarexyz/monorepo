@@ -1452,8 +1452,8 @@ impl RocksStore {
     }
 
     /// Lowest retained log sequence at or below the published frontier, or `None` when the log
-    /// holds no such row. Shared by `oldest_retained_batch` and retention enforcement.
-    fn oldest_retained_sequence(&self) -> Result<Option<u64>, String> {
+    /// holds no such row. Backs `Log::oldest_retained_sequence` and retention enforcement.
+    fn oldest_log_sequence(&self) -> Result<Option<u64>, String> {
         // The oldest file's head sentinel is the first live key and names the sequence by
         // itself, so the row's block stays unread. A raw iterator keeps it that way, since the
         // wrapping iterator steps onto the row when it yields the sentinel. A bare row key
@@ -1512,16 +1512,23 @@ impl RocksStore {
                 retention_floor(&policy, frontier).min(frontier.saturating_add(1));
             self.prune_log(cutoff_exclusive)?;
         }
-        self.oldest_retained_sequence()
+        self.oldest_log_sequence()
     }
 
-    /// Installs (`Some`) or clears (`None`) the retention rule, then enforces it once. The rule
-    /// is persisted durably and mirrored into the cache the ingest path reads, so it keeps
-    /// tracking the frontier continuously; clearing stops enforcement but leaves already-evicted
-    /// rows evicted. Returns the oldest retained sequence after this enforcement.
-    fn set_retention(&self, policy: Option<RetentionPolicy>) -> Result<Option<u64>, String> {
-        self.store_retention_policy(policy.as_ref())?;
-        *self.retention.lock() = policy;
+    /// Installs the retention rule, then enforces it once. The rule is persisted durably and
+    /// mirrored into the cache the ingest path reads, so it keeps tracking the frontier
+    /// continuously. Returns the oldest retained sequence after this enforcement.
+    fn set_retention(&self, policy: RetentionPolicy) -> Result<Option<u64>, String> {
+        self.store_retention_policy(Some(&policy))?;
+        *self.retention.lock() = Some(policy);
+        self.enforce_retention()
+    }
+
+    /// Removes the retention rule durably and from the ingest cache. Enforcement stops, but
+    /// already-evicted rows stay evicted. Returns the oldest retained sequence.
+    fn clear_retention(&self) -> Result<Option<u64>, String> {
+        self.store_retention_policy(None)?;
+        *self.retention.lock() = None;
         self.enforce_retention()
     }
 
@@ -1759,8 +1766,8 @@ impl Log for RocksStore {
         Ok(Some(LogBatch::from_response_bytes(sequence_number, value)))
     }
 
-    async fn oldest_retained_batch(&self) -> Result<Option<u64>, String> {
-        self.oldest_retained_sequence()
+    async fn oldest_retained_sequence(&self) -> Result<Option<u64>, String> {
+        self.oldest_log_sequence()
     }
 }
 
@@ -1768,9 +1775,16 @@ impl Log for RocksStore {
 // blocking pool instead of occupying a Tokio worker. The ingest path enforces the same rule
 // continuously as the log grows (see `RocksStore::put_batch`).
 impl Retention for RocksStore {
-    async fn set_retention(&self, policy: Option<RetentionPolicy>) -> Result<Option<u64>, String> {
+    async fn set_retention(&self, policy: RetentionPolicy) -> Result<Option<u64>, String> {
         let store = self.clone();
         tokio::task::spawn_blocking(move || store.set_retention(policy))
+            .await
+            .map_err(|e| format!("retention task failed: {e}"))?
+    }
+
+    async fn clear_retention(&self) -> Result<Option<u64>, String> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || store.clear_retention())
             .await
             .map_err(|e| format!("retention task failed: {e}"))?
     }
@@ -2036,9 +2050,9 @@ mod tests {
     async fn cancelling_streamed_put_before_eof_never_enqueues() {
         struct SeenBatch(Arc<tokio::sync::Notify>);
 
-        impl exoware_server::ingest::IngestObserver for SeenBatch {
-            fn observe(&self, event: exoware_server::ingest::IngestEvent) {
-                if matches!(event, exoware_server::ingest::IngestEvent::Batch { .. }) {
+        impl exoware_server::ingest::PutObserver for SeenBatch {
+            fn observe(&self, event: exoware_server::ingest::PutEvent) {
+                if matches!(event, exoware_server::ingest::PutEvent::Batch { .. }) {
                     self.0.notify_one();
                 }
             }
@@ -2129,15 +2143,15 @@ mod tests {
             rejected: Arc<std::sync::atomic::AtomicBool>,
         }
 
-        impl exoware_server::ingest::IngestObserver for ExhaustWriter {
-            fn observe(&self, event: exoware_server::ingest::IngestEvent) {
+        impl exoware_server::ingest::PutObserver for ExhaustWriter {
+            fn observe(&self, event: exoware_server::ingest::PutEvent) {
                 match event {
-                    exoware_server::ingest::IngestEvent::Batch { .. } => {
+                    exoware_server::ingest::PutEvent::Batch { .. } => {
                         let available = 1024 * 1024 - self.budget.usage().1;
                         *self.pressure.lock() =
                             Some(self.request.reserve_bytes(available - 1024).unwrap());
                     }
-                    exoware_server::ingest::IngestEvent::Rejected => {
+                    exoware_server::ingest::PutEvent::Rejected => {
                         self.rejected.store(true, Ordering::Release);
                         self.pressure.lock().take();
                     }
@@ -2210,7 +2224,7 @@ mod tests {
             tokio::time::Instant::now() + std::time::Duration::from_secs(5),
             admission,
         )
-        .with_notifier(Some(hub.clone()));
+        .with_notifier(hub.clone());
         let publish_guard = store.frontiers.persist.lock();
         let put_store = store.clone();
         let task = tokio::spawn(async move { put_store.put(&mut input).await });
@@ -2951,12 +2965,12 @@ mod tests {
 
         // Retention evicts log rows by key; space reclamation is compaction's job.
         store
-            .set_retention(Some(RetentionPolicy::KeepLatest { count: 1 }))
+            .set_retention(RetentionPolicy::KeepLatest { count: 1 })
             .expect("set retention");
         assert!(store.get_batch(first).await.expect("get").is_none());
         assert!(store.get_batch(second).await.expect("get").is_some());
         assert_eq!(
-            store.oldest_retained_batch().await.expect("oldest"),
+            store.oldest_retained_sequence().await.expect("oldest"),
             Some(second)
         );
     }
@@ -2983,7 +2997,7 @@ mod tests {
             assert!(store.get_batch(evicted).await.expect("get").is_none());
         }
         assert_eq!(
-            store.oldest_retained_batch().await.expect("oldest"),
+            store.oldest_retained_sequence().await.expect("oldest"),
             Some(third)
         );
     }
@@ -3061,7 +3075,7 @@ mod tests {
         // place. That sentinel is the retained file's smallest key, so a tombstone reaching it
         // overlaps the file.
         store
-            .set_retention(Some(RetentionPolicy::KeepLatest { count: 1 }))
+            .set_retention(RetentionPolicy::KeepLatest { count: 1 })
             .expect("set retention");
         assert_eq!(log_file_keys_present(&store, 2), [false; 3]);
         assert_eq!(log_file_keys_present(&store, 3), [true; 3]);
@@ -3096,7 +3110,7 @@ mod tests {
         let mut perf = rocksdb::perf::PerfContext::default();
         let mut measured_lookup = || {
             perf.reset();
-            let oldest = store.oldest_retained_sequence().expect("oldest");
+            let oldest = store.oldest_log_sequence().expect("oldest");
             let read = perf.metric(rocksdb::perf::PerfMetric::BlockReadByte);
             assert!(
                 read < 4096,
@@ -3109,7 +3123,7 @@ mod tests {
         // With a rule installed, the evicted files below the cutoff sit under a tombstone. The
         // lookup must skip them by their sentinels as well, never through their rows.
         store
-            .set_retention(Some(RetentionPolicy::KeepLatest { count: 1 }))
+            .set_retention(RetentionPolicy::KeepLatest { count: 1 })
             .expect("set retention");
         assert_eq!(measured_lookup(), Some(2));
         rocksdb::perf::set_perf_stats(rocksdb::perf::PerfStatsLevel::Disable);
@@ -3120,7 +3134,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
         store
-            .set_retention(Some(RetentionPolicy::DropAll))
+            .set_retention(RetentionPolicy::DropAll)
             .expect("set retention");
 
         // Each trim ends at the head sentinel of the sequence that is not ingested yet, so the
@@ -3452,7 +3466,7 @@ mod tests {
         seed_log_row(&store, 1, &encoded_log_entry(1, b"k", b"v"));
 
         store
-            .set_retention(Some(RetentionPolicy::DropAll))
+            .set_retention(RetentionPolicy::DropAll)
             .expect("set retention");
 
         assert_eq!(
@@ -3463,7 +3477,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oldest_retained_batch_hides_rows_above_published_frontier() {
+    async fn oldest_retained_sequence_hides_rows_above_published_frontier() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
         seed_log_row(&store, 1, &encoded_log_entry(1, b"k", b"v"));
@@ -3471,7 +3485,10 @@ mod tests {
         // The row's group never published (e.g. its state ingestion is still in flight), so it
         // must stay invisible to both the point read and the oldest-retained probe.
         assert!(store.get_batch(1).await.expect("get").is_none());
-        assert_eq!(store.oldest_retained_batch().await.expect("oldest"), None);
+        assert_eq!(
+            store.oldest_retained_sequence().await.expect("oldest"),
+            None
+        );
     }
 
     #[tokio::test]

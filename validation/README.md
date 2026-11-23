@@ -21,11 +21,11 @@ In another terminal, write a small fixture and check its visibility, point reads
 missing keys, and sampled forward and reverse ranges:
 
 ```bash
-cargo run -p exoware-validation -- validate --url http://localhost:8080 \
+cargo run -p exoware-validation -- validate --store-url http://localhost:8080 \
   --keys 100 --lookup-samples 25 --missing-samples 10 --range-samples 10
 ```
 
-All commands default to `http://localhost:8080`. Use `--url` to select another
+All commands default to `http://localhost:8080`. Use `--store-url` to select another
 deployment. Requests use zstd compression by default. Pass
 `--request-compression none` to disable it.
 
@@ -92,7 +92,7 @@ cargo run --release -p exoware-validation -- bench \
   --manifest bench-report.json --output replay-report.json
 ```
 
-Replay uses the report's endpoint, namespace, compression, and workload settings.
+Replay uses the report's Store URL, namespace, compression, and workload settings.
 Workload flags cannot override a manifest. The CLI rejects incompatible key,
 value, or workload-generator versions. Keep generated reports with the binary
 revision used to produce them.

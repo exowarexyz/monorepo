@@ -34,8 +34,9 @@ impl From<RequestCompression> for ConnectRequestCompression {
 /// Shared SDK client CLI flags for validation commands.
 #[derive(clap::Args, Clone, Debug)]
 pub struct ClientArgs {
+    /// Store base URL.
     #[arg(long, default_value = "http://localhost:8080")]
-    pub url: String,
+    pub store_url: String,
     /// Max client read retry attempts for lookup/range calls.
     #[arg(long, default_value_t = 3)]
     pub read_retry_attempts: usize,
@@ -46,7 +47,7 @@ pub struct ClientArgs {
 
 impl ClientArgs {
     pub fn into_config(self) -> anyhow::Result<ClientConfig> {
-        Ok(ClientConfig::new(self.url, self.read_retry_attempts)?
+        Ok(ClientConfig::new(self.store_url, self.read_retry_attempts)?
             .with_request_compression(self.request_compression))
     }
 }
@@ -54,16 +55,16 @@ impl ClientArgs {
 /// Normalized SDK client settings shared by validation commands.
 #[derive(Clone, Debug)]
 pub struct ClientConfig {
-    endpoint: String,
+    store_url: String,
     read_retry_attempts: usize,
     request_compression: RequestCompression,
 }
 
 impl ClientConfig {
-    /// Builds a client config from CLI-style endpoint and retry inputs.
-    pub fn new(endpoint: impl Into<String>, read_retry_attempts: usize) -> anyhow::Result<Self> {
+    /// Builds a client config from CLI-style Store URL and retry inputs.
+    pub fn new(store_url: impl Into<String>, read_retry_attempts: usize) -> anyhow::Result<Self> {
         let config = Self {
-            endpoint: normalize_endpoint(&endpoint.into()),
+            store_url: normalize_store_url(&store_url.into()),
             read_retry_attempts,
             request_compression: RequestCompression::default(),
         };
@@ -77,9 +78,9 @@ impl ClientConfig {
         self
     }
 
-    /// Returns the normalized endpoint passed to the SDK client.
-    pub fn endpoint(&self) -> &str {
-        &self.endpoint
+    /// Returns the normalized Store URL passed to the SDK client.
+    pub fn store_url(&self) -> &str {
+        &self.store_url
     }
 
     /// Returns the maximum number of attempts for SDK reads.
@@ -96,7 +97,7 @@ impl ClientConfig {
 /// Constructs the SDK client used by load, bench, and validate commands.
 pub fn build_client(config: &ClientConfig) -> anyhow::Result<PrefixedStoreClient> {
     let client = StoreClient::builder()
-        .url(config.endpoint())
+        .url(config.store_url())
         .connect_request_compression(config.request_compression.into())
         .retry_config(
             RetryConfig::standard()
@@ -154,24 +155,24 @@ fn validate_config(config: &ClientConfig) -> anyhow::Result<()> {
         config.read_retry_attempts > 0,
         "read_retry_attempts must be > 0"
     );
-    validate_endpoint(&config.endpoint)?;
+    validate_store_url(&config.store_url)?;
     Ok(())
 }
 
-fn validate_endpoint(endpoint: &str) -> anyhow::Result<()> {
-    let uri = endpoint
+fn validate_store_url(store_url: &str) -> anyhow::Result<()> {
+    let uri = store_url
         .parse::<http::Uri>()
-        .with_context(|| format!("invalid endpoint URL `{endpoint}`"))?;
+        .with_context(|| format!("invalid Store URL `{store_url}`"))?;
     ensure!(
         matches!(uri.scheme_str(), Some("http" | "https")),
-        "endpoint must use http:// or https://"
+        "Store URL must use http:// or https://"
     );
-    ensure!(uri.authority().is_some(), "endpoint must include a host");
+    ensure!(uri.authority().is_some(), "Store URL must include a host");
     Ok(())
 }
 
-fn normalize_endpoint(endpoint: &str) -> String {
-    endpoint.trim_end_matches('/').to_string()
+fn normalize_store_url(store_url: &str) -> String {
+    store_url.trim_end_matches('/').to_string()
 }
 
 #[cfg(test)]
@@ -201,17 +202,17 @@ mod tests {
     }
 
     #[test]
-    fn config_normalizes_endpoint() {
+    fn config_normalizes_store_url() {
         let config =
             ClientConfig::new("http://localhost:8080/", 3).expect("client config should parse");
-        assert_eq!(config.endpoint(), "http://localhost:8080");
+        assert_eq!(config.store_url(), "http://localhost:8080");
     }
 
     #[test]
-    fn config_preserves_endpoint_without_trailing_slash() {
+    fn config_preserves_store_url_without_trailing_slash() {
         let config =
             ClientConfig::new("http://localhost:8080", 3).expect("client config should parse");
-        assert_eq!(config.endpoint(), "http://localhost:8080");
+        assert_eq!(config.store_url(), "http://localhost:8080");
     }
 
     #[test]
@@ -220,19 +221,19 @@ mod tests {
     }
 
     #[test]
-    fn config_rejects_relative_endpoint() {
+    fn config_rejects_relative_store_url() {
         let err = ClientConfig::new("not-a-url", 3).expect_err("relative URL should be rejected");
         assert!(err.to_string().contains("http:// or https://"));
     }
 
     #[test]
-    fn build_client_rejects_malformed_endpoint_without_panicking() {
+    fn build_client_rejects_malformed_store_url_without_panicking() {
         let config = ClientConfig {
-            endpoint: "http://[::1".to_string(),
+            store_url: "http://[::1".to_string(),
             read_retry_attempts: 3,
             request_compression: RequestCompression::default(),
         };
-        build_client(&config).expect_err("malformed endpoint should be rejected");
+        build_client(&config).expect_err("malformed Store URL should be rejected");
     }
 
     #[test]

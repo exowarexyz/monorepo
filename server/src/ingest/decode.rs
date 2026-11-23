@@ -76,7 +76,7 @@ impl DecodeState {
         self.rejection.is_some()
             || self.entry_error.is_some()
             || self.inner_error.is_some()
-            || self.count > self.limits.ingest.max_entries
+            || self.count > self.limits.ingest_limits.max_entries
     }
 
     pub(super) fn belongs_to(&self, request: &Arc<RequestLease>) -> bool {
@@ -204,7 +204,7 @@ impl DecodeState {
             self.grow_arena(
                 self.buffers
                     .byte_capacity
-                    .min(self.limits.message_bytes)
+                    .min(self.limits.max_message_bytes)
                     .max(1),
             )?;
         }
@@ -212,7 +212,7 @@ impl DecodeState {
             let capacity = self
                 .buffers
                 .entry_capacity
-                .min(self.limits.ingest.max_entries)
+                .min(self.limits.ingest_limits.max_entries)
                 .max(1);
             let bytes = capacity
                 .checked_mul(std::mem::size_of::<EntryRanges>())
@@ -314,7 +314,7 @@ impl DecodeState {
         let pledged = usize::try_from(pledged).map_err(|_| {
             ConnectError::resource_exhausted("zstd frame content size exceeds platform bound")
         })?;
-        if pledged > self.limits.message_bytes {
+        if pledged > self.limits.max_message_bytes {
             return Err(
                 ConnectError::resource_exhausted("decoded request exceeds message limit").into(),
             );
@@ -416,7 +416,7 @@ impl DecodeState {
             // Counting continues after rejection so finalization can preserve error precedence.
             let index = data.count;
             data.count += 1;
-            if data.count > data.limits.ingest.max_entries {
+            if data.count > data.limits.ingest_limits.max_entries {
                 data.ranges.clear();
                 continue;
             }
@@ -433,9 +433,13 @@ impl DecodeState {
                 }
             };
             if data.entry_error.is_none() {
-                data.entry_error =
-                    crate::validate::validate_put_entry(index, key, value, data.limits.ingest)
-                        .err();
+                data.entry_error = crate::validate::validate_put_entry(
+                    index,
+                    key,
+                    value,
+                    data.limits.ingest_limits,
+                )
+                .err();
             }
             if data.entry_error.is_none() && data.rejection.is_none() {
                 let base = data.arena.as_ptr() as usize;
@@ -462,7 +466,11 @@ impl DecodeState {
     fn batch(&mut self) -> Result<Option<DecodeStep>, PutError> {
         let suffix = self.arena.len() - self.parsed;
         let capacity = suffix
-            .max(self.buffers.byte_capacity.min(self.limits.message_bytes))
+            .max(
+                self.buffers
+                    .byte_capacity
+                    .min(self.limits.max_message_bytes),
+            )
             .max(1);
         let next_lease = match self.request.reserve_bytes(capacity) {
             Ok(lease) => lease,
@@ -502,8 +510,8 @@ impl DecodeState {
         self.start_decoder()?;
         let decoded_bound = self
             .message_bound()?
-            .unwrap_or(self.limits.wire_bytes)
-            .min(self.limits.message_bytes);
+            .unwrap_or(self.limits.max_wire_bytes)
+            .min(self.limits.max_message_bytes);
         loop {
             self.parse(decoded_bound)?;
             if !self.ranges.is_empty()
@@ -522,7 +530,7 @@ impl DecodeState {
                 let capacity = self.arena.len().max(
                     self.buffers
                         .byte_capacity
-                        .min(self.limits.message_bytes)
+                        .min(self.limits.max_message_bytes)
                         .max(1),
                 );
                 if self.arena.capacity() > capacity {
@@ -563,7 +571,7 @@ impl DecodeState {
                 .min(decoded_bound);
                 if capacity <= self.arena.capacity() {
                     if matches!(self.codec, Codec::Identity)
-                        && self.total >= self.limits.message_bytes
+                        && self.total >= self.limits.max_message_bytes
                         && !self.pending.is_empty()
                     {
                         return Err(ConnectError::resource_exhausted(
@@ -587,7 +595,7 @@ impl DecodeState {
                     let count = (self.pending.len() - self.offset)
                         .min(self.arena.capacity() - previous)
                         .min(output_budget);
-                    if count > self.limits.message_bytes.saturating_sub(self.total) {
+                    if count > self.limits.max_message_bytes.saturating_sub(self.total) {
                         return Err(ConnectError::resource_exhausted(
                             "decoded request exceeds message limit",
                         )
@@ -652,7 +660,7 @@ impl DecodeState {
         if self.parsed != self.arena.len() {
             return Err(ConnectError::from(PutParseError::Incomplete).into());
         }
-        crate::validate::validate_put_count(self.count, self.limits.ingest)?;
+        crate::validate::validate_put_count(self.count, self.limits.ingest_limits)?;
         if let Some(error) = &self.inner_error {
             return Err(error.clone().into());
         }
@@ -711,7 +719,7 @@ mod tests {
         let state = DecodeState::new(
             encoding,
             PutLimits {
-                message_bytes,
+                max_message_bytes: message_bytes,
                 ..PutLimits::default()
             },
             admission.transport.clone(),

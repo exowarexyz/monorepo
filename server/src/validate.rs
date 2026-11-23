@@ -188,7 +188,7 @@ pub fn validate_get_request(
     validate_key_field("store.query", || "key".to_string(), request.key)
 }
 
-/// Validate a Range request and return its traversal direction.
+/// Validate a Range request and return its range mode.
 pub fn validate_range_request(
     request: &exoware_proto::store::query::v1::RangeRequestView<'_>,
 ) -> Result<RangeMode, ConnectError> {
