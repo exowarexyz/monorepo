@@ -893,25 +893,53 @@ fn collect_list<A: ArrayAccessor>(
     range.map(|idx| cell(values.value(idx))).collect()
 }
 
+/// Stages one entry of a write whose entries need not commit together, such as the index
+/// entries of a backfill.
+///
+/// When the entry would take `staged` past a limit of one Store write, the staged entries are
+/// committed first, so no write is sent that the Store's limits refuse. An entry that passes a
+/// limit alone can never be written and fails with the error `check_put_limits` gives it.
+pub(crate) async fn stage_ingest_entry(
+    store: &PrefixedStoreClient,
+    staged: &mut StoreWriteBatch,
+    key: &Key,
+    value: Bytes,
+) -> DataFusionResult<()> {
+    let store_key = store
+        .encode_store_key(key)
+        .map_err(|e| DataFusionError::External(Box::new(e)))?;
+    let entry_len = put_entry_encoded_len(&store_key, &value);
+    check_put_limits(value.len(), 1, entry_len)?;
+    if check_put_limits(
+        value.len(),
+        staged.len() + 1,
+        staged.encoded_len() + entry_len,
+    )
+    .is_err()
+    {
+        flush_ingest_batch(store, staged).await?;
+    }
+    staged
+        .push(store, key, value)
+        .map_err(|e| DataFusionError::External(Box::new(e)))?;
+    Ok(())
+}
+
+/// Commits the staged entries as one Store write and empties the batch. An empty batch sends
+/// nothing.
 pub(crate) async fn flush_ingest_batch(
     store: &PrefixedStoreClient,
-    entries: &mut Vec<(Key, Bytes)>,
-) -> DataFusionResult<u64> {
-    if entries.is_empty() {
-        return Ok(0);
+    staged: &mut StoreWriteBatch,
+) -> DataFusionResult<()> {
+    if staged.is_empty() {
+        return Ok(());
     }
-    let mut batch = StoreWriteBatch::new();
-    for (key, value) in entries.iter() {
-        batch
-            .push(store, key, value)
-            .map_err(|e| DataFusionError::External(Box::new(e)))?;
-    }
-    let token = batch
+    staged
         .commit(store.client())
         .await
         .map_err(|e| DataFusionError::External(Box::new(e)))?;
-    entries.clear();
-    Ok(token)
+    staged.clear();
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1793,6 +1821,44 @@ mod tests {
         assert_eq!(writer.pending_entry_count(), 1);
         assert_eq!(writer.flush().await.unwrap(), Some(7));
         assert_eq!(writer.pending_entry_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn staged_entries_commit_before_a_write_would_pass_a_limit() {
+        let store = AckingStore::new(7);
+        let client = store.client();
+        let key = |id: u8| Key::from(vec![b'k', id]);
+
+        // Seventeen 15 MiB values fit one write, and the eighteenth would pass its byte limit.
+        let value = Bytes::from(vec![0; 15 * 1024 * 1024]);
+        let mut staged = StoreWriteBatch::new();
+        for id in 0..18 {
+            stage_ingest_entry(&client, &mut staged, &key(id), value.clone())
+                .await
+                .unwrap();
+        }
+        assert_eq!((store.puts(), staged.len()), (1, 1));
+
+        // A value over the value limit fits no write. It names the limit and changes nothing.
+        let error = stage_ingest_entry(
+            &client,
+            &mut staged,
+            &key(18),
+            Bytes::from(vec![0; MAX_VALUE_LEN + 1]),
+        )
+        .await
+        .expect_err("a value over the Store limit must be rejected");
+        assert!(
+            matches!(&error, DataFusionError::Plan(message) if message.contains("limit of one Store value")),
+            "{error}"
+        );
+        assert_eq!((store.puts(), staged.len()), (1, 1));
+
+        // A flush sends what is staged, and an empty batch sends nothing.
+        for _ in 0..2 {
+            flush_ingest_batch(&client, &mut staged).await.unwrap();
+            assert_eq!((store.puts(), staged.len()), (2, 0));
+        }
     }
 
     #[tokio::test]
