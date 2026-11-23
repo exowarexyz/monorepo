@@ -69,6 +69,11 @@ the scan bounds. With a primary key of `(entity, version)`:
 
 A secondary index key continues with the primary-key columns, so the same rule runs
 through both. In that suffix only an `Int64` or `UInt64` range narrows the key range.
+An index range whose lower bound is longer than any key the Store namespace holds is
+not read, because every matching row also lies in a range that is. A listed value too
+long for an index key therefore costs no request on the index, and the other values
+keep their ranges. When no range is left, the index is not used and the query reads
+the primary key.
 `EXPLAIN` reports `exact=true` for an index scan only when the planner can show that
 the range bounds enforce the whole predicate. It does not attempt this for a z-order
 index. An exact scan passes a `LIMIT` to the Store. Over a covering index it skips the

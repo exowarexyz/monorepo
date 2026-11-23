@@ -849,11 +849,22 @@ impl QueryPredicate {
         self.constraints.insert(col_idx, constraint);
     }
 
+    /// Chooses the secondary index whose key ranges best narrow the scan, or `None` when no
+    /// index has a range to read.
+    ///
+    /// `max_logical_key_len` is the longest key the Store namespace holds. A range whose lower
+    /// bound is longer is not read, and no matching row is lost with it. A matching row lies in
+    /// the range of the listed values it holds. A text field of that range's lower bound is the
+    /// row's own value or the empty string, and every other field has one width, so the bound
+    /// is no longer than the row's key, which the namespace holds. A range that is not read can
+    /// still contain keys: those of rows that fail the predicate, and those of matching rows,
+    /// which a range that is read also contains. An index left without ranges is not chosen.
     pub(crate) fn choose_index_plan(
         &self,
         model: &TableModel,
         specs: &[ResolvedIndexSpec],
         access_plan: &ScanAccessPlan,
+        max_logical_key_len: usize,
     ) -> Option<IndexPlan> {
         // Skip index selection when no rows can match or primary-key point reads suffice.
         if self.contradiction || self.has_primary_key_points(model) {
@@ -897,8 +908,13 @@ impl QueryPredicate {
                 }
             };
 
-            // Keep ranges disjoint so overlapping bounds do not return the same row twice.
             let mut ranges = ranges;
+            ranges.retain(|range| range.start.len() <= max_logical_key_len);
+            if ranges.is_empty() {
+                continue;
+            }
+
+            // Keep ranges disjoint so overlapping bounds do not return the same row twice.
             ranges.sort_by(|left, right| left.start.cmp(&right.start));
             let mut disjoint: Vec<KeyRange> = Vec::with_capacity(ranges.len());
             for range in ranges {

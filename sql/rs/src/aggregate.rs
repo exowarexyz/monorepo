@@ -1436,9 +1436,13 @@ pub(crate) fn choose_aggregate_access_path(
 ) -> DataFusionResult<ChosenAggregateAccessPath> {
     // A reduction over an index must find every required value there because
     // it cannot fetch missing values from base rows.
-    if let Some(index_plan) =
-        predicate.choose_index_plan(&table.model, &table.index_specs, access_plan)
-    {
+    let max_logical_key_len = table.store.key_prefix().max_logical_key_len();
+    if let Some(index_plan) = predicate.choose_index_plan(
+        &table.model,
+        &table.index_specs,
+        access_plan,
+        max_logical_key_len,
+    ) {
         if !index_plan.ranges.is_empty()
             && access_plan.index_covers_required_non_pk(&table.index_specs[index_plan.spec_idx])
         {
@@ -1455,8 +1459,7 @@ pub(crate) fn choose_aggregate_access_path(
     // Reading the primary-key family supplies all required values when no
     // covering index is selected.
     Ok((
-        predicate
-            .primary_key_ranges(&table.model, table.store.key_prefix().max_logical_key_len())?,
+        predicate.primary_key_ranges(&table.model, max_logical_key_len)?,
         AggregateAccessPath::PrimaryKey,
         None,
     ))

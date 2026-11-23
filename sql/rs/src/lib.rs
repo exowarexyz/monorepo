@@ -1247,7 +1247,7 @@ mod tests {
         );
         let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &predicate);
         let plan = predicate
-            .choose_index_plan(&model, &specs, &access_plan)
+            .choose_index_plan(&model, &specs, &access_plan, exoware_sdk::keys::MAX_KEY_LEN)
             .expect("exists");
         assert_eq!(plan.spec_idx, 0);
         assert_eq!(plan.constrained_prefix_len, 2);
@@ -1292,7 +1292,7 @@ mod tests {
 
         let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &predicate);
         let plan = predicate
-            .choose_index_plan(&model, &specs, &access_plan)
+            .choose_index_plan(&model, &specs, &access_plan, exoware_sdk::keys::MAX_KEY_LEN)
             .expect("exists");
         assert_eq!(specs[plan.spec_idx].name, "status_covering");
     }
@@ -1320,7 +1320,7 @@ mod tests {
 
         let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &predicate);
         let plan = predicate
-            .choose_index_plan(&model, &specs, &access_plan)
+            .choose_index_plan(&model, &specs, &access_plan, exoware_sdk::keys::MAX_KEY_LEN)
             .expect("exists");
         assert_eq!(specs[plan.spec_idx].name, "xy_z");
         assert_eq!(specs[plan.spec_idx].layout, IndexLayout::ZOrder);
@@ -1362,7 +1362,7 @@ mod tests {
                 };
                 let access = ScanAccessPlan::new(&model, &Some(vec![]), &predicate);
                 let plan = predicate
-                    .choose_index_plan(&model, &specs, &access)
+                    .choose_index_plan(&model, &specs, &access, exoware_sdk::keys::MAX_KEY_LEN)
                     .unwrap();
                 if y_count == 64 {
                     // 64 distinct values per column expand to exactly the 4096-range budget.
@@ -1374,7 +1374,12 @@ mod tests {
                     assert_eq!(ranges.unwrap_err(), "index range budget exceeded");
                     assert_eq!(plan.spec_idx, 1);
                     assert!(predicate
-                        .choose_index_plan(&model, &specs[..1], &access)
+                        .choose_index_plan(
+                            &model,
+                            &specs[..1],
+                            &access,
+                            exoware_sdk::keys::MAX_KEY_LEN
+                        )
                         .is_none());
                 }
             }
@@ -1994,7 +1999,7 @@ mod tests {
             .insert(active_idx, PredicateConstraint::BoolEq(true));
         let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &pred);
         let plan = pred
-            .choose_index_plan(&model, &specs, &access_plan)
+            .choose_index_plan(&model, &specs, &access_plan, exoware_sdk::keys::MAX_KEY_LEN)
             .expect("should find index");
         assert_eq!(plan.spec_idx, 0);
         assert_eq!(plan.constrained_prefix_len, 1);
@@ -4036,7 +4041,7 @@ mod tests {
         );
         let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &pred);
         let plan = pred
-            .choose_index_plan(&model, &specs, &access_plan)
+            .choose_index_plan(&model, &specs, &access_plan, exoware_sdk::keys::MAX_KEY_LEN)
             .expect("should find index");
         assert_eq!(plan.ranges.len(), 2);
     }
@@ -5992,7 +5997,7 @@ mod tests {
         let pred = QueryPredicate::from_filters(&[filter], &model);
         let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &pred);
         let plan = pred
-            .choose_index_plan(&model, &specs, &access_plan)
+            .choose_index_plan(&model, &specs, &access_plan, exoware_sdk::keys::MAX_KEY_LEN)
             .expect("fixed-size-binary equality should choose an index");
 
         assert_eq!(plan.constrained_prefix_len, 1);
@@ -6027,7 +6032,7 @@ mod tests {
         let pred = QueryPredicate::from_filters(&[filter], &model);
         let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &pred);
         let plan = pred
-            .choose_index_plan(&model, &specs, &access_plan)
+            .choose_index_plan(&model, &specs, &access_plan, exoware_sdk::keys::MAX_KEY_LEN)
             .expect("decimal256 range should choose an index");
 
         assert_eq!(plan.constrained_prefix_len, 1);

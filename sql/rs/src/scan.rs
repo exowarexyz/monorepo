@@ -250,9 +250,12 @@ impl KvScanExec {
         // Residual-filter columns determine whether an index covers the scan.
         let filter_access = ScanFilter::access_plan(&self.model, filters);
         let access = self.access_with_filter(&filter_access.1);
-        let index_plan = self
-            .predicate
-            .choose_index_plan(&self.model, &self.index_specs, &access);
+        let index_plan = self.predicate.choose_index_plan(
+            &self.model,
+            &self.index_specs,
+            &access,
+            self.store.key_prefix().max_logical_key_len(),
+        );
         let complete_ranges = filters
             .iter()
             .all(|filter| QueryPredicate::supports_filter(filter, &self.model));
@@ -2972,6 +2975,98 @@ mod tests {
         }
     }
 
+    /// An index range whose lower bound is longer than any key of the namespace is not read. A
+    /// listed value too long for an index key of the namespace has no range, and the other
+    /// values keep theirs.
+    #[tokio::test]
+    async fn index_ranges_respect_namespace_capacity() {
+        // An index key holds the family byte, the name with its terminator, and the 8-byte id.
+        // The longest name is the longest that still fits a key of this namespace.
+        let longest = "n".repeat(233);
+        let fixture = Fixture::new(
+            vec![
+                column("id", DataType::Int64, false),
+                column("name", DataType::Utf8, false),
+            ],
+            &["id"],
+            vec![index("name", &["name"], &[])],
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2, 3])),
+                Arc::new(StringArray::from(vec!["a", longest.as_str(), "b"])),
+            ],
+        )
+        .await;
+        assert_eq!(1 + 234 + 8, fixture.prefix.max_logical_key_len());
+        let too_long = "x".repeat(234);
+        let longer = "y".repeat(240);
+        for (predicate, indexed) in [
+            (format!("name IN ('a', '{too_long}')"), true),
+            (
+                format!("name IN ('{longer}', 'b', '{too_long}', 'a')"),
+                true,
+            ),
+            (format!("name IN ('a', '{longest}')"), true),
+            (format!("name = '{longest}'"), true),
+            (format!("name = '{too_long}'"), false),
+            (format!("name IN ('{too_long}', '{longer}')"), false),
+        ] {
+            let sql = format!("SELECT id FROM orders WHERE {predicate} ORDER BY id");
+            fixture.check(&sql).await;
+            let (scan, _) = fixture.scan(&sql).await;
+            assert_eq!(
+                scan.plan.index.is_some(),
+                indexed,
+                "an index is read exactly when a listed value fits one of its keys: {sql}"
+            );
+            fixture
+                .check(&format!("SELECT COUNT(*) FROM orders WHERE {predicate}"))
+                .await;
+        }
+    }
+
+    /// A range that is not read can contain stored keys. Its bounds order whole keys, so a row
+    /// whose first key column lies strictly between theirs is inside it whatever its name. Such
+    /// a row either fails the predicate or also lies in the range of its own name, which is
+    /// read.
+    #[tokio::test]
+    async fn an_index_range_that_is_not_read_loses_no_matching_row() {
+        let fixture = Fixture::new(
+            vec![
+                column("id", DataType::Int64, false),
+                column("a", DataType::Int64, false),
+                column("name", DataType::Utf8, false),
+            ],
+            &["id"],
+            vec![index("a_name", &["a", "name"], &[])],
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2, 3])),
+                Arc::new(Int64Array::from(vec![2, 2, 5])),
+                Arc::new(StringArray::from(vec!["n", "m", "n"])),
+            ],
+        )
+        .await;
+
+        // An index key holds the family byte, the 8-byte a, the name with its terminator, and
+        // the 8-byte id, so this name is one byte too long for a key of this namespace.
+        let too_long = "x".repeat(226);
+        assert_eq!(1 + 8 + 226 + 8, fixture.prefix.max_logical_key_len());
+        for (predicate, indexed) in [
+            (format!("a BETWEEN 1 AND 3 AND name = '{too_long}'"), false),
+            (
+                format!("a BETWEEN 1 AND 3 AND name IN ('n', '{too_long}')"),
+                true,
+            ),
+        ] {
+            let sql = format!("SELECT id FROM orders WHERE {predicate} ORDER BY id");
+            fixture.check(&sql).await;
+            let (scan, _) = fixture.scan(&sql).await;
+            assert_eq!(scan.plan.index.is_some(), indexed, "{sql}");
+            fixture
+                .check(&format!("SELECT COUNT(*) FROM orders WHERE {predicate}"))
+                .await;
+        }
+    }
+
     /// Cached column requirements and index ranges agree with the optimized scan inputs.
     #[tokio::test]
     async fn optimized_scan_keeps_the_plan_its_inputs_give() {
@@ -3088,7 +3183,12 @@ mod tests {
             );
             let fresh = scan
                 .predicate
-                .choose_index_plan(&scan.model, &scan.index_specs, &access);
+                .choose_index_plan(
+                    &scan.model,
+                    &scan.index_specs,
+                    &access,
+                    fixture.prefix.max_logical_key_len(),
+                );
             assert_eq!(
                 scan.plan
                     .index
