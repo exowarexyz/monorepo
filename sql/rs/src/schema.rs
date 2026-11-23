@@ -14,7 +14,7 @@ use datafusion::{
     },
     physical_plan::{projection::ProjectionExec, ExecutionPlan},
 };
-use exoware_sdk::{kv_codec::decode_stored_row, PrefixedStoreClient};
+use exoware_sdk::{kv_codec::decode_stored_row, PrefixedStoreClient, StoreWriteBatch};
 use std::sync::Arc;
 
 /// Named tables sharing one storage namespace. Table insertion order assigns family
@@ -186,7 +186,11 @@ impl KvSchema {
     ///
     /// Progress events are emitted only after buffered ingest writes for the
     /// reported cursor are flushed, so `Progress.next_cursor` can be persisted
-    /// and used to resume later.
+    /// and used to resume later. The entries of one response batch are sent in
+    /// as many Store writes as the limits of one write require, and its event
+    /// follows the last of them. A backfill that stops between two of those
+    /// writes resumes from the cursor before that batch and writes its entries
+    /// again, which leaves the same index entries.
     pub async fn backfill_added_indexes_with_options_and_progress(
         &self,
         table_name: &str,
@@ -284,7 +288,7 @@ impl KvSchema {
             indexes_backfilled: new_specs.len(),
             index_entries_written: 0,
         };
-        let mut pending_entries = Vec::new();
+        let mut staged = StoreWriteBatch::new();
         let session = self.store.create_session();
         let decode_pk_mask = vec![true; model.primary_key_kinds.len()];
 
@@ -336,12 +340,12 @@ impl KvSchema {
                     )?;
                     let index_value =
                         encode_secondary_index_value_from_archived(&archived, model, spec)?;
-                    pending_entries.push((index_key, index_value));
+                    stage_ingest_entry(&self.store, &mut staged, &index_key, index_value).await?;
                     report.index_entries_written += 1;
                 }
 
-                if pending_entries.len() >= INDEX_BACKFILL_FLUSH_ENTRIES {
-                    flush_ingest_batch(&self.store, &mut pending_entries).await?;
+                if staged.len() >= INDEX_BACKFILL_FLUSH_ENTRIES {
+                    flush_ingest_batch(&self.store, &mut staged).await?;
                 }
             }
             let next_cursor = self
@@ -350,7 +354,7 @@ impl KvSchema {
                 .next_key(last_key)
                 .map_err(|e| DataFusionError::External(Box::new(e)))?
                 .filter(|key| key <= &full_range.end);
-            flush_ingest_batch(&self.store, &mut pending_entries).await?;
+            flush_ingest_batch(&self.store, &mut staged).await?;
             send_backfill_event(
                 progress_tx,
                 IndexBackfillEvent::Progress {
@@ -481,7 +485,10 @@ impl TableProvider for KvTable {
 
 #[cfg(test)]
 mod tests {
-    use crate::{KvSchema, SqlContext, TableColumnConfig};
+    use crate::{
+        CellValue, IndexBackfillEvent, IndexBackfillOptions, IndexSpec, KvSchema, SqlContext,
+        TableColumnConfig,
+    };
     use async_trait::async_trait;
     use datafusion::{
         arrow::{
@@ -500,7 +507,11 @@ mod tests {
             ColumnarValue, ScalarFunctionArgs, ScalarUDFImpl, Signature, Volatility,
         },
     };
-    use std::sync::Arc;
+    use exoware_sdk::PrefixedStoreClient;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
 
     async fn write_batch(
         ctx: &SqlContext,
@@ -534,6 +545,193 @@ mod tests {
             columns.into_iter().map(|(_, array)| array).collect(),
         )
         .unwrap()
+    }
+
+    /// Forwards every request to the Store except one Put, counted from zero among the Puts it
+    /// is given, which fails before the Store receives it.
+    #[derive(Clone)]
+    struct InterruptedStore {
+        store: exoware_sdk::proto::PreferZstdHttpClient,
+        puts: Arc<AtomicUsize>,
+        failed_put: usize,
+    }
+
+    impl connectrpc::client::ClientTransport for InterruptedStore {
+        type ResponseBody =
+            <exoware_sdk::proto::PreferZstdHttpClient as connectrpc::client::ClientTransport>::ResponseBody;
+        type Error = connectrpc::ConnectError;
+
+        fn send(
+            &self,
+            request: axum::http::Request<connectrpc::client::ClientBody>,
+        ) -> connectrpc::client::BoxFuture<
+            'static,
+            Result<axum::http::Response<Self::ResponseBody>, Self::Error>,
+        > {
+            if request.uri().path() == "/log.ingest.v1.Service/Put"
+                && self.puts.fetch_add(1, Ordering::SeqCst) == self.failed_put
+            {
+                return Box::pin(async {
+                    Err(connectrpc::ConnectError::unavailable(
+                        "the backfill is interrupted",
+                    ))
+                });
+            }
+            self.store.send(request)
+        }
+    }
+
+    /// The entries a backfill builds from one page of rows can pass the byte limit of one Store
+    /// write. The backfill then sends them in several writes and reports progress for the page
+    /// only after the last of them. A backfill that stops between two of those writes has
+    /// published no cursor past an entry it did not write, and a run from the last cursor it
+    /// did publish completes both indexes.
+    #[tokio::test]
+    async fn backfill_reports_a_page_only_after_the_last_of_its_writes() {
+        let (_task, url) = exoware_simulator::open_temp()
+            .await
+            .expect("the simulator must start");
+        let builder = || {
+            exoware_sdk::StoreClient::builder()
+                .url(&url)
+                .retry_config(exoware_sdk::RetryConfig::disabled())
+        };
+        let store = builder().build().unwrap().unprefixed();
+        let schema = |store: &PrefixedStoreClient, indexes: &[&str]| {
+            KvSchema::new(store.clone())
+                .table(
+                    "items",
+                    vec![
+                        TableColumnConfig::new("id", DataType::Int64, false),
+                        TableColumnConfig::new("body", DataType::Utf8, false),
+                    ],
+                    vec!["id".to_string()],
+                    indexes
+                        .iter()
+                        .map(|name| {
+                            IndexSpec::new(*name, vec!["id".to_string()])
+                                .unwrap()
+                                .with_cover_columns(vec!["body".to_string()])
+                        })
+                        .collect(),
+                )
+                .unwrap()
+        };
+
+        // The first page holds five small rows and the second five rows of 27 MiB. Each of the
+        // two added indexes covers the body, so the ten entries of the second page need 270 MiB,
+        // more than the 256 MiB of one write. Nine of them fill its first write, which leaves
+        // the last row's entry in the second index to another.
+        let page = 5;
+        let body = "x".repeat(27 * 1024 * 1024);
+        let mut writer = schema(&store, &[]).batch_writer();
+        for id in 0..2 * page {
+            let body = if id < page { "x" } else { body.as_str() };
+            writer
+                .insert(
+                    "items",
+                    vec![CellValue::Int64(id), CellValue::Utf8(body.to_string())],
+                )
+                .unwrap();
+        }
+        writer.flush().await.expect("the rows must be written");
+
+        // Runs a backfill of both indexes and returns its result with the rows, entries, and
+        // cursor of each Progress event it published.
+        let backfill = |store: &PrefixedStoreClient, start_cursor| {
+            let indexed = schema(store, &["first", "second"]);
+            async move {
+                let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+                let options = IndexBackfillOptions {
+                    row_batch_size: page as usize,
+                    start_cursor,
+                };
+                let result = indexed
+                    .backfill_added_indexes_with_options_and_progress(
+                        "items",
+                        &[],
+                        options,
+                        &events,
+                    )
+                    .await;
+                let mut progress = Vec::new();
+                while let Ok(event) = received.try_recv() {
+                    if let IndexBackfillEvent::Progress {
+                        scanned_rows,
+                        index_entries_written,
+                        next_cursor,
+                        ..
+                    } = event
+                    {
+                        progress.push((scanned_rows, index_entries_written, next_cursor));
+                    }
+                }
+                (result, progress)
+            }
+        };
+
+        // Returns the length of every value each index holds.
+        let index_values = || async {
+            let session = store.create_session();
+            let mut indexes = Vec::new();
+            for spec in schema(&store, &["first", "second"]).tables()[0]
+                .1
+                .index_specs
+                .iter()
+            {
+                let (start, end) = spec.prefix.bounds();
+                let mut stream = session
+                    .range_stream(&start, &end, usize::MAX, 1)
+                    .await
+                    .unwrap();
+                let mut values = Vec::new();
+                while let Some(chunk) = stream.next_chunk().await.unwrap() {
+                    values.extend(chunk.rows.iter().map(|(_, value)| value.len()));
+                }
+                indexes.push(values);
+            }
+            indexes
+        };
+
+        // The first page takes one write and the second takes two. The last of the three fails.
+        let interrupted = builder()
+            .client_transport(InterruptedStore {
+                store: exoware_sdk::proto::PreferZstdHttpClient::plaintext(),
+                puts: Arc::new(AtomicUsize::new(0)),
+                failed_put: 2,
+            })
+            .build()
+            .unwrap()
+            .unprefixed();
+        let (result, progress) = backfill(&interrupted, None).await;
+        let error = result.expect_err("the backfill must stop at the failed write");
+        assert!(
+            error.to_string().contains("the backfill is interrupted"),
+            "{error}"
+        );
+
+        // The second page stopped with the last row in one index only, and only the first page
+        // was reported.
+        let entries = |indexes: Vec<Vec<usize>>| indexes.iter().map(Vec::len).collect::<Vec<_>>();
+        assert_eq!(entries(index_values().await), [10, 9]);
+        assert_eq!(progress.len(), 1, "{progress:?}");
+        let (scanned_rows, index_entries_written, cursor) = progress[0].clone();
+        assert_eq!((scanned_rows, index_entries_written), (5, 10));
+        assert!(cursor.is_some());
+
+        // A run from the reported cursor reads the second page again and reports it once, after
+        // both of its writes.
+        let (result, progress) = backfill(&store, cursor).await;
+        let report = result.expect("the backfill must split the entries over several writes");
+        assert_eq!((report.scanned_rows, report.index_entries_written), (5, 10));
+        assert_eq!(progress.len(), 1, "{progress:?}");
+        assert_eq!((progress[0].0, progress[0].1), (5, 10));
+
+        // Both indexes hold one entry for every row, five of them with a covered 27 MiB body.
+        for values in index_values().await {
+            assert_eq!(values.len(), 10);
+            assert_eq!(values.iter().filter(|len| **len > body.len()).count(), 5);
+        }
     }
 
     /// DataFrame inserts cast each column to the table type the way SQL INSERT does.

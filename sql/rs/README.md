@@ -258,8 +258,9 @@ let report = schema
 ```
 
 The backfill scans the table's primary keys and writes entries only for the added
-indexes. If the index list has not changed, it writes nothing and reports zero
-counts.
+indexes. It keeps every Store write within the Store's limits for one write, so
+the entries of large rows go out in several writes. If the index list has not
+changed, it writes nothing and reports zero counts.
 
 For a resumable backfill, use `backfill_added_indexes_with_options_and_progress`.
 It sends each `Progress` event to the supplied Tokio `UnboundedSender` after
