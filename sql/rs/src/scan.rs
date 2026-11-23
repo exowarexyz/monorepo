@@ -3360,6 +3360,213 @@ mod tests {
         }
     }
 
+    /// A membership value of another width than its fixed-size binary column matches no row,
+    /// whichever key the scan reads. A caller of the table provider can pass such a value without
+    /// the casts that SQL planning adds.
+    #[tokio::test]
+    async fn binary_members_of_another_width_match_no_row() {
+        use datafusion::{arrow::array::AsArray, catalog::TableProvider};
+
+        let binary = |bytes: &[u8]| lit(ScalarValue::Binary(Some(bytes.to_vec())));
+        let codes = [[1, 0], [2, 3], [1, 0], [2, 3]];
+        let ids = |names: [&str; 4]| -> ArrayRef { Arc::new(StringArray::from(names.to_vec())) };
+        let code_column = || -> ArrayRef {
+            Arc::new(FixedSizeBinaryArray::try_from_iter(codes.into_iter()).unwrap())
+        };
+
+        // The first table reads a covering index on code, whose text primary key leaves the
+        // range bounds as the only check. The second has code in its primary key. The members
+        // that can match still select the key ranges, so the first table keeps its index.
+        for (primary_key, indexes) in [
+            (&["id"][..], vec![index("code", &["code"], &[])]),
+            (&["code", "id"][..], vec![]),
+        ] {
+            let fixture = Fixture::new(
+                vec![
+                    column("id", DataType::Utf8, false),
+                    column("code", DataType::FixedSizeBinary(2), false),
+                ],
+                primary_key,
+                indexes,
+                vec![ids(["bad", "good", "worse", "better"]), code_column()],
+            )
+            .await;
+            for (members, expected) in [
+                (vec![binary(&[1]), binary(&[2, 3])], vec!["better", "good"]),
+                (
+                    vec![binary(&[2, 3, 0]), binary(&[1, 0])],
+                    vec!["bad", "worse"],
+                ),
+                (vec![binary(&[1]), binary(&[2, 3, 0])], vec![]),
+            ] {
+                let filter = in_list(col("code"), members, false);
+                let plan = fixture
+                    .table
+                    .scan(
+                        &fixture.context.datafusion().state(),
+                        Some(&vec![0]),
+                        std::slice::from_ref(&filter),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                let indexed = plan
+                    .downcast_ref::<KvScanExec>()
+                    .is_some_and(|scan| scan.plan.index.is_some());
+                assert_eq!(
+                    indexed,
+                    primary_key.len() == 1 && !expected.is_empty(),
+                    "{filter} with primary key {primary_key:?}"
+                );
+                let batches = collect(plan, fixture.context.datafusion().task_ctx())
+                    .await
+                    .unwrap();
+                let mut names: Vec<String> = batches
+                    .iter()
+                    .flat_map(|batch| {
+                        batch
+                            .column(0)
+                            .as_string::<i32>()
+                            .iter()
+                            .map(|name| name.unwrap().to_string())
+                            .collect::<Vec<_>>()
+                    })
+                    .collect();
+                names.sort();
+                assert_eq!(names, expected, "{filter} with primary key {primary_key:?}");
+            }
+        }
+    }
+
+    /// A fixed-size binary member of another fixed width has no common comparison type with
+    /// the column, so DataFusion fails to plan the membership test. The scan leaves such a
+    /// filter to physical planning, which fails the same way.
+    #[tokio::test]
+    async fn binary_members_of_another_fixed_width_fail_planning() {
+        use datafusion::catalog::TableProvider;
+
+        let fixture = Fixture::new(
+            vec![
+                column("id", DataType::Int64, false),
+                column("code", DataType::FixedSizeBinary(2), false),
+            ],
+            &["id"],
+            vec![],
+            vec![
+                Arc::new(Int64Array::from(vec![1])),
+                Arc::new(FixedSizeBinaryArray::try_from_iter([[1, 0]].into_iter()).unwrap()),
+            ],
+        )
+        .await;
+        let fixed = |bytes: &[u8]| {
+            lit(ScalarValue::FixedSizeBinary(
+                bytes.len() as i32,
+                Some(bytes.to_vec()),
+            ))
+        };
+        for filter in [
+            in_list(col("code"), vec![fixed(&[1])], false),
+            in_list(col("code"), vec![fixed(&[1]), fixed(&[1, 0])], false),
+            col("code")
+                .eq(fixed(&[1]))
+                .or(col("code").eq(fixed(&[1, 0]))),
+        ] {
+            let native = match fixture
+                .native
+                .table("orders")
+                .await
+                .unwrap()
+                .filter(filter.clone())
+            {
+                Ok(frame) => frame.create_physical_plan().await.map(|_| ()),
+                Err(error) => Err(error),
+            };
+            assert!(native.is_err(), "DataFusion must fail to plan {filter}");
+            let scan = fixture
+                .table
+                .scan(
+                    &fixture.context.datafusion().state(),
+                    None,
+                    std::slice::from_ref(&filter),
+                    None,
+                )
+                .await;
+            assert!(
+                scan.is_err(),
+                "the scan must fail to plan {filter} as DataFusion does"
+            );
+        }
+    }
+
+    /// A contradictory predicate reads nothing, so no row filter runs and an error that another
+    /// conjunct would raise on a row does not occur. The filter's physical expression raises
+    /// it when it is evaluated on that row.
+    #[tokio::test]
+    async fn a_contradiction_reads_no_rows_and_raises_no_filter_error() {
+        use datafusion::{catalog::TableProvider, common::DFSchema};
+
+        let arrays: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(vec![1])),
+            Arc::new(FixedSizeBinaryArray::try_from_iter([[1, 0]].into_iter()).unwrap()),
+            Arc::new(Int64Array::from(vec![0])),
+        ];
+        let fixture = Fixture::new(
+            vec![
+                column("id", DataType::Int64, false),
+                column("code", DataType::FixedSizeBinary(2), false),
+                column("z", DataType::Int64, false),
+            ],
+            &["id"],
+            vec![],
+            arrays.clone(),
+        )
+        .await;
+        let schema = fixture.table.model.schema.clone();
+        let row = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+        let schema = DFSchema::try_from(schema).unwrap();
+
+        // The division fails on the only row. The first filter fixes id to two values, and
+        // the second lists only a binary value that is too short for the column.
+        let fallible = (lit(1_i64) / col("z")).gt(lit(0_i64));
+        let short = lit(ScalarValue::Binary(Some(vec![1])));
+        for filter in [
+            fallible
+                .clone()
+                .and(col("id").eq(lit(1_i64)))
+                .and(col("id").eq(lit(2_i64))),
+            fallible.and(in_list(col("code"), vec![short], false)),
+        ] {
+            let evaluated = fixture
+                .native
+                .create_physical_expr(filter.clone(), &schema)
+                .unwrap()
+                .evaluate(&row);
+            assert!(
+                evaluated
+                    .as_ref()
+                    .is_err_and(|error| error.to_string().contains("Divide by zero")),
+                "evaluating {filter} on the row must raise the division: {evaluated:?}"
+            );
+            let plan = fixture
+                .table
+                .scan(
+                    &fixture.context.datafusion().state(),
+                    None,
+                    std::slice::from_ref(&filter),
+                    None,
+                )
+                .await
+                .unwrap();
+            let batches = collect(plan, fixture.context.datafusion().task_ctx())
+                .await
+                .unwrap();
+            assert!(
+                batches.iter().all(|batch| batch.num_rows() == 0),
+                "{filter} must read no rows"
+            );
+        }
+    }
+
     /// A scan reports the most rows its point keys or fetch allow, so a join collects a point
     /// lookup as its build side. The bound is never exact and no other statistic is set.
     #[tokio::test]

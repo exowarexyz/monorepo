@@ -871,7 +871,8 @@ mod tests {
         }
     }
 
-    /// Returns point, range, and IN-list constraints for a column of `kind`.
+    /// Returns point, range, and IN-list constraints for a column of `kind`. The last binary
+    /// list holds a value one byte short, which no column value equals.
     fn constraints(kind: ColumnKind) -> Vec<PredicateConstraint> {
         use PredicateConstraint::{
             FixedSizeBinaryEq, FixedSizeBinaryIn, FloatRange, IntIn, StringEq, StringIn, UInt64In,
@@ -907,6 +908,7 @@ mod tests {
             ColumnKind::FixedSizeBinary(2) => vec![
                 FixedSizeBinaryEq(vec![1, 2]),
                 FixedSizeBinaryIn(vec![vec![0, 0], vec![1, 3]]),
+                FixedSizeBinaryIn(vec![vec![1], vec![1, 3]]),
             ],
             _ => unreachable!("the tables must use only these column kinds"),
         }
@@ -920,7 +922,7 @@ mod tests {
             ColumnKind::Utf8 => ["", "n", "o"].map(|v| CellValue::Utf8(v.into())).to_vec(),
             ColumnKind::Float64 => [0.5, 1.0, 2.0].map(CellValue::Float64).to_vec(),
             ColumnKind::Date32 => [0, 5, i32::MAX].map(CellValue::Date32).to_vec(),
-            ColumnKind::FixedSizeBinary(2) => [[0, 0], [1, 2], [1, 3]]
+            ColumnKind::FixedSizeBinary(2) => [[0, 0], [1, 0], [1, 2], [1, 3]]
                 .map(|v| CellValue::FixedSizeBinary(v.to_vec()))
                 .to_vec(),
             _ => unreachable!("the tables must use only these column kinds"),
@@ -1085,6 +1087,15 @@ mod tests {
                 ],
                 &["name", "id"],
                 &[&["score"], &["day"], &["day", "score"], &["score", "name"]],
+            ),
+            indexed_table(
+                &[
+                    ("code", DataType::FixedSizeBinary(2)),
+                    ("id", DataType::Int64),
+                    ("tag", DataType::Int64),
+                ],
+                &["code", "id"],
+                &[&["tag"], &["tag", "code"], &["tag", "id"]],
             ),
         ] {
             let kinds = model.columns.iter().map(|col| col.kind);
