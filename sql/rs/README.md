@@ -322,23 +322,67 @@ the new rows. It is absent when the statement neither read from nor wrote to
 the Store. A result whose encoded stream exceeds 256 MiB fails with
 `RESOURCE_EXHAUSTED`.
 
-`Query` accepts queries and `EXPLAIN`, `INSERT INTO` registered tables, `SET`
-and `RESET` of options outside `datafusion.runtime`, `datafusion.catalog`, and
-`datafusion.sql_parser`, `PREPARE`, `EXECUTE`, `DEALLOCATE`, `CREATE FUNCTION`,
-and `DROP FUNCTION`. Session commands such as `SET`, `PREPARE`, and
-`CREATE FUNCTION` modify the server's shared context, so their effects persist
-into later requests. Every caller shares the session's settings, functions, and
-prepared statements, including statements the embedder prepared on
-`server.context()`. Serve `Query` only to callers trusted with all of them.
-`CREATE FUNCTION` needs a function factory installed on the server's context.
+`Query` accepts queries, `EXPLAIN`, `INSERT INTO` registered tables, and
+`EXECUTE` of a statement prepared on the server's context. Callers have no
+sessions of their own. Every request starts from the catalog, settings,
+functions, and prepared statements of `server.context()`, so `Query` rejects
+each statement that would change them for other callers: `SET` and `RESET`,
+`PREPARE` and `DEALLOCATE`, `CREATE FUNCTION` and `DROP FUNCTION`, catalog DDL
+such as `CREATE TABLE`, `CREATE VIEW`, and `DROP TABLE`, and transaction
+statements. It rejects `COPY` and `CREATE EXTERNAL TABLE` because they reach
+the server's files, and `DELETE`, `UPDATE`, and other writes because
+`INSERT INTO` is the only write the service offers. The statement an
+`EXECUTE` runs follows the same rules. Set options, register tables, views,
+and functions, and prepare statements through `server.context()`.
 
-`Query` rejects catalog DDL such as `CREATE TABLE`, `CREATE VIEW`, and
-`DROP TABLE` because every caller shares the catalog, and parser options because
-they decide how every caller's SQL is read. It rejects `COPY` and
-`CREATE EXTERNAL TABLE` because they reach the server's files, and `DELETE`,
-`UPDATE`, and other writes because `INSERT INTO` is the only write the service
-offers. Register tables and views and set runtime and parser options through
-`server.context()`.
+`Query` and `Subscribe` reject SQL past fixed limits, because DataFusion
+parses, plans, and runs a statement with recursion along its nesting and a
+server thread's stack is finite. `Query` checks a statement's text and syntax
+before it plans the statement, and the plan before it optimizes it:
+
+- Expressions nest at most 24 deep, counting the operand. A function call, a
+  `CASE`, a pair of parentheses, a unary operator, a subquery, and each part of
+  a dotted name count one level. A binary operator counts a quarter of a level,
+  whether it is `AND`, `OR`, a comparison, arithmetic, or `||`, so a `WHERE`
+  clause joins up to 92 comparisons and a lookup by a composite key takes 87
+  keys as an `OR` of parenthesized `AND`s. Those counts are for column names
+  of one part. A qualified name such as `t.id` is one level deeper, which
+  leaves 88 comparisons. A searched `CASE` whose results may be Booleans counts
+  a quarter of a level for each `WHEN`. An `IN` list is one level however long
+  it is.
+- Queries nest at most 8 deep, counting derived tables, common table
+  expressions, and subqueries. Each nested query also counts two levels toward
+  the limit on the expressions inside it.
+- A statement's plan nests at most 192 levels deep. DataFusion plans a step
+  for every projection, filter, join, aggregation, sort, limit, set operation,
+  window, and named subquery, and the steps between the result and each table
+  count. Most count one level. A join, an aggregation, a `DISTINCT`, a window,
+  a limit, and each subquery in a step's expressions count three, and a filter
+  counts five. A step also counts every level that its deepest expression
+  nests, because the optimizer merges the expressions of the projections and
+  filters it combines. A searched `CASE` whose results are all constant
+  Booleans counts two levels for each `WHEN`. Each of these fits alone: a join
+  of 48 tables on one comparison each, a `UNION` of 48 queries, a chain of 95
+  common table expressions that each select from the one before, 58 correlated
+  subqueries in one select list, window functions over 38 different orderings,
+  a `WHERE` clause of 92 comparisons under a select expression of 88
+  operators, and a pipeline of 14 common table expressions that each filter on
+  two conditions and group, or 11 that also join a table. The parts of one
+  statement share the levels along each path from the result to a table. Pipe
+  operators count as the steps they add. A view that the embedder registers is
+  planned in place of its name after the statement is measured, so its levels
+  come on top of the caller's.
+- A statement reads at most 1,024 relations and holds at most 65,536
+  expressions and relations once each common table expression it names is
+  replaced by its body. No statement without common table expressions holds
+  that many.
+- Data types nest at most 8 deep, through `ARRAY<...>`, `STRUCT<...>`, and
+  similar constructors, `[]` suffixes, and the type string of `arrow_cast`,
+  which must be a literal. `UNION(...)` and `TABLE(...)` types nest 8 deep
+  apart from the others, because the same words begin a parenthesized query. A
+  chain of subscripts such as `a[1][2]` has the same limit.
+- Statements nest at most 3 deep, where an `EXPLAIN`, a `DESCRIBE`, a
+  `PREPARE`, and a statement that holds others each nest what they hold.
 
 `Subscribe` streams rows from each Store batch that writes to a table and matches
 a scalar SQL predicate. Predicates cannot use subqueries, aggregates, window

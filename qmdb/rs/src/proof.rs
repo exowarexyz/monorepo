@@ -374,6 +374,7 @@ pub struct KeyRangeProof<
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > {
     pub tip: Location<F>,
+    pub root: D,
     pub entries: Vec<KeyValueProof<D, ordered::Operation<F, K, E>, N, F>>,
     pub start_proof: Option<KeyExclusionProof<D, K, V, N, F, E>>,
 }
@@ -428,7 +429,11 @@ pub enum VerifiedKeyLookup<
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > {
     Hit(VerifiedKeyValue<D, ordered::Operation<F, K, E>, F>),
-    Miss { key: K },
+    /// `key` is not active under the current-state `root`.
+    Miss {
+        root: D,
+        key: K,
+    },
 }
 
 /// A verified ordered current key range.
@@ -441,6 +446,8 @@ pub struct VerifiedKeyRange<
     F: Family,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > {
+    /// Current-state root the range was verified against, including when `entries` is empty.
+    pub root: D,
     pub entries: Vec<VerifiedKeyValue<D, ordered::Operation<F, K, E>, F>>,
     /// First key of the next page, if the range continues past `limit` entries.
     pub next_start_key: Option<K>,

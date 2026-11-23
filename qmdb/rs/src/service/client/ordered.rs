@@ -178,6 +178,7 @@ where
                             &self.value_cfg,
                         )?;
                         Ok(VerifiedKeyLookup::Miss {
+                            root: *root,
                             key: decoded_requested_key,
                         })
                     }

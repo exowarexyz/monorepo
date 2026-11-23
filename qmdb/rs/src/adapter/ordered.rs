@@ -613,6 +613,7 @@ where
                     VerifiedKeyLookup::Hit(current::verified_key_value(proof))
                 }
                 KeyLookupProof::Miss(proof) => VerifiedKeyLookup::Miss {
+                    root: proof.root,
                     key: proof.requested_key,
                 },
             })
@@ -668,6 +669,7 @@ where
         .map_err(QmdbError::RangeMismatch)?
         .cloned();
         Ok(VerifiedKeyRange {
+            root: proof.root,
             entries,
             next_start_key,
         })
@@ -1086,6 +1088,7 @@ where
 
         Ok(KeyRangeProof {
             tip: resolved.tip,
+            root: tip.root,
             entries,
             start_proof,
         })

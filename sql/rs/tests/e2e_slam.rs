@@ -17,8 +17,7 @@ use datafusion::{
     catalog::{Session, TableProvider},
     common::{exec_err, Result as DataFusionResult, ScalarValue},
     datasource::{MemTable, ViewTable},
-    execution::context::{FunctionFactory, RegisterFunction, SessionState},
-    logical_expr::{create_udf, CreateFunction, Expr, TableType, Volatility},
+    logical_expr::{create_udf, Expr, TableType, Volatility},
     physical_plan::ExecutionPlan,
 };
 use exoware_sdk::{
@@ -382,7 +381,7 @@ async fn connect_query_rejects_server_file_and_runtime_access() {
     }
     assert!(server.context().table_provider("local_file").await.is_err());
 
-    // Queries, Store writes, session settings, and prepared statements remain available.
+    // Queries, Store writes, and statements the embedder prepared remain available.
     assert_eq!(
         query_row_count(&client, "INSERT INTO items VALUES (1, 'one')").await,
         1
@@ -391,12 +390,11 @@ async fn connect_query_rejects_server_file_and_runtime_access() {
         query_row_count(&client, "SELECT value FROM items WHERE id = 1").await,
         1
     );
-    query_row_count(&client, "SET datafusion.execution.batch_size = 17").await;
-    query_row_count(
-        &client,
-        "PREPARE item AS SELECT value FROM items WHERE id = 1",
-    )
-    .await;
+    server
+        .context()
+        .sql("PREPARE item AS SELECT value FROM items WHERE id = 1")
+        .await
+        .expect("the embedder must prepare a statement");
     assert_eq!(query_row_count(&client, "EXECUTE item").await, 1);
 
     std::fs::remove_dir_all(&dir).expect("the temp dir must be removable");
@@ -446,9 +444,6 @@ async fn connect_query_rejects_shared_catalog_changes() {
         assert_eq!(error.code, ErrorCode::InvalidArgument, "{sql}: {error:?}");
     }
 
-    // A setting outside the catalog and parser options is still accepted.
-    query_row_count(&client, "SET datafusion.execution.batch_size = 17").await;
-
     // The served table still answers with its stored row.
     let response = client
         .query(QueryRequest {
@@ -475,7 +470,7 @@ async fn connect_query_rejects_shared_catalog_changes() {
         .collect();
     assert_eq!(values, vec![Some("one".to_string())]);
 
-    // No rejected statement reached the server's catalog or options, and the accepted one did.
+    // No rejected statement reached the server's catalog or options.
     let ctx = server.context();
     for table in ["copied_items", "empty_items", "item_values"] {
         assert!(ctx.table_provider(table).await.is_err(), "{table}");
@@ -491,7 +486,6 @@ async fn connect_query_rejects_shared_catalog_changes() {
     assert!(!options.catalog.information_schema);
     assert_eq!(options.sql_parser.dialect, Default::default());
     assert!(options.sql_parser.enable_ident_normalization);
-    assert_eq!(options.execution.batch_size.get(), 17);
     handle.abort();
 }
 
@@ -545,6 +539,21 @@ async fn connect_query_rejects_writes_other_than_insert() {
     }
     let error = query_error(&client, "EXECUTE remove_id(1)").await;
     assert_eq!(error.code, ErrorCode::InvalidArgument, "{error:?}");
+
+    // A statement the embedder prepared follows the same rule when a caller executes it.
+    server
+        .context()
+        .sql("PREPARE remove_id AS DELETE FROM configured_ids WHERE id = $1")
+        .await
+        .expect("the embedder must prepare the delete");
+    for sql in [
+        "EXECUTE remove_id(1)",
+        "EXPLAIN EXECUTE remove_id(2)",
+        "EXPLAIN ANALYZE EXECUTE remove_id(3)",
+    ] {
+        let error = query_error(&client, sql).await;
+        assert_eq!(error.code, ErrorCode::InvalidArgument, "{sql}: {error:?}");
+    }
     assert_eq!(
         sorted_ids(server.context(), "configured_ids").await,
         [1, 2, 3]
@@ -581,39 +590,22 @@ async fn connect_query_reports_invalid_values_as_invalid_argument() {
 }
 
 #[tokio::test]
-async fn connect_query_reports_failed_session_commands_as_invalid_argument() {
+async fn connect_query_reports_a_failed_execute_as_invalid_argument() {
     let schema = KvSchema::new(common::local_store_client().await.unprefixed());
     let server = Arc::new(SqlServer::new(schema).expect("the server must build"));
+    server
+        .context()
+        .sql("PREPARE taken(BIGINT) AS SELECT $1")
+        .await
+        .expect("the embedder must prepare a statement");
     let (client, handle) = serve_sql(server).await;
-    query_row_count(&client, "PREPARE taken AS SELECT 1").await;
 
-    // Each command gives a setting a bad value, reuses a name, or names nothing that exists.
-    for sql in [
-        "SET datafusion.execution.batch_size = 'abc'",
-        "PREPARE taken AS SELECT 2",
-        "EXECUTE nope",
-        "DEALLOCATE nope",
-        "DROP FUNCTION nope",
-    ] {
+    // Each EXECUTE names no prepared statement or passes the wrong number of parameters.
+    for sql in ["EXECUTE nope", "EXECUTE taken", "EXECUTE taken(1, 2)"] {
         let error = query_error(&client, sql).await;
         assert_eq!(error.code, ErrorCode::InvalidArgument, "{sql}: {error:?}");
     }
     handle.abort();
-}
-
-/// A function factory whose backend is down, so every `CREATE FUNCTION` fails on the server.
-#[derive(Debug)]
-struct UnavailableFunctionFactory;
-
-#[async_trait::async_trait]
-impl FunctionFactory for UnavailableFunctionFactory {
-    async fn create(
-        &self,
-        _state: &SessionState,
-        _statement: CreateFunction,
-    ) -> DataFusionResult<RegisterFunction> {
-        exec_err!("function backend is unavailable")
-    }
 }
 
 /// A table whose source is down, so building a plan that scans it fails on the server.
@@ -642,14 +634,10 @@ impl TableProvider for UnavailableTable {
 }
 
 #[tokio::test]
-async fn connect_query_keeps_server_faults_around_session_commands_internal() {
+async fn connect_query_keeps_server_faults_in_an_execute_internal() {
     let schema = KvSchema::new(common::local_store_client().await.unprefixed());
     let server = Arc::new(SqlServer::new(schema).expect("the server must build"));
     let ctx = server.context();
-    ctx.datafusion()
-        .state_ref()
-        .write()
-        .set_function_factory(Arc::new(UnavailableFunctionFactory));
     ctx.register_udf(create_udf(
         "broken",
         vec![DataType::Int64],
@@ -659,21 +647,19 @@ async fn connect_query_keeps_server_faults_around_session_commands_internal() {
     ));
     ctx.register_table("unavailable", Arc::new(UnavailableTable))
         .expect("the unavailable table must register");
-    let (client, handle) = serve_sql(server).await;
     for sql in [
         "PREPARE scan_unavailable AS SELECT id FROM unavailable",
         "PREPARE call_broken AS SELECT broken(1)",
     ] {
-        query_row_count(&client, sql).await;
+        ctx.sql(sql)
+            .await
+            .expect("the embedder must prepare a statement");
     }
+    let (client, handle) = serve_sql(server.clone()).await;
 
-    // The embedder's function factory fails, and the statement an EXECUTE starts fails when its
-    // plan is built or while it runs. None of these is the caller's mistake.
-    for sql in [
-        "CREATE FUNCTION f(BIGINT) RETURNS BIGINT RETURN $1",
-        "EXECUTE scan_unavailable",
-        "EXECUTE call_broken",
-    ] {
+    // The statement an EXECUTE starts fails when its plan is built or while it runs. Neither
+    // is the caller's mistake.
+    for sql in ["EXECUTE scan_unavailable", "EXECUTE call_broken"] {
         let error = query_error(&client, sql).await;
         assert_eq!(error.code, ErrorCode::Internal, "{sql}: {error:?}");
     }
@@ -781,44 +767,153 @@ async fn connect_requests_enforce_declared_field_lengths() {
 }
 
 #[tokio::test]
-async fn connect_query_preserves_session_settings() {
-    let schema = KvSchema::new(common::local_store_client().await.unprefixed());
-    let server = Arc::new(SqlServer::new(schema).expect("SQL server"));
-    let initial_batch_size = server.context().datafusion().state().config().batch_size();
-    let (client, handle) = serve_sql(server.clone()).await;
+async fn connect_query_runs_long_filters_on_store_tables() {
+    let store = common::local_store_client().await;
+    let schema = items_schema(&store);
+    let mut writer = schema.batch_writer();
+    for id in 0..100 {
+        writer
+            .insert(
+                "items",
+                vec![CellValue::Int64(id), CellValue::Utf8(id.to_string())],
+            )
+            .expect("the insert must succeed");
+    }
+    writer
+        .flush()
+        .await
+        .expect("the flush must succeed")
+        .expect("the writer must hold rows");
+    let server = Arc::new(SqlServer::new(schema).expect("the server must build"));
+    let (client, handle) = serve_sql(server).await;
 
-    for (sql, expected) in [
-        ("SET datafusion.execution.batch_size = 17", 17),
-        ("RESET datafusion.execution.batch_size", initial_batch_size),
+    // A lookup by a composite key is an OR of ANDs with one branch per key. These are the
+    // most keys and the most AND-ed comparisons the expression limit admits.
+    let keys: Vec<_> = (0..87)
+        .map(|key| format!("(id = {key} AND value = '{key}')"))
+        .collect();
+    let lookup = format!("SELECT value FROM items WHERE {}", keys.join(" OR "));
+    assert_eq!(query_row_count(&client, &lookup).await, 87);
+    let bounds: Vec<_> = (0..92).map(|bound| format!("id >= {bound}")).collect();
+    let filter = format!("SELECT value FROM items WHERE {}", bounds.join(" AND "));
+    assert_eq!(query_row_count(&client, &filter).await, 9);
+
+    // One more key or comparison is rejected as the caller's error.
+    for sql in [
+        format!("{lookup} OR (id = 87 AND value = '87')"),
+        format!("{filter} AND id >= 92"),
     ] {
-        client
+        let error = query_error(&client, &sql).await;
+        assert_eq!(
+            error.code,
+            ErrorCode::InvalidArgument,
+            "{sql:.60}: {error:?}"
+        );
+    }
+    handle.abort();
+}
+
+#[tokio::test]
+async fn connect_query_rejects_changes_to_the_shared_session() {
+    let store = common::local_store_client().await;
+    let schema = items_schema(&store);
+    let mut writer = schema.batch_writer();
+    writer
+        .insert(
+            "items",
+            vec![CellValue::Int64(1), CellValue::Utf8("one".to_string())],
+        )
+        .expect("the insert must succeed");
+    writer
+        .flush()
+        .await
+        .expect("the flush must succeed")
+        .expect("the writer must hold a row");
+    let server = Arc::new(SqlServer::new(schema).expect("the server must build"));
+    let ctx = server.context();
+    ctx.sql("PREPARE item AS SELECT value FROM items WHERE id = 1")
+        .await
+        .expect("the embedder must prepare a statement");
+    let initial = ctx.datafusion().state().config().options().clone();
+
+    // Two clients stand for two callers of one server.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("the server must bind")
+        .tap_io(set_tcp_nodelay);
+    let base = format!(
+        "http://{}",
+        listener
+            .local_addr()
+            .expect("the server must have an address")
+    );
+    let app = Router::new().fallback_service(sql_stack(server.clone()));
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("the server must serve");
+    });
+    let caller = || {
+        ServiceClient::new(
+            PreferZstdHttpClient::plaintext(),
+            ClientConfig::new(base.parse().expect("the server URI must parse")),
+        )
+    };
+    let (first, second) = (caller(), caller());
+
+    // The first caller sends statements that would change what every caller sees.
+    let mut outcomes = Vec::new();
+    for sql in [
+        "DROP FUNCTION count",
+        "DROP FUNCTION abs",
+        "CREATE FUNCTION twice(BIGINT) RETURNS BIGINT RETURN $1 + $1",
+        "SET datafusion.execution.target_partitions = 2048",
+        "SET datafusion.execution.batch_size = 17",
+        "SET TIME ZONE = 'America/New_York'",
+        "RESET datafusion.execution.target_partitions",
+        "PREPARE mine AS SELECT 1",
+        "EXPLAIN PREPARE hidden AS SELECT 1",
+        "DEALLOCATE item",
+        "START TRANSACTION",
+        "COMMIT",
+        "ROLLBACK",
+    ] {
+        let outcome = first
             .query(QueryRequest {
                 sql: sql.to_string(),
                 ..Default::default()
             })
-            .await
-            .expect("update session setting");
-        assert_eq!(
-            server.context().datafusion().state().config().batch_size(),
-            expected,
-            "{sql}"
-        );
+            .await;
+        outcomes.push((sql, outcome.err()));
     }
 
-    client
-        .query(QueryRequest {
-            sql: "DROP FUNCTION abs".to_string(),
-            ..Default::default()
-        })
-        .await
-        .expect("drop session function");
-    client
-        .query(QueryRequest {
-            sql: "SELECT abs(-7)".to_string(),
-            ..Default::default()
-        })
-        .await
-        .expect_err("function remains absent in the next request");
+    // The second caller still finds the functions and the embedder's prepared statement, and
+    // nothing the first caller tried to add.
+    for sql in [
+        "SELECT count(*) FROM items",
+        "SELECT abs(-7)",
+        "EXECUTE item",
+    ] {
+        assert_eq!(query_row_count(&second, sql).await, 1, "{sql}");
+    }
+    for sql in ["SELECT twice(2)", "EXECUTE mine", "EXECUTE hidden"] {
+        query_error(&second, sql).await;
+    }
+
+    // The server's options keep their values.
+    let options = ctx.datafusion().state().config().options().clone();
+    assert_eq!(
+        options.execution.target_partitions,
+        initial.execution.target_partitions
+    );
+    assert_eq!(options.execution.batch_size, initial.execution.batch_size);
+    assert_eq!(options.execution.time_zone, initial.execution.time_zone);
+
+    // Each statement was rejected as the caller's error.
+    for (sql, error) in outcomes {
+        let error = error.unwrap_or_else(|| panic!("{sql} must be rejected"));
+        assert_eq!(error.code, ErrorCode::InvalidArgument, "{sql}: {error:?}");
+    }
     handle.abort();
 }
 
@@ -1053,6 +1148,11 @@ async fn connect_query_preserves_configured_tables_and_views() {
             Arc::new(ViewTable::new(programmatic_plan, None)),
         )
         .expect("register programmatic view");
+    server
+        .context()
+        .sql("PREPARE other_item AS SELECT id FROM other_items WHERE id = 2")
+        .await
+        .expect("prepare namespaced query");
     let server = Arc::new(server);
 
     let (client, handle) = serve_sql(server).await;
@@ -1069,14 +1169,6 @@ async fn connect_query_preserves_configured_tables_and_views() {
         .to_owned_message();
     assert!(response.sequence_number.unwrap() >= write_sequence);
     assert_eq!(result_row_count(&response.results), 1);
-
-    client
-        .query(QueryRequest {
-            sql: "PREPARE other_item AS SELECT id FROM other_items WHERE id = 2".to_string(),
-            ..Default::default()
-        })
-        .await
-        .expect("prepare namespaced query");
 
     for sql in [
         "EXECUTE other_item",
@@ -1125,21 +1217,6 @@ async fn connect_query_preserves_configured_tables_and_views() {
             .expect_err("data reads retain their request floor");
         assert_eq!(error.code, ErrorCode::Aborted, "{sql}");
     }
-    client
-        .query(QueryRequest {
-            sql: "DEALLOCATE other_item".to_string(),
-            ..Default::default()
-        })
-        .await
-        .expect("deallocate prepared query");
-    client
-        .query(QueryRequest {
-            sql: "EXECUTE other_item".to_string(),
-            ..Default::default()
-        })
-        .await
-        .expect_err("prepared query remains absent in the next request");
-
     let response = client
         .query(QueryRequest {
             sql: "SELECT value FROM configured_items".to_string(),

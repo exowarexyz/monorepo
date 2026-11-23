@@ -10,7 +10,7 @@ use datafusion::{
     catalog::Session,
     common::{
         format::DEFAULT_CAST_OPTIONS,
-        tree_node::{Transformed, TreeNode, TreeNodeRecursion},
+        tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter},
         DFSchemaRef, DataFusionError, Result as DataFusionResult, ScalarValue,
     },
     datasource::source_as_provider,
@@ -294,38 +294,6 @@ impl KvAggregatePushdownRule {
         Self
     }
 
-    fn rewrite_with_limit(
-        &self,
-        plan: LogicalPlan,
-        limited: bool,
-    ) -> DataFusionResult<Transformed<LogicalPlan>> {
-        // DataFusion only stops distinct aggregation early when the limit sits directly above
-        // it. Its limit pushdown moves a limit below a projection or a subquery alias, so a
-        // limit above either of them reaches their input.
-        let input_limited = match &plan {
-            LogicalPlan::Limit(_) => plan.fetch()?.is_some(),
-            LogicalPlan::Projection(_) | LogicalPlan::SubqueryAlias(_) => limited,
-            _ => false,
-        };
-
-        // A plan embedded in an expression, such as a scalar subquery, is a query of its own
-        // with no limit above it.
-        let rewritten = plan.map_subqueries(|subquery| self.rewrite_with_limit(subquery, false))?;
-
-        rewritten
-            .transform_sibling(|plan| {
-                plan.map_children(|input| self.rewrite_with_limit(input, input_limited))
-            })?
-            .transform_data(|node| {
-                if limited
-                    && matches!(&node, LogicalPlan::Aggregate(aggregate) if aggregate.aggr_expr.is_empty())
-                {
-                    return Ok(Transformed::no(node));
-                }
-                self.try_rewrite_plan(node)
-            })
-    }
-
     pub(crate) fn try_rewrite_plan(
         &self,
         plan: LogicalPlan,
@@ -372,6 +340,55 @@ impl KvAggregatePushdownRule {
             }),
         });
         Ok(Transformed::yes(plan))
+    }
+}
+
+/// Applies [`KvAggregatePushdownRule::try_rewrite_plan`] to every node of a plan, inputs
+/// first, except to a group-only aggregate that a limit reaches.
+///
+/// DataFusion's traversal drives the rewriter, so the rule adds no recursion of its own and
+/// a deep plan grows the stack the way it does in DataFusion's own rules.
+struct AggregatePushdownRewriter<'a> {
+    /// Rule whose rewrite each node receives.
+    rule: &'a KvAggregatePushdownRule,
+    /// Whether a limit reaches the inputs of each node between the root and the node being
+    /// visited, innermost last.
+    input_limited: Vec<bool>,
+}
+
+impl AggregatePushdownRewriter<'_> {
+    /// Whether a limit reaches the node being visited. The root has no limit above it.
+    fn limited(&self) -> bool {
+        self.input_limited.last().copied().unwrap_or(false)
+    }
+}
+
+impl TreeNodeRewriter for AggregatePushdownRewriter<'_> {
+    type Node = LogicalPlan;
+
+    fn f_down(&mut self, plan: LogicalPlan) -> DataFusionResult<Transformed<LogicalPlan>> {
+        // DataFusion only stops distinct aggregation early when the limit sits directly above
+        // it. Its limit pushdown moves a limit below a projection or a subquery alias, so a
+        // limit above either of them reaches their input. A plan embedded in an expression,
+        // such as a scalar subquery, is a query of its own with no limit above it. The
+        // traversal enters it through a `Subquery` node, which no limit passes.
+        let input_limited = match &plan {
+            LogicalPlan::Limit(_) => plan.fetch()?.is_some(),
+            LogicalPlan::Projection(_) | LogicalPlan::SubqueryAlias(_) => self.limited(),
+            _ => false,
+        };
+        self.input_limited.push(input_limited);
+        Ok(Transformed::no(plan))
+    }
+
+    fn f_up(&mut self, plan: LogicalPlan) -> DataFusionResult<Transformed<LogicalPlan>> {
+        self.input_limited.pop();
+        if self.limited()
+            && matches!(&plan, LogicalPlan::Aggregate(aggregate) if aggregate.aggr_expr.is_empty())
+        {
+            return Ok(Transformed::no(plan));
+        }
+        self.rule.try_rewrite_plan(plan)
     }
 }
 
@@ -491,7 +508,10 @@ impl OptimizerRule for KvAggregatePushdownRule {
         plan: LogicalPlan,
         _config: &dyn datafusion::optimizer::optimizer::OptimizerConfig,
     ) -> DataFusionResult<Transformed<LogicalPlan>> {
-        self.rewrite_with_limit(plan, false)
+        plan.rewrite_with_subqueries(&mut AggregatePushdownRewriter {
+            rule: self,
+            input_limited: Vec::new(),
+        })
     }
 }
 
@@ -2767,6 +2787,23 @@ mod tests {
             .await;
     }
 
+    #[test]
+    fn pushdown_rule_rewrites_plans_deeper_than_its_thread_stack() {
+        use datafusion::{logical_expr::LogicalPlanBuilder, optimizer::OptimizerContext};
+
+        // A frame of the rule's own for every plan level would overflow the 2 MiB stack of a
+        // test thread long before this depth.
+        let mut plan = LogicalPlanBuilder::empty(true);
+        for level in 0..512 {
+            plan = plan.alias(format!("t{level}")).unwrap();
+        }
+        let plan = plan.build().unwrap();
+        let rewritten = KvAggregatePushdownRule::new()
+            .rewrite(plan, &OptimizerContext::new())
+            .unwrap();
+        assert!(!rewritten.transformed);
+    }
+
     #[tokio::test]
     async fn limit_outside_the_aggregate_keeps_group_only_pushdown() {
         let fixture = Fixture::new().await;
@@ -2781,6 +2818,65 @@ mod tests {
         ] {
             fixture.check(sql, 1).await;
         }
+    }
+
+    #[tokio::test]
+    async fn limit_outside_a_subquery_keeps_its_group_only_pushdown() {
+        use datafusion::{
+            logical_expr::{col, scalar_subquery, LogicalPlanBuilder},
+            optimizer::OptimizerContext,
+        };
+
+        let fixture = Fixture::new().await;
+        let orders = fixture
+            .context
+            .table("orders")
+            .await
+            .unwrap()
+            .into_unoptimized_plan();
+        let statuses = LogicalPlanBuilder::from(orders.clone())
+            .aggregate(vec![col("status")], Vec::<Expr>::new())
+            .unwrap();
+        let store_aggregates = |plan: LogicalPlan| {
+            let rewritten = KvAggregatePushdownRule::new()
+                .rewrite(plan, &OptimizerContext::new())
+                .unwrap();
+            let mut count = 0;
+            rewritten
+                .data
+                .apply_with_subqueries(|node| {
+                    if let LogicalPlan::Extension(extension) = node {
+                        count += usize::from(extension.node.name() == "KvAggregate");
+                    }
+                    Ok(TreeNodeRecursion::Continue)
+                })
+                .unwrap();
+            count
+        };
+
+        // A limit above a projection reaches a group-only aggregate beneath it, which then
+        // stays in DataFusion.
+        let limited = statuses
+            .clone()
+            .project(vec![col("status")])
+            .unwrap()
+            .limit(0, Some(1))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(store_aggregates(limited), 0);
+
+        // The same aggregate in a subquery of that projection is a query of its own that the
+        // limit does not reach, so the Store computes it.
+        let subquery = scalar_subquery(Arc::new(statuses.build().unwrap()));
+        let limited = LogicalPlanBuilder::from(orders)
+            .project(vec![subquery])
+            .unwrap()
+            .limit(0, Some(1))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(store_aggregates(limited), 1);
     }
 
     #[tokio::test]
