@@ -9,8 +9,8 @@ import { SubscribeRequestSchema, SubscribeResponseSchema } from '../dist/generat
 import { CurrentKeyValueProofSchema, CurrentOperationRangeProofSchema, OperationMultiProofSchema } from '../dist/generated/proto/qmdb/v1/proof_pb.js';
 import { QmdbOrderedClient } from '../dist/client.js';
 import {
-  decode_operation_multi_proof_operations, encode_vec_key, initSync, verify_current_key_value_proof,
-  verify_get_many_response, verify_get_range_response,
+  decode_operation_multi_proof_operations, encode_vec_key, initSync, verify_key_value_proof,
+  verify_key_lookup_proof, verify_key_range_proof,
 } from '../dist/generated/wasm/exoware_qmdb_wasm.js';
 
 initSync({ module: readFileSync(new URL('../dist/generated/wasm/exoware_qmdb_wasm_bg.wasm', import.meta.url)) });
@@ -36,7 +36,7 @@ function assertHit(actual, expected) {
 }
 
 function verifyRange(f, response = f.responseBytes, root = f.root, start = f.request.startKey) {
-  return verify_get_range_response(response, root, f.family, 'sha256', f.chunkSize,
+  return verify_key_range_proof(response, root, f.family, 'sha256', f.chunkSize,
     start, f.request.endKey ?? new Uint8Array(), f.request.endKey !== undefined, f.request.limit);
 }
 
@@ -72,7 +72,7 @@ for (const family of ['mmr', 'mmb']) {
     // Native matrix cases bind these wire responses to their Commonware source state
     const get = fixture(family, 'get', GetRequestSchema, GetResponseSchema);
     const proof = toBinary(CurrentKeyValueProofSchema, get.response.proof);
-    const verifyGet = (root, key) => verify_current_key_value_proof(proof, root, family, 'sha256', get.chunkSize, key);
+    const verifyGet = (root, key) => verify_key_value_proof(proof, root, family, 'sha256', get.chunkSize, key);
     assertHit(verifyGet(get.root, get.request.key), get.expected[0]);
     const wrongRoot = Buffer.from(get.root);
     wrongRoot[0] ^= 1;
@@ -80,7 +80,7 @@ for (const family of ['mmr', 'mmb']) {
     assert.throws(() => verifyGet(get.root, encode_vec_key(new Uint8Array([255]))));
 
     const many = fixture(family, 'get_many', GetManyRequestSchema, GetManyResponseSchema);
-    const verifyMany = (response = many.responseBytes, root = many.root) => verify_get_many_response(response, root, family, 'sha256', many.chunkSize, many.request.keys);
+    const verifyMany = (response = many.responseBytes, root = many.root) => verify_key_lookup_proof(response, root, family, 'sha256', many.chunkSize, many.request.keys);
     const results = verifyMany().results;
     assert.equal(results.length, many.expected.length);
     assert.deepEqual(results.map((result) => result.type), ['hit', 'miss', 'hit']);
@@ -97,7 +97,7 @@ for (const family of ['mmr', 'mmb']) {
     ]) {
       assert.throws(() => verifyMany(toBinary(GetManyResponseSchema, { ...many.response, results })));
     }
-    assert.throws(() => verify_get_many_response(many.responseBytes, many.root, family,
+    assert.throws(() => verify_key_lookup_proof(many.responseBytes, many.root, family,
       'sha256', many.chunkSize, [many.request.keys[0], many.request.keys[0], many.request.keys[2]]));
 
     const subscribe = fixture(family, 'subscribe', SubscribeRequestSchema, SubscribeResponseSchema);
@@ -127,7 +127,7 @@ for (const family of ['mmr', 'mmb']) {
     assert.throws(() => verifyRange(first, toBinary(GetRangeResponseSchema, first.response)));
   });
 
-  test(`test_current_${family}_clients_forward_read_floor_and_verify_proofs`, async (t) => {
+  test(`test_current_${family}_clients_forward_tip_and_read_floor_and_verify_proofs`, async (t) => {
     const get = fixture(family, 'get', GetRequestSchema, GetResponseSchema);
     const many = fixture(family, 'get_many', GetManyRequestSchema, GetManyResponseSchema);
     const range = fixture(family, 'range_first', GetRangeRequestSchema, GetRangeResponseSchema);
@@ -165,6 +165,7 @@ for (const family of ['mmr', 'mmb']) {
       const decoded = fromBinary(cases[0], body);
       forwarded.push({
         path,
+        tip: decoded.tip,
         minSequenceNumber: decoded.minSequenceNumber,
         testHeader: request.headers.get('x-test-floor'),
         timeoutMs: Number(request.headers.get('connect-timeout-ms')),
@@ -179,9 +180,10 @@ for (const family of ['mmr', 'mmb']) {
       return rpcResponse(cases[1], cases[2]);
     });
 
-    function assertForwarded(method, minSequenceNumber) {
+    function assertForwarded(method, tip, minSequenceNumber) {
       const request = forwarded.shift();
       assert.ok(request.path.endsWith(`/${method}`));
+      assert.equal(request.tip, tip);
       assert.equal(request.minSequenceNumber, minSequenceNumber);
       assert.equal(request.testHeader, 'forwarded');
       assert.ok(request.timeoutMs > 0);
@@ -207,13 +209,21 @@ for (const family of ['mmr', 'mmb']) {
     };
 
     for (const minimum of [undefined, 0n, large]) {
-      const one = await client.get(getKey, get.request.tip, get.root, minimum, options);
+      const one = await client.get(
+        { key: getKey, tip: get.request.tip, minSequenceNumber: minimum },
+        get.root,
+        options,
+      );
       assertHit(one, get.expected[0]);
-      assertForwarded('Get', minimum);
+      assertForwarded('Get', get.request.tip, minimum);
 
-      const lookup = await client.getMany(manyKeys, many.request.tip, many.root, minimum, options);
+      const lookup = await client.getMany(
+        { keys: manyKeys, tip: many.request.tip, minSequenceNumber: minimum },
+        many.root,
+        options,
+      );
       assert.deepEqual(lookup.results.map((result) => result.type), ['hit', 'miss', 'hit']);
-      assertForwarded('GetMany', minimum);
+      assertForwarded('GetMany', many.request.tip, minimum);
 
       const page = await client.getRange(
         { ...rangeRequest, minSequenceNumber: minimum },
@@ -221,24 +231,22 @@ for (const family of ['mmr', 'mmb']) {
         options,
       );
       assertRange(page, range.expected);
-      assertForwarded('GetRange', minimum);
+      assertForwarded('GetRange', range.request.tip, minimum);
 
-      await assert.rejects(client.getCurrentOperationRange({
+      await assert.rejects(client.currentOperationRange({
         tip: range.request.tip,
         startLocation: 0n,
         maxLocations: 1,
         minSequenceNumber: minimum,
       }, range.root, options), /current operation range proof has no operations/);
-      assertForwarded('GetCurrentOperationRange', minimum);
+      assertForwarded('GetCurrentOperationRange', range.request.tip, minimum);
     }
 
     abortFetch = true;
     const controller = new AbortController();
     const aborted = client.get(
-      getKey,
-      get.request.tip,
+      { key: getKey, tip: get.request.tip },
       get.root,
-      undefined,
       {
         headers: { 'x-test-floor': 'forwarded' },
         signal: controller.signal,
@@ -248,7 +256,7 @@ for (const family of ['mmr', 'mmb']) {
     await fetchStarted;
     controller.abort();
     await assert.rejects(aborted);
-    assertForwarded('Get', undefined);
+    assertForwarded('Get', get.request.tip, undefined);
     assert.equal(fetchSignal.aborted, true);
     assert.equal(forwarded.length, 0);
   });
@@ -262,12 +270,15 @@ test('test_current_clients_reject_invalid_read_floors_before_dispatch', async (t
   });
   const client = new QmdbOrderedClient('http://qmdb.test');
   for (const minimum of [-1n, 1n << 64n, 1]) {
-    await assert.rejects(client.get('', 1n, '', minimum), /64-bit/);
-    await assert.rejects(client.getMany([''], 1n, '', minimum), /64-bit/);
+    await assert.rejects(client.get({ key: '', tip: 1n, minSequenceNumber: minimum }, ''), /64-bit/);
+    await assert.rejects(
+      client.getMany({ keys: [''], tip: 1n, minSequenceNumber: minimum }, ''),
+      /64-bit/,
+    );
     await assert.rejects(client.getRange({
       startKey: '', limit: 1, tip: 1n, minSequenceNumber: minimum,
     }, ''), /64-bit/);
-    await assert.rejects(client.getCurrentOperationRange({
+    await assert.rejects(client.currentOperationRange({
       tip: 1n, startLocation: 0n, maxLocations: 1, minSequenceNumber: minimum,
     }, ''), /64-bit/);
   }

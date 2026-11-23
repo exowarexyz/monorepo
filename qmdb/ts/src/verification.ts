@@ -1,11 +1,11 @@
 import initWasm, {
   type InitInput,
-  verify_fixed_keyless_append_operations_proof,
-  verify_fixed_keyless_append_proof,
-  verify_fixed_unordered_update_operations_proof,
-  verify_fixed_unordered_update_proof,
-  verify_operation_range_proof,
-  verify_operations_proof,
+  verify_fixed_keyless_append_multi_proof,
+  verify_fixed_keyless_append_range_proof,
+  verify_fixed_unordered_update_multi_proof,
+  verify_fixed_unordered_update_range_proof,
+  verify_ordered_operation_range_proof,
+  verify_raw_operation_multi_proof,
   verify_raw_operation_range_proof,
 } from './generated/wasm/exoware_qmdb_wasm.js';
 
@@ -35,7 +35,7 @@ export interface LocatedOrderedOperation {
   operation: OrderedOperation;
 }
 
-export interface VerifiedOperationMultiProof {
+export interface VerifiedOrderedOperationRange {
   /** The trusted root supplied to verification. */
   root: Uint8Array;
   operations: LocatedOrderedOperation[];
@@ -65,45 +65,45 @@ export interface LocatedRawOperation {
   encodedOperation: Uint8Array;
 }
 
-export interface VerifiedRawOperationRangeProof {
+export interface VerifiedRawOperationRange {
   root: Uint8Array;
   operations: LocatedRawOperation[];
   proofSizeBytes: number;
 }
 
 /** Operations in request order. `root` is the trusted root supplied to verification. */
-export interface VerifiedRawOperationsProof {
+export interface VerifiedRawOperations {
   root: Uint8Array;
   operations: LocatedRawOperation[];
   proofSizeBytes: number;
 }
 
-export interface VerifiedFixedKeylessAppend {
+export interface FixedKeylessAppend {
   location: bigint;
   value: Uint8Array;
 }
 
-/** Appends in ascending location order. `root` is as in {@link VerifiedRawOperationsProof}. */
-export interface VerifiedFixedKeylessAppendsProof {
+/** Appends in ascending location order. `root` is as in {@link VerifiedRawOperations}. */
+export interface VerifiedFixedKeylessAppends {
   root: Uint8Array;
-  operations: VerifiedFixedKeylessAppend[];
+  operations: FixedKeylessAppend[];
   proofSizeBytes: number;
 }
 
-export interface VerifiedFixedUnorderedUpdate {
+export interface FixedUnorderedUpdate {
   location: bigint;
   key: Uint8Array;
   value: Uint8Array;
 }
 
-/** Updates in ascending location order. `root` is as in {@link VerifiedRawOperationsProof}. */
-export interface VerifiedFixedUnorderedUpdatesProof {
+/** Updates in ascending location order. `root` is as in {@link VerifiedRawOperations}. */
+export interface VerifiedFixedUnorderedUpdates {
   root: Uint8Array;
-  operations: VerifiedFixedUnorderedUpdate[];
+  operations: FixedUnorderedUpdate[];
   proofSizeBytes: number;
 }
 
-export interface VerifiedFixedKeylessAppendProof {
+export interface VerifiedFixedKeylessAppend {
   location: bigint;
   value: Uint8Array;
   root: Uint8Array;
@@ -111,7 +111,7 @@ export interface VerifiedFixedKeylessAppendProof {
   operationCount: number;
 }
 
-export interface VerifiedFixedUnorderedUpdateProof {
+export interface VerifiedFixedUnorderedUpdate {
   location: bigint;
   key: Uint8Array;
   value: Uint8Array;
@@ -237,8 +237,8 @@ export function fixedOperationExpectations(
  * Verify operation-log membership against a trusted root and expected request context.
  *
  * Range and single-operation methods accept serialized `OperationRangeProof` protobuf
- * messages. `verifyOperations` and the `*Many` methods accept serialized `OperationMultiProof`
- * protobuf messages.
+ * messages. `verifyRawOperations`, `verifyFixedKeylessAppends`, and `verifyFixedUnorderedUpdates`
+ * accept serialized `OperationMultiProof` protobuf messages.
  *
  * Unordered updates prove log membership, not that a value is the latest for its key.
  */
@@ -255,11 +255,11 @@ export class QmdbProofVerifier {
   }
 
   /** Verify the requested window of encoded operations. */
-  async verifyOperationRange(
+  async verifyRawOperationRange(
     proofBytes: Uint8Array,
     request: OperationRangeContext,
     expectedRoot: BytesLike,
-  ): Promise<VerifiedRawOperationRangeProof> {
+  ): Promise<VerifiedRawOperationRange> {
     assertOperationWindow(request);
     await initQmdbWasm();
 
@@ -271,7 +271,7 @@ export class QmdbProofVerifier {
       request.tip,
       request.startLocation,
       request.maxLocations,
-    ) as Omit<VerifiedRawOperationRangeProof, 'proofSizeBytes'>;
+    ) as Omit<VerifiedRawOperationRange, 'proofSizeBytes'>;
     return { ...verified, proofSizeBytes: proofBytes.length };
   }
 
@@ -280,11 +280,11 @@ export class QmdbProofVerifier {
     proofBytes: Uint8Array,
     request: OperationRangeContext,
     expectedRoot: BytesLike,
-  ): Promise<VerifiedOperationMultiProof> {
+  ): Promise<VerifiedOrderedOperationRange> {
     assertOperationWindow(request);
     await initQmdbWasm();
 
-    const verified = verify_operation_range_proof(
+    const verified = verify_ordered_operation_range_proof(
       proofBytes,
       toBytes(expectedRoot),
       this.merkleFamily,
@@ -292,7 +292,7 @@ export class QmdbProofVerifier {
       request.tip,
       request.startLocation,
       request.maxLocations,
-    ) as Omit<VerifiedOperationMultiProof, 'proofSizeBytes'>;
+    ) as Omit<VerifiedOrderedOperationRange, 'proofSizeBytes'>;
     return { ...verified, proofSizeBytes: proofBytes.length };
   }
 
@@ -303,12 +303,12 @@ export class QmdbProofVerifier {
     expectedRoot: BytesLike,
     expectedLocation: bigint,
     expectedValue: BytesLike,
-  ): Promise<VerifiedFixedKeylessAppendProof> {
+  ): Promise<VerifiedFixedKeylessAppend> {
     assertU64(expectedLocation, 'expectedLocation');
     assertOperationWindow(request);
     await initQmdbWasm();
 
-    const verified = verify_fixed_keyless_append_proof(
+    const verified = verify_fixed_keyless_append_range_proof(
       proofBytes,
       toBytes(expectedRoot),
       this.merkleFamily,
@@ -318,7 +318,7 @@ export class QmdbProofVerifier {
       request.tip,
       request.startLocation,
       request.maxLocations,
-    ) as Omit<VerifiedFixedKeylessAppendProof, 'proofSizeBytes'>;
+    ) as Omit<VerifiedFixedKeylessAppend, 'proofSizeBytes'>;
     return { ...verified, proofSizeBytes: proofBytes.length };
   }
 
@@ -330,13 +330,13 @@ export class QmdbProofVerifier {
     expectedLocation: bigint,
     expectedKey: BytesLike,
     valueSize: number,
-  ): Promise<VerifiedFixedUnorderedUpdateProof> {
+  ): Promise<VerifiedFixedUnorderedUpdate> {
     assertU64(expectedLocation, 'expectedLocation');
     assertU32(valueSize, 'valueSize');
     assertOperationWindow(request);
     await initQmdbWasm();
 
-    const verified = verify_fixed_unordered_update_proof(
+    const verified = verify_fixed_unordered_update_range_proof(
       proofBytes,
       toBytes(expectedRoot),
       this.merkleFamily,
@@ -347,37 +347,37 @@ export class QmdbProofVerifier {
       request.tip,
       request.startLocation,
       request.maxLocations,
-    ) as Omit<VerifiedFixedUnorderedUpdateProof, 'proofSizeBytes'>;
+    ) as Omit<VerifiedFixedUnorderedUpdate, 'proofSizeBytes'>;
     return { ...verified, proofSizeBytes: proofBytes.length };
   }
 
   /** Verify exactly the requested operation locations. */
-  async verifyOperations(
+  async verifyRawOperations(
     proofBytes: Uint8Array,
     request: OperationsContext,
     expectedRoot: BytesLike,
-  ): Promise<VerifiedRawOperationsProof> {
+  ): Promise<VerifiedRawOperations> {
     assertOperationLocations(request);
     await initQmdbWasm();
 
-    const verified = verify_operations_proof(
+    const verified = verify_raw_operation_multi_proof(
       proofBytes,
       toBytes(expectedRoot),
       this.merkleFamily,
       this.hashFamily,
       request.tip,
       BigUint64Array.from(request.locations),
-    ) as Omit<VerifiedRawOperationsProof, 'proofSizeBytes'>;
+    ) as Omit<VerifiedRawOperations, 'proofSizeBytes'>;
     return { ...verified, proofSizeBytes: proofBytes.length };
   }
 
   /** Verify that each expected value was appended at its location. */
-  async verifyFixedKeylessAppendMany(
+  async verifyFixedKeylessAppends(
     proofBytes: Uint8Array,
     request: OperationsTipContext,
     expectedRoot: BytesLike,
     expected: readonly { location: bigint; value: BytesLike }[],
-  ): Promise<VerifiedFixedKeylessAppendsProof> {
+  ): Promise<VerifiedFixedKeylessAppends> {
     const { locations, bytes, size } = fixedOperationExpectations(
       expected.map(({ location, value }) => ({ location, bytes: toBytes(value) })),
       'value',
@@ -385,7 +385,7 @@ export class QmdbProofVerifier {
     );
     await initQmdbWasm();
 
-    const verified = verify_fixed_keyless_append_operations_proof(
+    const verified = verify_fixed_keyless_append_multi_proof(
       proofBytes,
       toBytes(expectedRoot),
       this.merkleFamily,
@@ -394,18 +394,18 @@ export class QmdbProofVerifier {
       BigUint64Array.from(locations),
       bytes,
       size,
-    ) as Omit<VerifiedFixedKeylessAppendsProof, 'proofSizeBytes'>;
+    ) as Omit<VerifiedFixedKeylessAppends, 'proofSizeBytes'>;
     return { ...verified, proofSizeBytes: proofBytes.length };
   }
 
   /** Verify that each expected key was updated at its location. */
-  async verifyFixedUnorderedUpdateMany(
+  async verifyFixedUnorderedUpdates(
     proofBytes: Uint8Array,
     request: OperationsTipContext,
     expectedRoot: BytesLike,
     expected: readonly { location: bigint; key: BytesLike }[],
     valueSize: number,
-  ): Promise<VerifiedFixedUnorderedUpdatesProof> {
+  ): Promise<VerifiedFixedUnorderedUpdates> {
     assertU32(valueSize, 'valueSize');
     const { locations, bytes, size } = fixedOperationExpectations(
       expected.map(({ location, key }) => ({ location, bytes: toBytes(key) })),
@@ -414,7 +414,7 @@ export class QmdbProofVerifier {
     );
     await initQmdbWasm();
 
-    const verified = verify_fixed_unordered_update_operations_proof(
+    const verified = verify_fixed_unordered_update_multi_proof(
       proofBytes,
       toBytes(expectedRoot),
       this.merkleFamily,
@@ -424,7 +424,7 @@ export class QmdbProofVerifier {
       bytes,
       size,
       valueSize,
-    ) as Omit<VerifiedFixedUnorderedUpdatesProof, 'proofSizeBytes'>;
+    ) as Omit<VerifiedFixedUnorderedUpdates, 'proofSizeBytes'>;
     return { ...verified, proofSizeBytes: proofBytes.length };
   }
 }

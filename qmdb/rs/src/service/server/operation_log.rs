@@ -4,7 +4,7 @@
 use super::{encode, qmdb_error_to_connect};
 use crate::{
     adapter::subscription as sub,
-    proof::{MultiProofOperations, OperationRangeCheckpoint, RawBatchMultiProof},
+    proof::{MultiProofOperations, OperationMultiProof, OperationRangeProof},
     service::{
         proto::qmdb::v1::{
             GetOperationRangeRequest, GetOperationRangeResponse, GetOperationsRequest,
@@ -12,7 +12,7 @@ use crate::{
         },
         validate_operations_request,
     },
-    PublishedWatermark, QmdbError,
+    QmdbError, ResolvedTip,
 };
 use bytes::Bytes;
 use commonware_storage::merkle::{Family, Graftable, Location};
@@ -48,46 +48,45 @@ pub(crate) trait OperationLogReader: Send + Sync + 'static {
         bytes: &[u8],
         inspect: impl FnOnce(Option<&[u8]>, Option<&[u8]>) -> T,
     ) -> Result<T, QmdbError>;
-    fn resolve_watermark(
+    fn resolve_tip(
         &self,
-        watermark: Location<Self::Family>,
+        tip: Location<Self::Family>,
         min_sequence_number: Option<u64>,
-    ) -> impl Future<Output = Result<PublishedWatermark<Self::Family>, QmdbError>> + Send;
+    ) -> impl Future<Output = Result<ResolvedTip<Self::Family>, QmdbError>> + Send;
     /// Record a watermark row a subscription saw committed at `sequence`, so
-    /// unary reads at or below it skip the publication lookup.
+    /// unary reads at or below it skip the watermark lookup.
     fn observe_published(&self, location: Location<Self::Family>, sequence: u64);
-    fn operation_range_checkpoint_at(
+    fn operation_range_proof_at(
         &self,
-        watermark: PublishedWatermark<Self::Family>,
+        resolved: ResolvedTip<Self::Family>,
         start_location: Location<Self::Family>,
         max_locations: u32,
-    ) -> impl Future<Output = Result<OperationRangeCheckpoint<Self::Digest, Self::Family>, QmdbError>>
-           + Send;
-    fn multi_proof_at(
+    ) -> impl Future<Output = Result<OperationRangeProof<Self::Digest, Self::Family>, QmdbError>> + Send;
+    fn operation_multi_proof_at(
         &self,
-        watermark: PublishedWatermark<Self::Family>,
+        resolved: ResolvedTip<Self::Family>,
         operations: MultiProofOperations<'_, Self::Family>,
-    ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest, Self::Family>, QmdbError>> + Send;
+    ) -> impl Future<Output = Result<OperationMultiProof<Self::Digest, Self::Family>, QmdbError>> + Send;
 }
 
 /// `OperationLogService` handler over any [`OperationLogReader`].
 pub(crate) struct OperationLogServer<R: OperationLogReader> {
     reader: Arc<R>,
-    raw_store: PrefixedStoreClient,
+    store: PrefixedStoreClient,
 }
 
 impl<R: OperationLogReader> Clone for OperationLogServer<R> {
     fn clone(&self) -> Self {
         Self {
             reader: self.reader.clone(),
-            raw_store: self.raw_store.clone(),
+            store: self.store.clone(),
         }
     }
 }
 
 impl<R: OperationLogReader> OperationLogServer<R> {
-    pub(crate) const fn new(reader: Arc<R>, raw_store: PrefixedStoreClient) -> Self {
-        Self { reader, raw_store }
+    pub(crate) const fn new(reader: Arc<R>, store: PrefixedStoreClient) -> Self {
+        Self { reader, store }
     }
 }
 
@@ -143,8 +142,8 @@ impl<F: Family> PendingBatches<F> {
                 self.minimums.pop_front();
             }
             ready.push_back(ReadyBatch {
-                watermark: PublishedWatermark {
-                    location: watermark,
+                resolved: ResolvedTip {
+                    tip: watermark,
                     sequence_number: batch.sequence_number.max(watermark_sequence),
                 },
                 batch_sequence: batch.sequence_number,
@@ -165,7 +164,8 @@ impl<F: Family> PendingBatches<F> {
 
 #[derive(Clone, Debug)]
 struct ReadyBatch<F: Family> {
-    watermark: PublishedWatermark<F>,
+    /// The covering watermark as the tip the batch's proof is built at.
+    resolved: ResolvedTip<F>,
     /// Store sequence of this batch's ops frame. Emitted as
     /// `resume_sequence_number`. It is unique per batch, so a client reconnecting
     /// at `resume + 1` skips only this batch. When multiple pending batches
@@ -173,6 +173,7 @@ struct ReadyBatch<F: Family> {
     /// per-batch sequence here or the reconnect cursor would jump past
     /// unread siblings.
     batch_sequence: u64,
+    /// Encoded operations that passed the subscription's filters, in location order.
     matched: Vec<(Location<F>, Bytes)>,
 }
 
@@ -373,7 +374,10 @@ impl<R: OperationLogReader> Stream for BatchSubscribeStream<R> {
                 let reader = this.reader.clone();
                 let fut = async move {
                     let proof = reader
-                        .multi_proof_at(batch.watermark, MultiProofOperations::Given(batch.matched))
+                        .operation_multi_proof_at(
+                            batch.resolved,
+                            MultiProofOperations::Given(batch.matched),
+                        )
                         .await
                         .map_err(qmdb_error_to_connect)?;
                     Ok(encode::subscribe_response(batch.batch_sequence, &proof))
@@ -420,13 +424,13 @@ impl<R: OperationLogReader> OperationLogService for OperationLogServer<R> {
     {
         let reader = self.reader.clone();
         async move {
-            let watermark = reader
-                .resolve_watermark(Location::new(request.tip), request.min_sequence_number)
+            let resolved = reader
+                .resolve_tip(Location::new(request.tip), request.min_sequence_number)
                 .await
                 .map_err(qmdb_error_to_connect)?;
             let proof = reader
-                .operation_range_checkpoint_at(
-                    watermark,
+                .operation_range_proof_at(
+                    resolved,
                     Location::new(request.start_location),
                     request.max_locations,
                 )
@@ -446,8 +450,8 @@ impl<R: OperationLogReader> OperationLogService for OperationLogServer<R> {
         async move {
             let requested = request.locations.iter().copied().collect::<Vec<u64>>();
             validate_operations_request(request.tip, &requested).map_err(qmdb_error_to_connect)?;
-            let watermark = reader
-                .resolve_watermark(Location::new(request.tip), request.min_sequence_number)
+            let resolved = reader
+                .resolve_tip(Location::new(request.tip), request.min_sequence_number)
                 .await
                 .map_err(qmdb_error_to_connect)?;
             let locations = requested
@@ -455,7 +459,7 @@ impl<R: OperationLogReader> OperationLogService for OperationLogServer<R> {
                 .map(Location::new)
                 .collect::<Vec<Location<R::Family>>>();
             let proof = reader
-                .multi_proof_at(watermark, MultiProofOperations::Read(&locations))
+                .operation_multi_proof_at(resolved, MultiProofOperations::Read(&locations))
                 .await
                 .map_err(qmdb_error_to_connect)?;
             connectrpc::Response::ok(encode::get_operations_response(&proof))
@@ -471,7 +475,7 @@ impl<R: OperationLogReader> OperationLogService for OperationLogServer<R> {
             connectrpc::ServiceStream<PreEncoded<SubscribeResponse>>,
         >,
     > + Send {
-        let raw_store = self.raw_store.clone();
+        let store = self.store.clone();
         let reader = self.reader.clone();
         async move {
             if R::REJECTS_KEY_FILTERS && !request.key_filters.is_empty() {
@@ -484,7 +488,7 @@ impl<R: OperationLogReader> OperationLogService for OperationLogServer<R> {
             let value_matcher = parse_filters(request.value_filters.iter(), "value")
                 .map_err(ConnectError::invalid_argument)?;
             let since = decode_since(request.since_sequence_number);
-            let sub = sub::open_store_subscription(&raw_store, sub::row_filter(), since)
+            let sub = sub::open_store_subscription(&store, sub::row_filter(), since)
                 .await
                 .map_err(qmdb_error_to_connect)?;
             let stream: Pin<
@@ -507,12 +511,12 @@ mod tests {
     #[tokio::test]
     async fn fixed_request_sessions_do_not_share_observations_or_advance_floors() {
         let (_task, url) = exoware_simulator::open_temp().await.expect("simulator");
-        let raw_store = exoware_sdk::StoreClient::new(&url).unprefixed();
-        let first = exoware_sdk::ReadSession::fixed(raw_store.clone(), None);
-        let second = exoware_sdk::ReadSession::fixed(raw_store.clone(), None);
-        let explicit_zero = exoware_sdk::ReadSession::fixed(raw_store.clone(), Some(0));
+        let store = exoware_sdk::StoreClient::new(&url).unprefixed();
+        let first = exoware_sdk::ReadSession::fixed(store.clone(), None);
+        let second = exoware_sdk::ReadSession::fixed(store.clone(), None);
+        let explicit_zero = exoware_sdk::ReadSession::fixed(store.clone(), Some(0));
         let key = Bytes::from_static(b"request-session-isolation");
-        let sequence = raw_store
+        let sequence = store
             .ingest()
             .put(&key, b"value")
             .await
@@ -553,8 +557,8 @@ mod tests {
         use connectrpc::Encodable as _;
 
         let root = Sha256::fill(0x42);
-        let raw = RawBatchMultiProof::<Sha256Digest, mmr::Family> {
-            watermark: Location::new(0),
+        let proof = OperationMultiProof::<Sha256Digest, mmr::Family> {
+            tip: Location::new(0),
             ops_root: root,
             ops_root_witness: None,
             proof: Proof {
@@ -562,10 +566,10 @@ mod tests {
                 inactive_peaks: 0,
                 digests: Vec::new(),
             },
-            operations: vec![(Location::new(0), Bytes::from_static(&[0xAA]))],
+            encoded_operations: vec![(Location::new(0), Bytes::from_static(&[0xAA]))],
         };
 
-        let encoded = encode::subscribe_response(0, &raw)
+        let encoded = encode::subscribe_response(0, &proof)
             .encode(connectrpc::CodecFormat::Proto)
             .expect("encode response");
         let proto = SubscribeResponse::decode_from_slice(&encoded).expect("decode response");
@@ -597,9 +601,9 @@ mod tests {
         let cursors: Vec<u64> = ready.iter().map(|b| b.batch_sequence).collect();
         assert_eq!(cursors, vec![10, 11, 12]);
         for b in &ready {
-            assert_eq!(b.watermark.sequence_number, 15);
+            assert_eq!(b.resolved.sequence_number, 15);
             assert_eq!(
-                b.watermark.location,
+                b.resolved.tip,
                 Location::<commonware_storage::merkle::mmr::Family>::new(12)
             );
         }
@@ -635,7 +639,7 @@ mod tests {
         assert!(cursors[1..].iter().all(|cursor| *cursor >= resume));
         assert!(ready
             .iter()
-            .all(|batch| batch.watermark.sequence_number == 12));
+            .all(|batch| batch.resolved.sequence_number == 12));
     }
 
     #[test]
@@ -706,8 +710,8 @@ mod tests {
                 .iter()
                 .map(|batch| (
                     batch.batch_sequence,
-                    *batch.watermark.location,
-                    batch.watermark.sequence_number
+                    *batch.resolved.tip,
+                    batch.resolved.sequence_number
                 ))
                 .collect::<Vec<_>>(),
             [
@@ -738,7 +742,7 @@ mod authenticated_upload_subscription_tests {
     type F = mmr::Family;
 
     /// Treats each operation's bytes as its value and records observed
-    /// watermarks. Ingestion never reads proofs or publication state.
+    /// watermarks. Ingestion never reads proofs or watermark state.
     #[derive(Default)]
     struct IngestReader {
         observed: std::sync::Mutex<Vec<(u64, u64)>>,
@@ -757,11 +761,11 @@ mod authenticated_upload_subscription_tests {
             Ok(inspect(None, Some(bytes)))
         }
 
-        async fn resolve_watermark(
+        async fn resolve_tip(
             &self,
-            _watermark: Location<F>,
+            _tip: Location<F>,
             _min_sequence_number: Option<u64>,
-        ) -> Result<PublishedWatermark<F>, QmdbError> {
+        ) -> Result<ResolvedTip<F>, QmdbError> {
             unreachable!("ingestion does not resolve watermarks")
         }
 
@@ -772,20 +776,20 @@ mod authenticated_upload_subscription_tests {
                 .push((location.as_u64(), sequence));
         }
 
-        async fn operation_range_checkpoint_at(
+        async fn operation_range_proof_at(
             &self,
-            _watermark: PublishedWatermark<F>,
+            _resolved: ResolvedTip<F>,
             _start_location: Location<F>,
             _max_locations: u32,
-        ) -> Result<OperationRangeCheckpoint<Digest, F>, QmdbError> {
+        ) -> Result<OperationRangeProof<Digest, F>, QmdbError> {
             unreachable!("ingestion does not build range proofs")
         }
 
-        async fn multi_proof_at(
+        async fn operation_multi_proof_at(
             &self,
-            _watermark: PublishedWatermark<F>,
+            _resolved: ResolvedTip<F>,
             _operations: MultiProofOperations<'_, F>,
-        ) -> Result<RawBatchMultiProof<Digest, F>, QmdbError> {
+        ) -> Result<OperationMultiProof<Digest, F>, QmdbError> {
             unreachable!("ingestion does not build proofs")
         }
     }
@@ -879,8 +883,8 @@ mod authenticated_upload_subscription_tests {
                 .iter()
                 .map(|batch| (
                     batch.batch_sequence,
-                    *batch.watermark.location,
-                    batch.watermark.sequence_number
+                    *batch.resolved.tip,
+                    batch.resolved.sequence_number
                 ))
                 .collect::<Vec<_>>(),
             [(10, 5, 13), (11, 1, 12)]
@@ -933,7 +937,7 @@ mod authenticated_upload_subscription_tests {
             stream.ready[0].matched,
             [(Location::new(4), Bytes::from_static(b"keep"))]
         );
-        assert_eq!(stream.ready[0].watermark.sequence_number, 12);
+        assert_eq!(stream.ready[0].resolved.sequence_number, 12);
     }
 
     #[tokio::test]

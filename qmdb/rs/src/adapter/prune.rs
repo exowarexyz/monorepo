@@ -34,7 +34,7 @@ pub fn keep_latest_updates(count: usize) -> PrunePolicy {
 
 /// Build a prune policy that keeps only update rows whose uploaded location is
 /// greater than or equal to `min_location`.
-pub fn keep_positions_gte(min_location: u64) -> PrunePolicy {
+pub fn keep_locations_gte(min_location: u64) -> PrunePolicy {
     PrunePolicy {
         scope: base_keys_scope(),
         retain: RetainPolicy::GreaterThanOrEqual {
@@ -45,7 +45,7 @@ pub fn keep_positions_gte(min_location: u64) -> PrunePolicy {
 
 #[cfg(test)]
 mod tests {
-    use super::{keep_latest_updates, keep_positions_gte};
+    use super::{keep_latest_updates, keep_locations_gte};
     use crate::adapter::codec::{
         encode_ordered_key_bytes, encode_update_key, ORDERED_KEY_TERMINATOR_LEN, UPDATE_FAMILY,
         UPDATE_PREFIX,
@@ -165,8 +165,8 @@ mod tests {
     }
 
     #[test]
-    fn test_keep_positions_gte_uses_threshold_retention() {
-        let policy = keep_positions_gte(42);
+    fn test_keep_locations_gte_uses_threshold_retention() {
+        let policy = keep_locations_gte(42);
         let scope = &policy.scope;
         assert_eq!(
             policy.retain,

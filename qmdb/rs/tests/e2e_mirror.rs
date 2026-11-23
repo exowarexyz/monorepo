@@ -52,7 +52,7 @@ async fn test_mirror_keyless_from_local() {
             ((0..=MAX_OPERATION_SIZE).into(), ()),
         );
     assert_eq!(
-        qmdb_client.root_at(latest1).await.expect("root_at 1"),
+        qmdb_client.root_at(latest1, None).await.expect("root_at 1"),
         root1,
         "remote root must match local (after batch 1)"
     );
@@ -71,7 +71,7 @@ async fn test_mirror_keyless_from_local() {
     .await
     .expect("upload 2");
     assert_eq!(
-        qmdb_client.root_at(latest2).await.expect("root_at 2"),
+        qmdb_client.root_at(latest2, None).await.expect("root_at 2"),
         root2,
         "remote root must match local (after batch 2)"
     );
@@ -163,7 +163,7 @@ async fn test_mirror_unordered_from_local() {
             ),
         );
     assert_eq!(
-        qmdb_client.root_at(latest1).await.expect("root_at 1"),
+        qmdb_client.root_at(latest1, None).await.expect("root_at 1"),
         root1,
         "remote root must match local (after batch 1)"
     );
@@ -190,7 +190,7 @@ async fn test_mirror_unordered_from_local() {
     .await
     .expect("upload 2");
     assert_eq!(
-        qmdb_client.root_at(latest2).await.expect("root_at 2"),
+        qmdb_client.root_at(latest2, None).await.expect("root_at 2"),
         root2,
         "remote root must match local (after batch 2)"
     );
@@ -278,7 +278,7 @@ async fn test_mirror_immutable_from_local() {
             ((), ((0..=MAX_OPERATION_SIZE).into(), ())),
         );
     assert_eq!(
-        qmdb_client.root_at(latest1).await.expect("root_at 1"),
+        qmdb_client.root_at(latest1, None).await.expect("root_at 1"),
         root1,
         "remote root must match local (after batch 1)"
     );
@@ -299,7 +299,7 @@ async fn test_mirror_immutable_from_local() {
     .await
     .expect("upload 2");
     assert_eq!(
-        qmdb_client.root_at(latest2).await.expect("root_at 2"),
+        qmdb_client.root_at(latest2, None).await.expect("root_at 2"),
         root2,
         "remote root must match local (after batch 2)"
     );
@@ -391,7 +391,7 @@ async fn test_mirror_ordered_from_local() {
             ((0..=MAX_OPERATION_SIZE).into(), ()),
         );
     assert_eq!(
-        qmdb_client.root_at(latest1).await.expect("root_at 1"),
+        qmdb_client.root_at(latest1, None).await.expect("root_at 1"),
         root1,
         "remote root must match local (after batch 1)"
     );
@@ -414,7 +414,7 @@ async fn test_mirror_ordered_from_local() {
         .await
         .expect("upload 2");
     assert_eq!(
-        qmdb_client.root_at(latest2).await.expect("root_at 2"),
+        qmdb_client.root_at(latest2, None).await.expect("root_at 2"),
         root2,
         "remote root must match local (after batch 2)"
     );

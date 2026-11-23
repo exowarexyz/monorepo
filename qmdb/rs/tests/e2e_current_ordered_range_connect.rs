@@ -1,4 +1,4 @@
-//! Ordered QMDB range-stream ConnectRPC e2e: streamed historical checkpoints
+//! Ordered QMDB range-stream ConnectRPC e2e: streamed historical operation range proofs
 //! plus client-side validation of tampered proofs.
 
 mod common;
@@ -27,7 +27,7 @@ use commonware_utils::{
 use exoware_qmdb::{
     adapter::upload::Publication,
     service::{
-        client::rpc::{CurrentOperationClient, OperationLogClient, OperationLogSubscribeProof},
+        client::rpc::{CurrentOperationClient, OperationLogClient, VerifiedSubscribeFrame},
         proto::qmdb::v1::{
             GetCurrentOperationRangeRequest as ProtoGetCurrentOperationRangeRequest,
             GetOperationRangeRequest as ProtoGetOperationRangeRequest,
@@ -81,9 +81,7 @@ type MmbAnyDb = AnyOrderedQmdbDb<
     commonware_parallel::Sequential,
 >;
 
-async fn spawn_qmdb_server(
-    raw_store: PrefixedStoreClient,
-) -> (tokio::task::JoinHandle<()>, String) {
+async fn spawn_qmdb_server(store: PrefixedStoreClient) -> (tokio::task::JoinHandle<()>, String) {
     common::spawn_connect_service(exoware_qmdb::service::server::ordered_stack::<
         mmr::Family,
         Sha256,
@@ -91,7 +89,7 @@ async fn spawn_qmdb_server(
         Vec<u8>,
         N,
         VariableEncoding<Vec<u8>>,
-    >(raw_store, op_cfg(), key_cfg()))
+    >(store, op_cfg(), key_cfg()))
     .await
 }
 
@@ -108,7 +106,7 @@ fn current_operation_client(
 }
 
 async fn spawn_mmb_qmdb_server(
-    raw_store: PrefixedStoreClient,
+    store: PrefixedStoreClient,
 ) -> (tokio::task::JoinHandle<()>, String) {
     common::spawn_connect_service(exoware_qmdb::service::server::ordered_stack::<
         mmb::Family,
@@ -117,7 +115,7 @@ async fn spawn_mmb_qmdb_server(
         Vec<u8>,
         N,
         VariableEncoding<Vec<u8>>,
-    >(raw_store, op_cfg(), key_cfg()))
+    >(store, op_cfg(), key_cfg()))
     .await
 }
 
@@ -450,7 +448,7 @@ async fn test_ordered_current_operation_range_connect_emits_verifiable_proof() {
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let current = current_operation_client(&qmdb_url);
     let proof = current
-        .get_current_operation_range(
+        .current_operation_range(
             ProtoGetCurrentOperationRangeRequest {
                 tip: (source.operations.len() - 1) as u64,
                 start_location: 0,
@@ -496,7 +494,7 @@ async fn test_ordered_current_state_sync_from_connect_api_reconstructs_current_d
             )
             .await,
         Err(QmdbError::ProofVerification {
-            kind: exoware_qmdb::ProofKind::RangeCheckpoint
+            kind: exoware_qmdb::ProofKind::OperationRange
         })
     ));
 
@@ -709,7 +707,7 @@ async fn test_ordered_mmb_operation_range_client_rejects_missing_nonzero_pinned_
             ..request.clone()
         })
         .await
-        .expect_err("caller floor must govern an uncached publication lookup");
+        .expect_err("caller floor must govern an uncached watermark lookup");
     assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
     let mut response = common::operation_log_rpc_client(&qmdb_url)
         .get_operation_range(request.clone())
@@ -718,7 +716,7 @@ async fn test_ordered_mmb_operation_range_client_rejects_missing_nonzero_pinned_
         .into_view()
         .to_owned_message();
     let proof = mmb_operation_log_client(&qmdb_url)
-        .get_operation_range(request.clone(), &source.root)
+        .operation_range(request.clone(), &source.root)
         .await
         .expect("nonzero operation range verifies with pinned nodes");
     assert_eq!(proof.start_location, start);
@@ -752,13 +750,13 @@ async fn test_ordered_mmb_operation_range_client_rejects_missing_nonzero_pinned_
         .await;
     let connect_client = mmb_operation_log_client(&static_url);
     let err = connect_client
-        .get_operation_range(request, &source.root)
+        .operation_range(request, &source.root)
         .await
         .expect_err("missing pinned nodes should fail nonzero operation range verification");
     assert!(matches!(
         err,
         QmdbError::ProofVerification {
-            kind: exoware_qmdb::ProofKind::RangeCheckpoint
+            kind: exoware_qmdb::ProofKind::OperationRange
         }
     ));
 }
@@ -803,13 +801,13 @@ async fn test_ordered_mmb_operation_range_client_rejects_extra_nonzero_pinned_no
         .await;
     let connect_client = mmb_operation_log_client(&static_url);
     let err = connect_client
-        .get_operation_range(request, &source.root)
+        .operation_range(request, &source.root)
         .await
         .expect_err("extra pinned nodes should fail operation range verification");
     assert!(matches!(
         err,
         QmdbError::ProofVerification {
-            kind: exoware_qmdb::ProofKind::RangeCheckpoint
+            kind: exoware_qmdb::ProofKind::OperationRange
         }
     ));
 }
@@ -849,13 +847,13 @@ async fn test_ordered_mmb_operation_range_client_rejects_zero_start_pinned_nodes
         .await;
     let connect_client = mmb_operation_log_client(&static_url);
     let err = connect_client
-        .get_operation_range(request, &source.root)
+        .operation_range(request, &source.root)
         .await
         .expect_err("zero-start pinned nodes should fail operation range verification");
     assert!(matches!(
         err,
         QmdbError::ProofVerification {
-            kind: exoware_qmdb::ProofKind::RangeCheckpoint
+            kind: exoware_qmdb::ProofKind::OperationRange
         }
     ));
 }
@@ -889,12 +887,24 @@ async fn test_ordered_operation_range_connect_uses_current_root_witness() {
 
     let connect_client = operation_log_client(&qmdb_url);
     let proof = connect_client
-        .get_operation_range(request, &source.root)
+        .operation_range(request.clone(), &source.root)
         .await
         .expect("get operation range");
     assert_eq!(proof.root, source.root);
     assert_eq!(proof.start_location, Location::new(0));
     assert_eq!(proof.operations, source.operations);
+
+    // A root the witness does not bind fails as an operation range proof.
+    let error = connect_client
+        .operation_range(request, &Sha256::fill(0xAB))
+        .await
+        .expect_err("witness must not verify under another root");
+    assert!(matches!(
+        error,
+        QmdbError::ProofVerification {
+            kind: exoware_qmdb::ProofKind::OperationRange
+        }
+    ));
 }
 
 fn match_exact(key: &[u8]) -> ProtoFilter {
@@ -995,15 +1005,14 @@ async fn test_ordered_range_connect_subscribe_emits_verifiable_range_proof() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     commit_upload(&store_client, &source).await;
 
-    let frame: OperationLogSubscribeProof<Digest, BatchOperation, mmr::Family> =
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            stream.message_with_root(common::trusted_root(source.root)),
-        )
-        .await
-        .expect("timeout")
-        .expect("stream result")
-        .expect("stream frame");
+    let frame: VerifiedSubscribeFrame<Digest, BatchOperation, mmr::Family> = tokio::time::timeout(
+        Duration::from_secs(5),
+        stream.message_with_root(common::trusted_root(source.root)),
+    )
+    .await
+    .expect("timeout")
+    .expect("stream result")
+    .expect("stream frame");
 
     assert!(frame.resume_sequence_number > 0);
     let expected: Vec<(Location<mmr::Family>, BatchOperation)> = source
@@ -1055,7 +1064,7 @@ async fn test_ordered_range_connect_client_rejects_invalid_streamed_proof() {
     assert!(matches!(
         err,
         QmdbError::ProofVerification {
-            kind: exoware_qmdb::ProofKind::BatchMulti
+            kind: exoware_qmdb::ProofKind::OperationMulti
         }
     ));
 }
@@ -1078,15 +1087,14 @@ async fn test_ordered_range_connect_subscribe_emits_multi_proof_for_matching_key
     tokio::time::sleep(Duration::from_millis(50)).await;
     commit_upload(&store_client, &source).await;
 
-    let frame: OperationLogSubscribeProof<Digest, BatchOperation, mmr::Family> =
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            stream.message_with_root(common::trusted_root(source.root)),
-        )
-        .await
-        .expect("timeout")
-        .expect("stream result")
-        .expect("stream frame");
+    let frame: VerifiedSubscribeFrame<Digest, BatchOperation, mmr::Family> = tokio::time::timeout(
+        Duration::from_secs(5),
+        stream.message_with_root(common::trusted_root(source.root)),
+    )
+    .await
+    .expect("timeout")
+    .expect("stream result")
+    .expect("stream frame");
 
     let expected = all_operations_for_key(&source.operations, b"alpha");
     assert!(!expected.is_empty());
@@ -1114,7 +1122,7 @@ async fn test_ordered_mmb_range_connect_subscribe_verifies_range_and_multi_proof
     tokio::time::sleep(Duration::from_millis(50)).await;
     commit_mmb_upload(&store_client, &source).await;
 
-    let range_frame: OperationLogSubscribeProof<Digest, MmbBatchOperation, mmb::Family> =
+    let range_frame: VerifiedSubscribeFrame<Digest, MmbBatchOperation, mmb::Family> =
         tokio::time::timeout(
             Duration::from_secs(5),
             range_stream.message_with_root(common::trusted_root(source.root)),
@@ -1141,7 +1149,7 @@ async fn test_ordered_mmb_range_connect_subscribe_verifies_range_and_multi_proof
         .await
         .expect("multi subscribe");
 
-    let multi_frame: OperationLogSubscribeProof<Digest, MmbBatchOperation, mmb::Family> =
+    let multi_frame: VerifiedSubscribeFrame<Digest, MmbBatchOperation, mmb::Family> =
         tokio::time::timeout(
             Duration::from_secs(5),
             multi_stream.message_with_root(common::trusted_root(source.root)),
@@ -1506,15 +1514,14 @@ async fn test_ordered_range_connect_subscribe_filters_by_value_regex_without_key
     tokio::time::sleep(Duration::from_millis(50)).await;
     commit_upload(&store_client, &source).await;
 
-    let frame: OperationLogSubscribeProof<Digest, BatchOperation, mmr::Family> =
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            stream.message_with_root(common::trusted_root(source.root)),
-        )
-        .await
-        .expect("timeout")
-        .expect("stream result")
-        .expect("stream frame");
+    let frame: VerifiedSubscribeFrame<Digest, BatchOperation, mmr::Family> = tokio::time::timeout(
+        Duration::from_secs(5),
+        stream.message_with_root(common::trusted_root(source.root)),
+    )
+    .await
+    .expect("timeout")
+    .expect("stream result")
+    .expect("stream frame");
 
     let expected = all_operations_for_key(&source.operations, b"alpha");
     assert!(!expected.is_empty());

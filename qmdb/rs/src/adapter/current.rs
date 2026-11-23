@@ -6,15 +6,15 @@ use crate::{
             chunk_index_for_location, clear_below_floor, decode_current_boundary_metadata,
             decode_update_index_value_present, decode_update_location, encode_chunk_key,
             encode_current_meta_key, encode_node_key, encode_operation_key,
-            encode_ops_root_witness_key, encode_presence_key, merkle_size_for_watermark,
-            op_count_for_watermark, CurrentBoundaryMetadata,
+            encode_ops_root_witness_key, encode_presence_key, merkle_size_for_tip,
+            op_count_for_tip, CurrentBoundaryMetadata,
         },
         core,
         operation_range::root,
         read_cache::{ReadCache, RootContext},
         storage::{load_proof_nodes, tail_chunk, BitmapTail, ProofBitmap, ProofNodes},
     },
-    proof::{RawKeyValueProof, VerifiedKeyValue},
+    proof::{KeyValueProof, VerifiedKeyValue},
     QmdbError,
 };
 use bytes::Bytes;
@@ -34,7 +34,7 @@ use std::{
 /// Current-state values fixed by one published batch boundary.
 #[derive(Clone)]
 pub(crate) struct CurrentTip<F: Family, D: Digest> {
-    pub watermark: Location<F>,
+    pub tip: Location<F>,
     /// Canonical current root.
     pub root: D,
     /// Bitmap chunks pruned at this tip.
@@ -47,42 +47,42 @@ pub(crate) struct CurrentTip<F: Family, D: Digest> {
     pub tail: BitmapTail,
 }
 
-/// The [`CurrentTip`] at `watermark`, from `cache` or else loaded and cached.
-/// Concurrent callers for one watermark share a single load. `commit_floor`
-/// decodes the operation at `watermark`, which must be a commit, and returns
+/// The [`CurrentTip`] at `tip`, from `cache` or else loaded and cached.
+/// Concurrent callers for one tip share a single load. `commit_floor`
+/// decodes the operation at `tip`, which must be a commit, and returns
 /// its inactivity floor.
 pub(crate) async fn current_tip<F: Graftable, H: Hasher, const N: usize>(
     session: &ReadSession,
     cache: &Arc<ReadCache<F, H::Digest>>,
-    watermark: Location<F>,
+    tip: Location<F>,
     commit_floor: impl FnOnce(&[u8]) -> Result<Location<F>, QmdbError>,
 ) -> Result<CurrentTip<F, H::Digest>, QmdbError> {
-    let (tip, _guard) = cache.current(watermark).await;
-    if let Some(tip) = tip {
-        return Ok(tip);
+    let (cached, _guard) = cache.current(tip).await;
+    if let Some(cached) = cached {
+        return Ok(cached);
     }
-    let ops = cache.cached_context(watermark);
-    let tip = load_current_tip::<F, H, N>(session, watermark, ops, commit_floor).await?;
-    cache.put_current(tip.clone());
-    Ok(tip)
+    let ops = cache.cached_context(tip);
+    let current = load_current_tip::<F, H, N>(session, tip, ops, commit_floor).await?;
+    cache.put_current(current.clone());
+    Ok(current)
 }
 
-/// Load the [`CurrentTip`] at `watermark` in one round of concurrent reads,
+/// Load the [`CurrentTip`] at `tip` in one round of concurrent reads,
 /// reading the ops root peaks only when `ops` is unknown.
 async fn load_current_tip<F: Graftable, H: Hasher, const N: usize>(
     session: &ReadSession,
-    watermark: Location<F>,
+    tip: Location<F>,
     ops: Option<RootContext<H::Digest>>,
     commit_floor: impl FnOnce(&[u8]) -> Result<Location<F>, QmdbError>,
 ) -> Result<CurrentTip<F, H::Digest>, QmdbError> {
     // The presence, boundary metadata and commit rows share one batch. The
     // batch also reads the ops root peaks when the root context is not cached.
-    let presence_key = encode_presence_key(watermark);
-    let meta_key = encode_current_meta_key(watermark);
-    let commit_key = encode_operation_key(watermark);
+    let presence_key = encode_presence_key(tip);
+    let meta_key = encode_current_meta_key(tip);
+    let commit_key = encode_operation_key(tip);
     let peaks = match ops {
         Some(_) => Vec::new(),
-        None => F::peaks(merkle_size_for_watermark(watermark)?)
+        None => F::peaks(merkle_size_for_tip(tip)?)
             .map(|(position, _)| position)
             .collect::<Vec<_>>(),
     };
@@ -97,11 +97,11 @@ async fn load_current_tip<F: Graftable, H: Hasher, const N: usize>(
 
     // Tail chunks lie beyond the graftable prefix, so pruning cannot change
     // their indices. Their reads can run alongside the metadata read.
-    let leaves = op_count_for_watermark(watermark)?;
+    let leaves = op_count_for_tip(tip)?;
     let indices = required_chunks::<F, N>(leaves, leaves.as_u64(), 0, None)
         .map_err(crate::error::current_proof_error)?;
     let load_tail = futures::future::try_join_all(indices.map(|index| async move {
-        let chunk = load_chunk_row::<F, N>(session, watermark, index).await?;
+        let chunk = load_chunk_row::<F, N>(session, tip, index).await?;
         Ok::<_, QmdbError>((index, chunk))
     }));
     let (mut rows, tail) = futures::try_join!(
@@ -112,22 +112,18 @@ async fn load_current_tip<F: Graftable, H: Hasher, const N: usize>(
     // A tip exists only at a published batch boundary with stored metadata,
     // and the boundary's commit operation supplies the inactivity floor.
     if !rows.contains_key(&presence_key) {
-        return Err(QmdbError::CurrentProofRequiresBatchBoundary {
-            location: watermark.as_u64(),
-        });
+        return Err(QmdbError::CurrentProofRequiresBatchBoundary { tip: tip.as_u64() });
     }
     let Some(meta) = rows.get(&meta_key) else {
-        return Err(QmdbError::CurrentBoundaryStateMissing {
-            location: watermark.as_u64(),
-        });
+        return Err(QmdbError::CurrentStateMissing { tip: tip.as_u64() });
     };
     let meta = decode_current_boundary_metadata::<H::Digest>(
         meta.as_ref(),
-        format_args!("current boundary metadata at {watermark}"),
+        format_args!("current boundary metadata at {tip}"),
     )?;
     let Some(commit) = rows.get(&commit_key) else {
         return Err(QmdbError::CorruptData(format!(
-            "missing operation row at location {watermark}"
+            "missing operation row at location {tip}"
         )));
     };
     let inactivity_floor = commit_floor(commit.as_ref())?;
@@ -136,14 +132,14 @@ async fn load_current_tip<F: Graftable, H: Hasher, const N: usize>(
     let ops = match ops {
         Some(ops) => ops,
         None => {
-            let inactive_peaks = core::inactive_peaks(watermark, inactivity_floor)?;
+            let inactive_peaks = core::inactive_peaks(tip, inactivity_floor)?;
             let nodes = peaks
                 .iter()
                 .zip(&peak_keys)
                 .map(|(&position, key)| (position, rows.remove(key)))
                 .collect::<BTreeMap<Position<F>, Option<Bytes>>>();
             RootContext {
-                root: root::<F, H>(&nodes, watermark, inactive_peaks)?,
+                root: root::<F, H>(&nodes, tip, inactive_peaks)?,
                 inactive_peaks,
             }
         }
@@ -159,7 +155,7 @@ async fn load_current_tip<F: Graftable, H: Hasher, const N: usize>(
         })
         .collect();
     Ok(CurrentTip {
-        watermark,
+        tip,
         root: meta.root,
         pruned_chunks: meta.pruned_chunks,
         inactivity_floor,
@@ -170,7 +166,7 @@ async fn load_current_tip<F: Graftable, H: Hasher, const N: usize>(
 
 /// Bitmap chunk `index` at the tip, with bits below the floor cleared: the
 /// cached tail chunk when it is one, else its latest version at or below the
-/// watermark.
+/// tip.
 async fn load_chunk<F: Graftable, D: Digest, const N: usize>(
     session: &ReadSession,
     tip: &CurrentTip<F, D>,
@@ -179,7 +175,7 @@ async fn load_chunk<F: Graftable, D: Digest, const N: usize>(
     if let Some(chunk) = tip.tail.get(&index) {
         return tail_chunk(chunk);
     }
-    let mut chunk = load_chunk_row::<F, N>(session, tip.watermark, index).await?;
+    let mut chunk = load_chunk_row::<F, N>(session, tip.tip, index).await?;
     clear_below_floor::<F, N>(&mut chunk, index, tip.inactivity_floor);
     Ok(chunk)
 }
@@ -187,17 +183,17 @@ async fn load_chunk<F: Graftable, D: Digest, const N: usize>(
 #[boxed]
 async fn load_chunk_row<F: Graftable, const N: usize>(
     session: &ReadSession,
-    watermark: Location<F>,
+    tip: Location<F>,
     index: u64,
 ) -> Result<[u8; N], QmdbError> {
     let start = encode_chunk_key(index, Location::<F>::new(0));
-    let end = encode_chunk_key(index, watermark);
+    let end = encode_chunk_key(index, tip);
     let rows = session
         .range_with_mode(&start, &end, 1, RangeMode::Reverse)
         .await?;
     let Some((_, bytes)) = rows.into_iter().next() else {
         return Err(QmdbError::CorruptData(format!(
-            "missing bitmap chunk {index} at watermark {watermark}"
+            "missing bitmap chunk {index} at tip {tip}"
         )));
     };
     <[u8; N]>::decode(Copying(bytes.as_ref()))
@@ -240,18 +236,17 @@ pub(crate) async fn locate_active_key<F: Family, D: Digest>(
     tip: &CurrentTip<F, D>,
     key: &[u8],
 ) -> Result<Location<F>, QmdbError> {
-    let watermark = tip.watermark;
-    let Some((row_key, row_value)) = core::load_latest_update_row(session, watermark, key).await?
+    let Some((row_key, row_value)) = core::load_latest_update_row(session, tip.tip, key).await?
     else {
-        return Err(QmdbError::ProofKeyNotFound {
-            watermark: watermark.as_u64(),
+        return Err(QmdbError::KeyNotFound {
+            tip: tip.tip.as_u64(),
             key: key.to_vec(),
         });
     };
     let location = decode_update_location(&row_key)?;
     if !decode_update_index_value_present(row_value.as_ref())? {
         return Err(QmdbError::KeyNotActive {
-            watermark: watermark.as_u64(),
+            tip: tip.tip.as_u64(),
             key: key.to_vec(),
         });
     }
@@ -275,17 +270,17 @@ pub(crate) async fn load_proof_reads<F: Graftable, H: Hasher, const N: usize>(
 ) -> Result<ProofReads<F, N>, QmdbError> {
     // Plan the proof and find the one chunk beyond the cached tail it may need,
     // so that chunk's read can join the node reads.
-    let leaves = op_count_for_watermark(tip.watermark)?;
+    let leaves = op_count_for_tip(tip.tip)?;
     let plan = ElementPlan::new(leaves, location).map_err(crate::error::merkle_error)?;
     let positions = plan.positions();
-    let mut bitmap = ProofBitmap::new(tip.watermark, tip.pruned_chunks, &tip.tail)?;
+    let mut bitmap = ProofBitmap::new(tip.tip, tip.pruned_chunks, &tip.tail)?;
     let chunk_index = bitmap.chunk_to_prove(location)?;
     let operation_key = encode_operation_key(location);
     let ((mut rows, nodes), chunk) = futures::try_join!(
         load_proof_nodes::<F, H::Digest, N>(
             session,
             cache,
-            tip.watermark,
+            tip.tip,
             tip.pruned_chunks,
             positions,
             BTreeSet::from([operation_key.clone()]),
@@ -333,12 +328,12 @@ pub(crate) async fn load_range_reads<F: Graftable, H: Hasher, const N: usize>(
     start: Location<F>,
     end: Location<F>,
 ) -> Result<RangeReads<F>, QmdbError> {
-    let leaves = op_count_for_watermark(tip.watermark)?;
+    let leaves = op_count_for_tip(tip.tip)?;
     let plan = RangePlan::new(leaves, start..end).map_err(crate::error::merkle_error)?;
     let (_, nodes) = load_proof_nodes::<F, H::Digest, N>(
         session,
         cache,
-        tip.watermark,
+        tip.tip,
         tip.pruned_chunks,
         plan.positions(),
         BTreeSet::new(),
@@ -374,7 +369,7 @@ pub(crate) fn range_proof<F: Graftable, H: Hasher, const N: usize>(
     tip: &CurrentTip<F, H::Digest>,
     reads: RangeReads<F>,
 ) -> Result<RangeProof<F, H::Digest>, QmdbError> {
-    let status = ProofBitmap::new(tip.watermark, tip.pruned_chunks, &tip.tail)?;
+    let status = ProofBitmap::new(tip.tip, tip.pruned_chunks, &tip.tail)?;
     let digests = reads
         .nodes
         .digests::<H, N>(tip.pruned_chunks, &reads.plan.positions())
@@ -394,8 +389,8 @@ async fn load_current_boundary_metadata<F: Graftable, H: Hasher>(
     location: Location<F>,
 ) -> Result<CurrentBoundaryMetadata<H::Digest>, QmdbError> {
     let Some(bytes) = session.get(&encode_current_meta_key(location)).await? else {
-        return Err(QmdbError::CurrentBoundaryStateMissing {
-            location: location.as_u64(),
+        return Err(QmdbError::CurrentStateMissing {
+            tip: location.as_u64(),
         });
     };
     decode_current_boundary_metadata::<H::Digest>(
@@ -430,11 +425,11 @@ pub(crate) async fn load_ops_root_witness<F: Graftable, H: Hasher>(
 }
 
 pub(crate) fn verified_key_value<D: Digest, Op, F: Graftable, const N: usize>(
-    raw: RawKeyValueProof<D, Op, N, F>,
+    proof: KeyValueProof<D, Op, N, F>,
 ) -> VerifiedKeyValue<D, Op, F> {
     VerifiedKeyValue {
-        root: raw.root,
-        location: raw.proof.loc,
-        operation: raw.operation,
+        root: proof.root,
+        location: proof.proof.loc,
+        operation: proof.operation,
     }
 }

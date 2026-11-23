@@ -1,4 +1,4 @@
-//! Immutable QMDB ConnectRPC e2e: streamed range checkpoints plus client-side
+//! Immutable QMDB ConnectRPC e2e: streamed operation range proofs plus client-side
 //! validation of tampered proofs.
 
 mod common;
@@ -13,7 +13,7 @@ use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use connectrpc::client::{BoxFuture, ClientBody, ClientTransport};
 use exoware_qmdb::{
     service::{
-        client::rpc::{OperationLogClient, OperationLogSubscribeProof},
+        client::rpc::{OperationLogClient, VerifiedSubscribeFrame},
         proto::qmdb::v1::{
             GetOperationRangeRequest as ProtoGetOperationRangeRequest,
             SubscribeRequest as ProtoSubscribeRequest,
@@ -43,9 +43,7 @@ type Db = Immutable<
 >;
 type BatchOperation = ImmutableOperation<mmr::Family, FixedBytes<32>, Vec<u8>>;
 
-async fn spawn_qmdb_server(
-    raw_store: PrefixedStoreClient,
-) -> (tokio::task::JoinHandle<()>, String) {
+async fn spawn_qmdb_server(store: PrefixedStoreClient) -> (tokio::task::JoinHandle<()>, String) {
     common::spawn_connect_service(
         exoware_qmdb::service::server::immutable_operation_log_stack::<
             mmr::Family,
@@ -53,7 +51,7 @@ async fn spawn_qmdb_server(
             FixedBytes<32>,
             Vec<u8>,
             commonware_storage::qmdb::value::VariableEncoding<Vec<u8>>,
-        >(raw_store, ((), ((0..=10000).into(), ()))),
+        >(store, ((), ((0..=10000).into(), ()))),
     )
     .await
 }
@@ -203,15 +201,14 @@ async fn test_immutable_connect_subscribe_emits_verifiable_multi_proof() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     commit_upload(&store_client, &source).await;
 
-    let frame: OperationLogSubscribeProof<Digest, BatchOperation, mmr::Family> =
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            stream.message_with_root(common::trusted_root(source.root)),
-        )
-        .await
-        .expect("timeout")
-        .expect("stream result")
-        .expect("stream frame");
+    let frame: VerifiedSubscribeFrame<Digest, BatchOperation, mmr::Family> = tokio::time::timeout(
+        Duration::from_secs(5),
+        stream.message_with_root(common::trusted_root(source.root)),
+    )
+    .await
+    .expect("timeout")
+    .expect("stream result")
+    .expect("stream frame");
 
     assert!(frame.resume_sequence_number > 0);
     assert_eq!(frame.root, source.root);
@@ -225,7 +222,7 @@ async fn test_immutable_connect_subscribe_emits_verifiable_multi_proof() {
     assert_eq!(
         ranges.load(Ordering::SeqCst),
         0,
-        "the subscription's covering watermark must avoid a publication lookup"
+        "the subscription's covering watermark must avoid a watermark lookup"
     );
 }
 
@@ -252,12 +249,12 @@ async fn test_immutable_connect_get_operation_range_returns_verifiable_proof() {
     let error = common::operation_log_rpc_client(&qmdb_url)
         .get_operation_range(request.clone())
         .await
-        .expect_err("caller floor must govern an uncached publication lookup");
+        .expect_err("caller floor must govern an uncached watermark lookup");
     assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
 
     for min_sequence_number in [None, Some(1)] {
         let proof = connect_client
-            .get_operation_range(
+            .operation_range(
                 ProtoGetOperationRangeRequest {
                     tip: u64::try_from(source.operations.len() - 1).expect("tip fits"),
                     start_location: 1,
@@ -281,6 +278,51 @@ async fn test_immutable_connect_get_operation_range_returns_verifiable_proof() {
         .expect("cached publication evidence fixes the downstream read floor")
         .into_owned();
     assert!(response.proof.as_option().is_some());
+}
+
+#[tokio::test]
+async fn test_immutable_operations_match_between_reader_and_client() {
+    let store_client = common::local_store_client().await;
+    let source = build_source_batch().await;
+    commit_upload(&store_client, &source).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
+    let tip = Location::new(u64::try_from(source.operations.len() - 1).expect("tip fits"));
+    let locations = [Location::new(0), Location::new(1), tip];
+    let expected = locations
+        .iter()
+        .map(|&location| {
+            (
+                location,
+                source.operations[location.as_u64() as usize].clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let op_cfg = ((), ((0..=10000).into(), ()));
+
+    let native = exoware_qmdb::adapter::Immutable::<
+        mmr::Family,
+        commonware_cryptography::Sha256,
+        FixedBytes<32>,
+        Vec<u8>,
+    >::new(store_client.unprefixed(), op_cfg)
+    .operations(tip, &locations, None)
+    .await
+    .expect("native operations");
+    assert_eq!(native.root, source.root);
+    assert_eq!(native.operations, expected);
+
+    let client: exoware_qmdb::service::client::Immutable<
+        PreferZstdHttpClient,
+        mmr::Family,
+        commonware_cryptography::Sha256,
+        FixedBytes<32>,
+        Vec<u8>,
+    > = exoware_qmdb::service::client::Immutable::plaintext(&qmdb_url, op_cfg);
+    let verified = client
+        .operations(tip, &locations, None, &source.root)
+        .await
+        .expect("client operations");
+    assert_eq!(verified, native);
 }
 
 #[tokio::test]
@@ -327,7 +369,7 @@ async fn test_immutable_connect_client_rejects_invalid_streamed_proof() {
     assert!(matches!(
         err,
         QmdbError::ProofVerification {
-            kind: exoware_qmdb::ProofKind::BatchMulti
+            kind: exoware_qmdb::ProofKind::OperationMulti
         }
     ));
 }

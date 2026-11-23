@@ -51,7 +51,7 @@ where
             })?;
     if !proof.verify::<H, _>(operation.clone(), root) {
         return Err(QmdbError::ProofVerification {
-            kind: crate::ProofKind::CurrentKeyValue,
+            kind: crate::ProofKind::KeyValue,
         });
     }
     Ok(VerifiedKeyValue {
@@ -98,7 +98,7 @@ where
     })?;
     if !proof.verify::<H>(&requested_key, root) {
         return Err(QmdbError::ProofVerification {
-            kind: crate::ProofKind::CurrentKeyExclusion,
+            kind: crate::ProofKind::KeyExclusion,
         });
     }
     Ok(match proof {

@@ -66,7 +66,7 @@ for (const merkleFamily of ['mmr', 'mmb']) {
     // The baseline verifies, and its value matches the value bytes of the raw operation.
     const verified = await verify();
     assert.equal(verified.location, location);
-    const raw = await verifier.verifyOperationRange(proof, request, root);
+    const raw = await verifier.verifyRawOperationRange(proof, request, root);
     assert.deepEqual(Buffer.from(verified.value), Buffer.from(raw.operations[1].encodedOperation.subarray(33, 65)));
 
     // A different root, window, location, key, or value size is rejected, as is a truncated
@@ -92,7 +92,7 @@ test('keyless multiproof binds values to exact locations and tip', async () => {
   const verifier = new QmdbProofVerifier();
   const expected = data.locations.map((location, i) => ({ location, value: data.operations[i].subarray(1, 17) }));
   const verify = (proof = data.proof, request = { tip: data.tip }, root = data.root, values = expected) =>
-    verifier.verifyFixedKeylessAppendMany(proof, request, root, values);
+    verifier.verifyFixedKeylessAppends(proof, request, root, values);
 
   // Expectations in any order verify and return in ascending location order.
   const verified = await verify(data.proof, { tip: data.tip }, data.root, [...expected].reverse());
@@ -120,12 +120,12 @@ test('standalone multiproof verification accepts more than 1024 locations', asyn
   const request = { tip: data.tip, locations: data.locations };
   assert.equal(data.locations.length, 1025);
 
-  const raw = await verifier.verifyOperations(data.proof, request, data.root);
+  const raw = await verifier.verifyRawOperations(data.proof, request, data.root);
   assert.deepEqual(raw.operations.map(({ location }) => location), data.locations);
   assert.deepEqual(raw.operations.map(({ encodedOperation }) => Buffer.from(encodedOperation)), data.operations);
 
   const expected = data.locations.map((location, i) => ({ location, value: data.operations[i].subarray(1, 17) }));
-  const fixed = await verifier.verifyFixedKeylessAppendMany(data.proof, { tip: data.tip }, data.root, expected);
+  const fixed = await verifier.verifyFixedKeylessAppends(data.proof, { tip: data.tip }, data.root, expected);
   assert.deepEqual(fixed.operations.map(({ location }) => location), data.locations);
   assert.deepEqual(fixed.operations.map(({ value }) => Buffer.from(value)), expected.map(({ value }) => value));
   assert.equal(fetch.mock.callCount(), 0);
@@ -138,17 +138,17 @@ test('raw multiproof uses canonical current root and exact locations', async () 
   const data = multiFixture('current_unordered_variable_variable_keys_variable_values_mmr');
   const verifier = new QmdbProofVerifier();
   const request = { tip: data.tip, locations: data.locations };
-  const verified = await verifier.verifyOperations(data.proof, request, data.root);
+  const verified = await verifier.verifyRawOperations(data.proof, request, data.root);
   assert.deepEqual(verified.operations.map(({ encodedOperation }) => Buffer.from(encodedOperation)), data.operations);
 
   // The bare operations root, a proof without its witness, and a different location set are
   // rejected.
   const proof = fromBinary(OperationMultiProofSchema, data.proof);
   assert.ok(proof.opsRootWitness.length > 0);
-  await assert.rejects(verifier.verifyOperations(data.proof, request, proof.opsRoot));
+  await assert.rejects(verifier.verifyRawOperations(data.proof, request, proof.opsRoot));
   proof.opsRootWitness = new Uint8Array();
-  await assert.rejects(verifier.verifyOperations(toBinary(OperationMultiProofSchema, proof), request, data.root));
-  await assert.rejects(verifier.verifyOperations(data.proof, { ...request, locations: data.locations.slice(1) }, data.root));
+  await assert.rejects(verifier.verifyRawOperations(toBinary(OperationMultiProofSchema, proof), request, data.root));
+  await assert.rejects(verifier.verifyRawOperations(data.proof, { ...request, locations: data.locations.slice(1) }, data.root));
 });
 
 test('public verifier rejects invalid location domains and numeric narrowing', async () => {
@@ -164,11 +164,11 @@ test('public verifier rejects invalid location domains and numeric narrowing', a
     { tip: 10n, locations: [-1n] },
     { tip: (1n << 64n) - 1n, locations: [0n] },
   ]) {
-    await assert.rejects(verifier.verifyOperations(proof, request, ''), /location|ascending|tip/);
+    await assert.rejects(verifier.verifyRawOperations(proof, request, ''), /location|ascending|tip/);
   }
 
   // Unequal expectation sizes, a value size above 32 bits, and unknown families are rejected.
-  await assert.rejects(verifier.verifyFixedKeylessAppendMany(proof, { tip: 10n }, '', [{ location: 1n, value: 'a' }, { location: 2n, value: 'bb' }]), /equal in size/);
+  await assert.rejects(verifier.verifyFixedKeylessAppends(proof, { tip: 10n }, '', [{ location: 1n, value: 'a' }, { location: 2n, value: 'bb' }]), /equal in size/);
   await assert.rejects(verifier.verifyFixedUnorderedUpdate(proof, { tip: 1n, startLocation: 0n, maxLocations: 1 }, '', 0n, '', 2 ** 32), /32-bit/);
   assert.throws(() => new QmdbProofVerifier({ hashFamily: 'unknown' }), /hash family/);
   assert.throws(() => new QmdbProofVerifier({ merkleFamily: 'unknown' }), /Merkle family/);

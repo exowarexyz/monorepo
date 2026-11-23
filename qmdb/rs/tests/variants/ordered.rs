@@ -394,11 +394,14 @@ async fn verify_snapshots<F, K, V, E>(
             .await
             .expect("publish source boundary");
         assert_eq!(
-            native.ops_root_at(tip).await.expect("native ops root"),
+            native
+                .ops_root_at(tip, None)
+                .await
+                .expect("native ops root"),
             snapshot.ops_root
         );
         assert_eq!(
-            native.root_at(tip).await.expect("native root"),
+            native.root_at(tip, None).await.expect("native root"),
             snapshot.root
         );
 
@@ -587,7 +590,7 @@ async fn verify_snapshots<F, K, V, E>(
         }
         assert_ne!(snapshot.root, wrong_root);
         let queried = native
-            .query_many_at(&all_keys, tip)
+            .get_many_at(tip, &all_keys, None)
             .await
             .expect("native ordered lookup rows");
         for (key, row) in zip_eq(&all_keys, queried) {
@@ -640,25 +643,25 @@ async fn verify_snapshots<F, K, V, E>(
                 ..Default::default()
             };
             let proof = historical
-                .get_operation_range(request.clone(), &snapshot.root)
+                .operation_range(request.clone(), &snapshot.root)
                 .await
                 .expect("Connect historical range");
             assert_eq!(proof.root, snapshot.root);
             assert_eq!(proof.start_location, Location::new(start));
             assert_eq!(proof.operations, snapshot.operations[start as usize..]);
             assert!(historical
-                .get_operation_range(request, &wrong_root)
+                .operation_range(request, &wrong_root)
                 .await
                 .is_err());
-            let checkpoint = native
-                .operation_range_checkpoint(tip, Location::new(start), count as u32, None)
+            let native_proof = native
+                .operation_range_proof(tip, Location::new(start), count as u32, None)
                 .await
-                .expect("native checkpoint");
-            assert_eq!(checkpoint.ops_root, snapshot.ops_root);
-            assert_eq!(checkpoint.ops_root_witness.is_some(), is_current);
-            assert!(checkpoint.verify::<Sha256>());
+                .expect("native native_proof");
+            assert_eq!(native_proof.ops_root, snapshot.ops_root);
+            assert_eq!(native_proof.ops_root_witness.is_some(), is_current);
+            assert!(native_proof.verify::<Sha256>());
             assert_eq!(
-                checkpoint.encoded_operations,
+                native_proof.encoded_operations,
                 snapshot.operations[start as usize..]
                     .iter()
                     .map(|operation| operation.encode().to_vec())
@@ -668,7 +671,10 @@ async fn verify_snapshots<F, K, V, E>(
 
         if is_current {
             assert_eq!(
-                native.root_at(tip).await.expect("native current root"),
+                native
+                    .root_at(tip, None)
+                    .await
+                    .expect("native current root"),
                 snapshot.root
             );
             let request = GetCurrentOperationRangeRequest {
@@ -678,13 +684,13 @@ async fn verify_snapshots<F, K, V, E>(
                 ..Default::default()
             };
             let current = current_operations
-                .get_current_operation_range(request.clone(), &snapshot.root)
+                .current_operation_range(request.clone(), &snapshot.root)
                 .await
                 .expect("Connect current range");
             assert_eq!(current.operations, snapshot.operations);
             assert_eq!(current.root, snapshot.root);
             assert!(current_operations
-                .get_current_operation_range(request, &wrong_root)
+                .current_operation_range(request, &wrong_root)
                 .await
                 .is_err());
             let native_current = native
@@ -728,7 +734,8 @@ async fn verify_snapshots<F, K, V, E>(
                         assert_update(&one.operation, key, value);
                         assert!(lookup.get(tip, key, None, &wrong_root).await.is_err());
                     }
-                    (None, VerifiedKeyLookup::Miss { key: missed }) => {
+                    (None, VerifiedKeyLookup::Miss { root, key: missed }) => {
+                        assert_eq!(root, snapshot.root);
                         assert_eq!(&missed, key);
                     }
                     _ => panic!("lookup disagrees with source state"),
@@ -748,6 +755,7 @@ async fn verify_snapshots<F, K, V, E>(
                     .get_range(tip, cursor.clone(), None, 2, None, &wrong_root)
                     .await
                     .is_err());
+                assert_eq!(page.root, snapshot.root);
                 assert!(page.entries.len() <= 2);
                 for entry in page.entries {
                     let Operation::Update(update) = entry.operation else {
@@ -813,9 +821,18 @@ async fn verify_snapshots<F, K, V, E>(
                         assert_same_key_value(typed, direct)
                     }
                     (
-                        VerifiedKeyLookup::Miss { key: typed },
-                        VerifiedKeyLookup::Miss { key: direct },
-                    ) => assert_eq!(typed, direct),
+                        VerifiedKeyLookup::Miss {
+                            root: typed_root,
+                            key: typed,
+                        },
+                        VerifiedKeyLookup::Miss {
+                            root: direct_root,
+                            key: direct,
+                        },
+                    ) => {
+                        assert_eq!(typed_root, direct_root);
+                        assert_eq!(typed, direct);
+                    }
                     _ => panic!("typed and native lookups disagree"),
                 }
             }
@@ -849,6 +866,7 @@ async fn verify_snapshots<F, K, V, E>(
                 )
                 .await
                 .expect("native get_range");
+            assert_eq!(typed.root, direct.root);
             assert_eq!(typed.next_start_key, direct.next_start_key);
             assert_eq!(typed.entries.len(), direct.entries.len());
             for (typed, direct) in typed.entries.iter().zip(&direct.entries) {
@@ -877,9 +895,12 @@ async fn verify_snapshots<F, K, V, E>(
             assert_eq!(typed_ops.operations, native_ops.operations);
         } else {
             // Without current state the canonical root is the operations-log root
-            assert_eq!(native.root_at(tip).await.expect("root"), snapshot.ops_root);
+            assert_eq!(
+                native.root_at(tip, None).await.expect("root"),
+                snapshot.ops_root
+            );
             assert!(current_operations
-                .get_current_operation_range(
+                .current_operation_range(
                     GetCurrentOperationRangeRequest {
                         tip: *tip,
                         start_location: 0,

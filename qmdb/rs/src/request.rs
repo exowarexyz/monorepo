@@ -14,9 +14,9 @@ impl core::fmt::Display for InvalidWindow {
             Self::TipOverflow => f.write_str("operation tip overflow"),
             Self::StartOutOfBounds { start, count } => write!(
                 f,
-                "range proof start {start} is out of bounds for watermark with {count} leaves"
+                "range proof start {start} is out of bounds for tip with {count} leaves"
             ),
-            Self::ZeroMaximum => f.write_str("range proof max_locations must be > 0"),
+            Self::ZeroMaximum => f.write_str("range length must be > 0"),
         }
     }
 }
@@ -83,13 +83,13 @@ impl core::fmt::Display for InvalidLocations {
             ),
             Self::OutOfBounds { location, count } => write!(
                 f,
-                "requested location {location} is out of bounds for watermark with {count} leaves"
+                "requested location {location} is out of bounds for tip with {count} leaves"
             ),
         }
     }
 }
 
-/// Requested locations for an operations multi-proof at one tip
+/// Requested locations for an operation multi-proof at one tip
 pub(crate) struct OperationLocations<'a> {
     leaves: u64,
     locations: &'a [u64],
@@ -138,12 +138,12 @@ impl<'a> OperationLocations<'a> {
         leaves: u64,
     ) -> Result<(), &'static str> {
         if leaves != self.leaves {
-            return Err("operations proof does not match requested tip");
+            return Err("operation multi proof does not match requested tip");
         }
         if returned.len() != self.locations.len()
             || !returned.zip(self.locations).all(|(got, want)| got == *want)
         {
-            return Err("operations proof does not match requested locations");
+            return Err("operation multi proof does not match requested locations");
         }
         Ok(())
     }
