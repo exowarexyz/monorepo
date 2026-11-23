@@ -49,7 +49,7 @@ use datafusion::{
     },
     logical_expr::{
         dml::InsertOp, simplify::SimplifyContext, DdlStatement, DmlStatement, Expr, ExprSchemable,
-        LogicalPlan, ResetVariable, SetVariable, Statement, WriteOp,
+        LogicalPlan, Statement, WriteOp,
     },
     optimizer::simplify_expressions::ExprSimplifier,
     physical_expr::PhysicalExpr,
@@ -144,9 +144,9 @@ impl TableStream {
 /// Construct with [`SqlServer::new`], pass to [`sql_stack`] to mount
 /// on an axum router.
 pub struct SqlServer {
-    /// Shared context for all requests. `Query` reads through a per-request copy with its own
-    /// read session, while session commands such as `SET` and `CREATE FUNCTION` run here and
-    /// persist across requests.
+    /// Catalog, settings, functions, and prepared statements that every request starts from.
+    /// `Query` runs each statement on a copy with its own read session and rejects the
+    /// statements that would change this context, so only the embedder configures it.
     ctx: Arc<SqlContext>,
     /// Unique table names and subscription state in schema declaration order. A linear lookup
     /// suffices because a schema holds at most `MAX_TABLES` tables.
@@ -360,23 +360,14 @@ impl Service for SqlConnect {
                 .map_err(datafusion_error_to_connect)?;
             verify_remote_plan(&plan).map_err(datafusion_error_to_connect)?;
 
-            // Session commands must outlive the request. Data reads keep the request's floor.
-            let execution_ctx = match &plan {
-                LogicalPlan::Statement(
-                    Statement::SetVariable(_)
-                    | Statement::ResetVariable(_)
-                    | Statement::Prepare(_)
-                    | Statement::Deallocate(_),
-                )
-                | LogicalPlan::Ddl(
-                    DdlStatement::CreateFunction(_) | DdlStatement::DropFunction(_),
-                ) => server.ctx.datafusion(),
-                _ => ctx.datafusion(),
-            };
-            let df = execution_ctx
+            // The frame holds the plan that runs. For an EXECUTE that is the statement the
+            // embedder prepared, which is held to the same rules as a statement sent directly.
+            let df = ctx
+                .datafusion()
                 .execute_logical_plan(plan)
                 .await
                 .map_err(datafusion_error_to_connect)?;
+            verify_remote_plan(df.logical_plan()).map_err(datafusion_error_to_connect)?;
             let batches = df
                 .execute_stream()
                 .await
@@ -581,40 +572,66 @@ fn evaluate_batch(
     }))
 }
 
-/// Rejects remote statements that would read or write the server's files, replace its runtime
-/// environment, change the catalog that every caller shares, or write other than with
-/// `INSERT INTO`. Like DataFusion's `SQLOptions::verify_plan`, the check visits every node,
-/// including subqueries and the inputs of `EXPLAIN` and `PREPARE`.
+/// Rejects remote statements that would read or write the server's files, change state that
+/// every caller shares, or write other than with `INSERT INTO`. Like DataFusion's
+/// `SQLOptions::verify_plan`, the check visits every node, including subqueries and the
+/// inputs of `EXPLAIN` and `PREPARE`.
 ///
-/// `CREATE FUNCTION` and `DROP FUNCTION` stay available as session commands. Embedders
-/// register tables and views and configure the runtime on the server's [`SqlContext`].
+/// The shared state is the catalog, the runtime environment, the settings, the functions,
+/// and the prepared statements. A caller has no session of its own, so a change to any of
+/// them would reach every other caller's statements. Embedders change them on the server's
+/// [`SqlContext`], and `EXECUTE` runs the statements they prepare there.
+///
+/// Both matches name every kind of plan and statement, so a kind that a DataFusion upgrade
+/// adds does not compile until it is classified here.
 fn verify_remote_plan(plan: &LogicalPlan) -> DataFusionResult<()> {
     plan.apply_with_subqueries(|node| {
         let what = match node {
             LogicalPlan::Copy(_) => "COPY",
             LogicalPlan::Ddl(DdlStatement::CreateExternalTable(_)) => "CREATE EXTERNAL TABLE",
-            LogicalPlan::Ddl(DdlStatement::CreateFunction(_) | DdlStatement::DropFunction(_)) => {
-                return Ok(TreeNodeRecursion::Continue);
-            }
+            LogicalPlan::Ddl(DdlStatement::CreateFunction(_)) => "CREATE FUNCTION",
+            LogicalPlan::Ddl(DdlStatement::DropFunction(_)) => "DROP FUNCTION",
             LogicalPlan::Ddl(_) => "changing the catalog",
             LogicalPlan::Dml(DmlStatement {
                 op: WriteOp::Insert(InsertOp::Append),
                 ..
             }) => return Ok(TreeNodeRecursion::Continue),
             LogicalPlan::Dml(_) => "a write other than INSERT INTO",
-            LogicalPlan::Statement(
-                Statement::SetVariable(SetVariable { variable, .. })
-                | Statement::ResetVariable(ResetVariable { variable }),
-            ) => {
-                if variable.starts_with("datafusion.runtime.") {
-                    "changing datafusion.runtime options"
-                } else if variable.starts_with("datafusion.catalog.") {
-                    "changing datafusion.catalog options"
-                } else {
-                    return Ok(TreeNodeRecursion::Continue);
+            LogicalPlan::Statement(statement) => match statement {
+                Statement::SetVariable(_) => "SET",
+                Statement::ResetVariable(_) => "RESET",
+                Statement::Prepare(_) => "PREPARE",
+                Statement::Deallocate(_) => "DEALLOCATE",
+                Statement::TransactionStart(_) => "starting a transaction",
+                Statement::TransactionEnd(_) => "ending a transaction",
+                // DataFusion runs the prepared statement only of an EXECUTE that is the whole
+                // plan, and the caller checks the statement that one runs.
+                Statement::Execute(_) if std::ptr::eq(node, plan) => {
+                    return Ok(TreeNodeRecursion::Continue)
                 }
-            }
-            _ => return Ok(TreeNodeRecursion::Continue),
+                Statement::Execute(_) => "EXECUTE inside another statement",
+            },
+            LogicalPlan::Projection(_)
+            | LogicalPlan::Filter(_)
+            | LogicalPlan::Window(_)
+            | LogicalPlan::Aggregate(_)
+            | LogicalPlan::Sort(_)
+            | LogicalPlan::Join(_)
+            | LogicalPlan::Repartition(_)
+            | LogicalPlan::Union(_)
+            | LogicalPlan::TableScan(_)
+            | LogicalPlan::EmptyRelation(_)
+            | LogicalPlan::Subquery(_)
+            | LogicalPlan::SubqueryAlias(_)
+            | LogicalPlan::Limit(_)
+            | LogicalPlan::Values(_)
+            | LogicalPlan::Explain(_)
+            | LogicalPlan::Analyze(_)
+            | LogicalPlan::Extension(_)
+            | LogicalPlan::Distinct(_)
+            | LogicalPlan::DescribeTable(_)
+            | LogicalPlan::Unnest(_)
+            | LogicalPlan::RecursiveQuery(_) => return Ok(TreeNodeRecursion::Continue),
         };
         plan_err!("{what} is not supported by the SQL service")
     })
@@ -1267,6 +1284,57 @@ mod tests {
 
         // INSERT INTO the same table passes, so the rejections come from the write kind.
         verify("INSERT INTO target VALUES (5, 'x')").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn remote_statements_that_change_shared_state_are_rejected() {
+        let ctx = DataFusionContext::new();
+        let batch = predicate_batch();
+        ctx.register_table(
+            "target",
+            Arc::new(MemTable::try_new(batch.schema(), vec![vec![batch]]).unwrap()),
+        )
+        .unwrap();
+        let verify = async |sql: &str| {
+            let plan = ctx.state().create_logical_plan(sql).await.unwrap();
+            verify_remote_plan(&plan)
+        };
+
+        // Each statement changes a setting, a function, or a prepared statement that every
+        // caller would see, or starts or ends a transaction, alone or inside another statement.
+        for sql in [
+            "SET datafusion.execution.target_partitions = 2048",
+            "SET datafusion.execution.batch_size = 17",
+            "SET TIME ZONE = 'America/New_York'",
+            "RESET datafusion.execution.target_partitions",
+            "PREPARE item AS SELECT id FROM target",
+            "DEALLOCATE item",
+            "CREATE FUNCTION double(BIGINT) RETURNS BIGINT RETURN $1 + $1",
+            "DROP FUNCTION count",
+            "START TRANSACTION",
+            "COMMIT",
+            "ROLLBACK",
+            "EXPLAIN SET datafusion.execution.batch_size = 17",
+            "EXPLAIN PREPARE item AS SELECT id FROM target",
+            "PREPARE setter AS SET datafusion.execution.batch_size = 17",
+            "EXPLAIN EXECUTE item(1)",
+            "EXPLAIN ANALYZE EXECUTE item(1)",
+        ] {
+            assert!(verify(sql).await.is_err(), "{sql}");
+        }
+
+        // Statements that read, insert, or run a prepared statement pass.
+        for sql in [
+            "SELECT count(*) FROM target",
+            "EXPLAIN ANALYZE SELECT id FROM target",
+            "DESCRIBE target",
+            "INSERT INTO target VALUES (5, 'x')",
+            "EXECUTE item(1)",
+        ] {
+            verify(sql)
+                .await
+                .unwrap_or_else(|error| panic!("{sql}: {error}"));
+        }
     }
 
     #[tokio::test]

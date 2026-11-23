@@ -313,19 +313,18 @@ reports the highest Store sequence observed, omitting it when the statement read
 nothing from the Store. A result whose encoded stream exceeds 256 MiB fails with
 `RESOURCE_EXHAUSTED`.
 
-`Query` accepts queries and `EXPLAIN`, `INSERT INTO` registered tables, `SET`
-and `RESET` of options outside `datafusion.runtime` and `datafusion.catalog`,
-`PREPARE`, `EXECUTE`, `DEALLOCATE`, `CREATE FUNCTION`, and `DROP FUNCTION`.
-Session commands such as `SET`, `PREPARE`, and `CREATE FUNCTION` modify the
-server's shared context, so their effects persist into later requests.
-`CREATE FUNCTION` needs a function factory installed on the server's context.
-
-`Query` rejects catalog DDL such as `CREATE TABLE`, `CREATE VIEW`, and
-`DROP TABLE` because every caller shares the catalog. It rejects `COPY` and
-`CREATE EXTERNAL TABLE` because they reach the server's files, and `DELETE`,
-`UPDATE`, and other writes because `INSERT INTO` is the only write the service
-offers. Register tables and views and set runtime options through
-`server.context()`.
+`Query` accepts queries, `EXPLAIN`, `INSERT INTO` registered tables, and
+`EXECUTE` of a statement prepared on the server's context. Callers have no
+sessions of their own. Every request starts from the catalog, settings,
+functions, and prepared statements of `server.context()`, so `Query` rejects
+each statement that would change them for other callers: `SET` and `RESET`,
+`PREPARE` and `DEALLOCATE`, `CREATE FUNCTION` and `DROP FUNCTION`, catalog DDL
+such as `CREATE TABLE`, `CREATE VIEW`, and `DROP TABLE`, and transaction
+statements. It rejects `COPY` and `CREATE EXTERNAL TABLE` because they reach
+the server's files, and `DELETE`, `UPDATE`, and other writes because
+`INSERT INTO` is the only write the service offers. The statement an
+`EXECUTE` runs follows the same rules. Set options, register tables, views,
+and functions, and prepare statements through `server.context()`.
 
 `Subscribe` streams rows from each Store batch that writes to a table and matches
 a scalar SQL predicate. Predicates cannot use subqueries, aggregates, window
