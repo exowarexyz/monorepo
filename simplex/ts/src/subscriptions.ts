@@ -107,7 +107,7 @@ export class SimplexSubscriptions {
     }
   }
 
-  async *subscribeBlocks(
+  async *subscribeBlocksRaw(
     options: SimplexStreamOptions = {},
     callOptions?: Parameters<PrefixedStoreClient['subscribe']>[1],
   ): AsyncIterable<SimplexStreamBatch<RawSimplexBlockEntry>> {
@@ -119,7 +119,7 @@ export class SimplexSubscriptions {
     }
   }
 
-  async *subscribeHeaders(
+  async *subscribeHeadersRaw(
     options: SimplexStreamOptions = {},
     callOptions?: Parameters<PrefixedStoreClient['subscribe']>[1],
   ): AsyncIterable<SimplexStreamBatch<RawSimplexHeaderEntry>> {
