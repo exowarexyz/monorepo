@@ -207,9 +207,18 @@ do not repair it from the base row.
 Use `KvSchema::batch_writer` to write rows as `CellValue` vectors in column order.
 The `BatchWriter` encodes each row's base entry and all of its index entries, and
 `flush` uploads the pending rows across tables as one atomic Store batch. It
-returns the batch's sequence number, or `None` when nothing was pending. If a flush
-fails, the writer retains that batch and retries it alone on the next flush,
-before uploading later rows.
+returns the batch's sequence number, or `None` when nothing was pending.
+
+`insert` keeps the pending rows within the Store's limits for one write. It rejects
+a row with a key or value over the Store's limit for one, and a row that would take
+the pending rows past the Store's entry or byte limit. Such a row fits once a `flush`
+has uploaded the pending rows, unless it exceeds that limit alone.
+
+If a flush fails, the writer retains that batch. Each flush retries one failed
+batch alone, and the pending rows wait until those batches have been drained. A
+batch the Store rejects every time, as a Store configured with lower limits can,
+holds back the rows behind it. Take it with `prepare_upload` and drop it to
+discard its rows and upload the rest.
 
 To commit SQL rows atomically with other Store writes, prepare them with
 `prepare_upload` and add them to an SDK `StoreWriteBatch` with the SDK's
@@ -221,8 +230,9 @@ atomic batch. It materializes Arrow batches first, so `BatchWriter` avoids that
 work for application ingest. A statement must fit in one Store write. Once its
 entries pass the Store's entry or byte limit, `INSERT` stops reading its input
 and fails without writing. Too many entries return a `PutTooLarge` error and too
-many bytes `ResourcesExhausted`. An oversized flush returns the Store's ingest
-error.
+many bytes `ResourcesExhausted`. A value over the Store's value limit fails the
+same way with a planning error. `BatchWriter::insert` returns the same errors for
+the same limits.
 
 ## Adding indexes to existing tables
 
