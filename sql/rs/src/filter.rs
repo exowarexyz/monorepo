@@ -321,8 +321,16 @@ impl ScanAccessPlan {
             .all(|(col_idx, required)| !*required || spec.value_column_mask[col_idx])
     }
 
-    pub(crate) fn predicate_fully_enforced_by_primary_key(&self, model: &TableModel) -> bool {
-        let mut enforced_pk_positions = vec![false; model.primary_key_indices.len()];
+    /// Marks the primary-key positions whose constraints the primary-key ranges enforce.
+    ///
+    /// The ranges fix each leading key column to one value while its constraint is a point,
+    /// then bound the next constrained column with an inclusive range or an IN list and stop.
+    /// Every row they hold passes the constraints on those columns. A constraint on a later
+    /// key column, on a key column after an unconstrained one, or of a kind that
+    /// `primary_key_range_constraint` leaves to row evaluation is not in the ranges. Neither
+    /// is any constraint on a column outside the key.
+    pub(crate) fn primary_key_positions_enforced_by_ranges(&self, model: &TableModel) -> Vec<bool> {
+        let mut enforced = vec![false; model.primary_key_indices.len()];
         let mut prefix_encoded_width = 0usize;
 
         for (pk_pos, &kind) in model.primary_key_kinds.iter().enumerate() {
@@ -343,19 +351,23 @@ impl ScanAccessPlan {
                 constraint,
             ) {
                 PrimaryKeyRangeConstraint::Point(point) => {
-                    enforced_pk_positions[pk_pos] = true;
+                    enforced[pk_pos] = true;
                     prefix_encoded_width += point.encoded_width;
                 }
                 PrimaryKeyRangeConstraint::Terminal(_) => {
-                    enforced_pk_positions[pk_pos] = true;
+                    enforced[pk_pos] = true;
                     break;
                 }
                 PrimaryKeyRangeConstraint::NotEnforced => break,
             }
         }
+        enforced
+    }
 
+    pub(crate) fn predicate_fully_enforced_by_primary_key(&self, model: &TableModel) -> bool {
+        let enforced = self.primary_key_positions_enforced_by_ranges(model);
         self.predicate_checks.iter().all(|check| match check {
-            PredicateAccess::Pk { pk_pos, .. } => enforced_pk_positions[*pk_pos],
+            PredicateAccess::Pk { pk_pos, .. } => enforced[*pk_pos],
             PredicateAccess::NonPk { .. } => false,
         })
     }
@@ -859,69 +871,176 @@ mod tests {
         }
     }
 
+    /// Returns point, range, and IN-list constraints for a column of `kind`.
+    fn constraints(kind: ColumnKind) -> Vec<PredicateConstraint> {
+        use PredicateConstraint::{
+            FixedSizeBinaryEq, FixedSizeBinaryIn, FloatRange, IntIn, StringEq, StringIn, UInt64In,
+        };
+        let float = |min, max| FloatRange { min, max };
+        match kind {
+            ColumnKind::Int64 => vec![
+                int_range(Some(5), Some(5)),
+                int_range(Some(5), None),
+                int_range(Some(4), Some(5)),
+                IntIn(vec![4, 6]),
+            ],
+            ColumnKind::UInt64 => vec![
+                unsigned_range(Some(2), Some(2)),
+                unsigned_range(None, Some(2)),
+                UInt64In(vec![1, 3]),
+            ],
+            ColumnKind::Utf8 => vec![
+                StringEq("n".into()),
+                StringEq(String::new()),
+                StringIn(vec![String::new(), "o".into()]),
+            ],
+            ColumnKind::Float64 => vec![
+                float(Some((1.0, true)), Some((1.0, true))),
+                float(Some((1.0, true)), None),
+                float(Some((1.0, false)), None),
+            ],
+            ColumnKind::Date32 => vec![
+                int_range(Some(5), Some(5)),
+                int_range(None, Some(5)),
+                int_range(Some(i64::from(i32::MAX) + 1), None),
+            ],
+            ColumnKind::FixedSizeBinary(2) => vec![
+                FixedSizeBinaryEq(vec![1, 2]),
+                FixedSizeBinaryIn(vec![vec![0, 0], vec![1, 3]]),
+            ],
+            _ => unreachable!("the tables must use only these column kinds"),
+        }
+    }
+
+    /// Returns values of `kind` on both sides of the bounds that `constraints` uses.
+    fn values(kind: ColumnKind) -> Vec<CellValue> {
+        match kind {
+            ColumnKind::Int64 => [4, 5, 6].map(CellValue::Int64).to_vec(),
+            ColumnKind::UInt64 => [1, 2, 3].map(CellValue::UInt64).to_vec(),
+            ColumnKind::Utf8 => ["", "n", "o"].map(|v| CellValue::Utf8(v.into())).to_vec(),
+            ColumnKind::Float64 => [0.5, 1.0, 2.0].map(CellValue::Float64).to_vec(),
+            ColumnKind::Date32 => [0, 5, i32::MAX].map(CellValue::Date32).to_vec(),
+            ColumnKind::FixedSizeBinary(2) => [[0, 0], [1, 2], [1, 3]]
+                .map(|v| CellValue::FixedSizeBinary(v.to_vec()))
+                .to_vec(),
+            _ => unreachable!("the tables must use only these column kinds"),
+        }
+    }
+
+    /// Returns every way to take one choice per column.
+    fn product<T: Clone>(columns: Vec<Vec<T>>) -> Vec<Vec<T>> {
+        columns.into_iter().fold(vec![Vec::new()], |rows, choices| {
+            let extend = |row: &Vec<T>| {
+                let row = row.clone();
+                choices.iter().map(move |choice| {
+                    let mut row = row.clone();
+                    row.push(choice.clone());
+                    row
+                })
+            };
+            rows.iter().flat_map(extend).collect()
+        })
+    }
+
+    /// The positions reported as enforced must hold against the ranges the planner builds. Over
+    /// small tables and every mix of constraints, the ranges admit every matching row, and every
+    /// row they admit passes the constraint at each enforced position.
+    #[test]
+    fn primary_key_ranges_enforce_the_positions_they_report() {
+        // The tables put integers, strings, and fixed-size binary values in each position of
+        // the primary key, beside a column outside it.
+        let mut partly_enforced = 0;
+        for (model, _) in [
+            indexed_table(
+                &[
+                    ("a", DataType::Int64),
+                    ("b", DataType::UInt64),
+                    ("name", DataType::Utf8),
+                    ("tag", DataType::Int64),
+                ],
+                &["a", "b", "name"],
+                &[],
+            ),
+            indexed_table(
+                &[
+                    ("name", DataType::Utf8),
+                    ("id", DataType::Int64),
+                    ("version", DataType::UInt64),
+                    ("score", DataType::Float64),
+                ],
+                &["name", "id", "version"],
+                &[],
+            ),
+            indexed_table(
+                &[
+                    ("code", DataType::FixedSizeBinary(2)),
+                    ("name", DataType::Utf8),
+                    ("id", DataType::Int64),
+                    ("day", DataType::Date32),
+                ],
+                &["code", "name", "id"],
+                &[],
+            ),
+        ] {
+            let kinds = model.columns.iter().map(|col| col.kind);
+            let rows = product(kinds.clone().map(values).collect());
+            let choices = kinds.enumerate().map(|(idx, kind)| {
+                let constrained = constraints(kind).into_iter().map(move |c| Some((idx, c)));
+                std::iter::once(None).chain(constrained).collect()
+            });
+            for chosen in product(choices.collect()) {
+                let mut predicate = QueryPredicate::default();
+                predicate.constraints.extend(chosen.into_iter().flatten());
+                let access = ScanAccessPlan::new(&model, &None, &predicate);
+                let ranges = predicate
+                    .primary_key_ranges(&model, exoware_sdk::keys::MAX_KEY_LEN)
+                    .unwrap();
+                let enforced = access.primary_key_positions_enforced_by_ranges(&model);
+                let enforced_count = enforced.iter().filter(|enforced| **enforced).count();
+                if 0 < enforced_count && enforced_count < predicate.constraints.len() {
+                    partly_enforced += 1;
+                }
+                for values in &rows {
+                    let row = KvRow {
+                        values: values.clone(),
+                    };
+                    let key =
+                        encode_primary_key_from_row(model.table_prefix, &row, &model).unwrap();
+                    let admitted = ranges
+                        .iter()
+                        .any(|range| range.start <= key && key <= range.end);
+                    assert!(
+                        admitted || !predicate.matches_row(&row),
+                        "the ranges must read the matching row {values:?} for {}",
+                        predicate.describe(&model)
+                    );
+                    for (pk_pos, col_idx) in model.primary_key_indices.iter().enumerate() {
+                        assert!(
+                            !enforced[pk_pos]
+                                || !admitted
+                                || matches_constraint(
+                                    row.value_at(*col_idx),
+                                    &predicate.constraints[col_idx]
+                                ),
+                            "the ranges enforce key column {pk_pos} for {}, so they must not \
+                             admit {values:?}",
+                            predicate.describe(&model)
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            partly_enforced > 0,
+            "some predicate must leave a constraint to a row check"
+        );
+    }
+
     /// An exact answer must hold against the ranges the planner builds. Over small tables and
     /// every mix of constraints, the ranges admit every matching index entry, and exact ranges
     /// admit no other entry.
     #[test]
     fn exact_index_ranges_admit_only_matching_entries() {
-        fn constraints(kind: ColumnKind) -> Vec<PredicateConstraint> {
-            use PredicateConstraint::{FloatRange, IntIn, StringEq, StringIn, UInt64In};
-            let float = |min, max| FloatRange { min, max };
-            match kind {
-                ColumnKind::Int64 => vec![
-                    int_range(Some(5), Some(5)),
-                    int_range(Some(5), None),
-                    int_range(Some(4), Some(5)),
-                    IntIn(vec![4, 6]),
-                ],
-                ColumnKind::UInt64 => vec![
-                    unsigned_range(Some(2), Some(2)),
-                    unsigned_range(None, Some(2)),
-                    UInt64In(vec![1, 3]),
-                ],
-                ColumnKind::Utf8 => vec![
-                    StringEq("n".into()),
-                    StringEq(String::new()),
-                    StringIn(vec![String::new(), "o".into()]),
-                ],
-                ColumnKind::Float64 => vec![
-                    float(Some((1.0, true)), Some((1.0, true))),
-                    float(Some((1.0, true)), None),
-                    float(Some((1.0, false)), None),
-                ],
-                ColumnKind::Date32 => vec![
-                    int_range(Some(5), Some(5)),
-                    int_range(None, Some(5)),
-                    int_range(Some(i64::from(i32::MAX) + 1), None),
-                ],
-                _ => unreachable!("the tables must use only these column kinds"),
-            }
-        }
-        fn values(kind: ColumnKind) -> Vec<CellValue> {
-            match kind {
-                ColumnKind::Int64 => [4, 5, 6].map(CellValue::Int64).to_vec(),
-                ColumnKind::UInt64 => [1, 2, 3].map(CellValue::UInt64).to_vec(),
-                ColumnKind::Utf8 => ["", "n", "o"].map(|v| CellValue::Utf8(v.into())).to_vec(),
-                ColumnKind::Float64 => [0.5, 1.0, 2.0].map(CellValue::Float64).to_vec(),
-                ColumnKind::Date32 => [0, 5, i32::MAX].map(CellValue::Date32).to_vec(),
-                _ => unreachable!("the tables must use only these column kinds"),
-            }
-        }
-        /// Returns every way to take one choice per column.
-        fn product<T: Clone>(columns: Vec<Vec<T>>) -> Vec<Vec<T>> {
-            columns.into_iter().fold(vec![Vec::new()], |rows, choices| {
-                let extend = |row: &Vec<T>| {
-                    let row = row.clone();
-                    choices.iter().map(move |choice| {
-                        let mut row = row.clone();
-                        row.push(choice.clone());
-                        row
-                    })
-                };
-                rows.iter().flat_map(extend).collect()
-            })
-        }
-
         // The tables put integers and strings in each position of the index key and of the
         // primary-key suffix, with and without a key column the suffix repeats.
         for (model, specs) in [

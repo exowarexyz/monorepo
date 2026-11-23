@@ -1381,17 +1381,26 @@ pub(crate) fn build_aggregate_reduce_job(
         None => (Vec::new(), None),
     };
 
-    // Every filter is a supported constraint, so the primary-key ranges are complete. When they
-    // also enforce each constraint, they hold exactly the rows the predicate accepts and the
-    // worker needs no filter, even for a key column that a worker filter cannot read.
-    let filter = if filters.is_empty()
-        || (matches!(access_path, AggregateAccessPath::PrimaryKey)
-            && access_plan.predicate_fully_enforced_by_primary_key(&table.model))
-    {
+    // Every filter is a supported constraint, so the primary-key ranges are complete, and every
+    // row they hold passes the constraints they enforce. The worker checks the remaining
+    // constraints alone, so it never needs a key column that the ranges enforce and a worker
+    // filter cannot read. When the ranges enforce every constraint, the worker needs no filter.
+    let primary_key = matches!(access_path, AggregateAccessPath::PrimaryKey);
+    let mut unenforced = predicate.clone();
+    if primary_key {
+        let enforced = access_plan.primary_key_positions_enforced_by_ranges(&table.model);
+        unenforced.constraints.retain(|col_idx, _| {
+            table
+                .model
+                .pk_position(*col_idx)
+                .is_none_or(|pk_pos| !enforced[pk_pos])
+        });
+    }
+    let filter = if filters.is_empty() || (primary_key && unenforced.constraints.is_empty()) {
         None
     } else {
         let Some(filter) =
-            compile_reduce_filter(&predicate, &table.model, &table.index_specs, &access_path)
+            compile_reduce_filter(&unenforced, &table.model, &table.index_specs, &access_path)
         else {
             return Ok(None);
         };
@@ -5928,28 +5937,35 @@ mod tests {
         assert!(fixture.rows.reductions.lock().unwrap().is_empty());
     }
 
-    #[tokio::test]
-    async fn key_ranges_that_enforce_the_predicate_need_no_worker_filter() {
-        let fixture = Fixture::new().await;
-        let rows: Vec<(&str, u64, Option<i64>, Option<i64>)> = vec![
-            ("", 1, Some(1), Some(-1)),
-            ("e", 1, Some(2), Some(-2)),
-            ("e", 2, Some(3), None),
-            ("eu", 0, Some(23), Some(7)),
-            ("eu", 1, None, Some(9)),
-            ("eu", 2, Some(25), None),
-            ("eu", 3, Some(26), Some(8)),
-            ("eu", u64::MAX, Some(27), Some(-5)),
-            ("eu\0x", 1, Some(100), Some(100)),
+    /// A row of the table `c`: `region`, `seq`, `v`, `w`, and `x`.
+    type RegionRow = (&'static str, u64, Option<i64>, Option<i64>, Option<f64>);
+
+    /// Installs the table `c` with primary key `(region, seq)`. A worker filter can read neither
+    /// key column, because `region` has a variable width and `seq` follows it. The rows put
+    /// regions that share a prefix with `eu` on both sides of it, and give the `eu` rows a null
+    /// and a boundary value in every other column.
+    async fn install_regions(fixture: &Fixture) {
+        let nan = f64::NAN;
+        let rows: Vec<RegionRow> = vec![
+            ("", 1, Some(1), Some(-1), Some(2.0)),
+            ("e", 1, Some(2), Some(-2), Some(2.0)),
+            ("e", 2, Some(3), None, Some(nan)),
+            ("eu", 0, Some(23), Some(7), Some(-0.0)),
+            ("eu", 1, None, Some(9), Some(nan)),
+            ("eu", 2, Some(25), None, None),
+            ("eu", 3, Some(26), Some(8), Some(1.5)),
+            ("eu", u64::MAX, Some(27), Some(-5), Some(0.0)),
+            ("eu\0x", 1, Some(100), Some(100), Some(-1.0)),
             (
                 "eu-central-longer-than-fifteen-bytes",
                 1,
                 Some(200),
                 Some(200),
+                Some(2.0),
             ),
-            ("eu2", 1, Some(300), Some(300)),
-            ("us", 1, Some(400), Some(400)),
-            ("us", 2, Some(500), Some(500)),
+            ("eu2", 1, Some(300), Some(300), None),
+            ("us", 1, Some(400), Some(400), Some(f64::INFINITY)),
+            ("us", 2, Some(500), Some(500), Some(-2.0)),
         ];
         fixture
             .install_indexed_table(
@@ -5959,16 +5975,18 @@ mod tests {
                     TableColumnConfig::new("seq", DataType::UInt64, false),
                     TableColumnConfig::new("v", DataType::Int64, true),
                     TableColumnConfig::new("w", DataType::Int64, true),
+                    TableColumnConfig::new("x", DataType::Float64, true),
                 ],
                 &["region", "seq"],
                 vec![],
                 rows.iter()
-                    .map(|&(region, seq, v, w)| KvRow {
+                    .map(|&(region, seq, v, w, x)| KvRow {
                         values: vec![
                             CellValue::Utf8(region.to_string()),
                             CellValue::UInt64(seq),
                             v.map_or(CellValue::Null, CellValue::Int64),
                             w.map_or(CellValue::Null, CellValue::Int64),
+                            x.map_or(CellValue::Null, CellValue::Float64),
                         ],
                     })
                     .collect(),
@@ -5977,16 +5995,29 @@ mod tests {
                     Arc::new(UInt64Array::from_iter_values(rows.iter().map(|row| row.1))),
                     Arc::new(Int64Array::from_iter(rows.iter().map(|row| row.2))),
                     Arc::new(Int64Array::from_iter(rows.iter().map(|row| row.3))),
+                    Arc::new(Float64Array::from_iter(rows.iter().map(|row| row.4))),
                 ],
             )
             .await;
+    }
+
+    /// Returns a region one byte too long for any key and the longest region a key can hold
+    /// only without `seq`. Neither has a range to read.
+    fn unstorable_regions() -> [String; 2] {
+        [
+            "x".repeat(exoware_sdk::keys::MAX_KEY_LEN - 1),
+            "x".repeat(exoware_sdk::keys::MAX_KEY_LEN),
+        ]
+    }
+
+    #[tokio::test]
+    async fn key_ranges_that_enforce_the_predicate_need_no_worker_filter() {
+        let fixture = Fixture::new().await;
+        install_regions(&fixture).await;
 
         // Each case lists its Reduce requests and the rows its ranges hold. The last two
         // regions are too long for any key, so they have no range to read.
-        let unstorable_regions = [
-            "x".repeat(exoware_sdk::keys::MAX_KEY_LEN - 1),
-            "x".repeat(exoware_sdk::keys::MAX_KEY_LEN),
-        ];
+        let unstorable_regions = unstorable_regions();
         for (predicate, requests, scanned_rows) in [
             ("region = 'eu'", 1, 5),
             ("region = 'eu' AND seq <= 2", 1, 3),
@@ -6047,13 +6078,125 @@ mod tests {
             }),
             "the pushed aggregate must report that its ranges enforce the predicate: {explain:?}"
         );
+    }
 
-        // The ranges of these predicates admit rows the predicate rejects, and the worker
-        // cannot read region or seq from the key, so aggregation stays in DataFusion.
+    /// Checks each case against native DataFusion. A case lists its predicate, its Reduce
+    /// requests, the rows its ranges hold, and the checks in its worker filter.
+    async fn check_worker_filters(
+        fixture: &Fixture,
+        table: &str,
+        projections: &[&str],
+        cases: &[(&str, usize, usize, Option<usize>)],
+    ) {
+        for &(predicate, requests, scanned_rows, checks) in cases {
+            for projection in projections {
+                let sql = format!("SELECT {projection} FROM {table} WHERE {predicate}");
+                fixture.check(&sql, requests).await;
+                assert_eq!(
+                    fixture.rows.scanned_rows.load(AtomicOrdering::Relaxed),
+                    scanned_rows,
+                    "the ranges must hold the rows their constraints accept: {sql}"
+                );
+                for request in fixture.rows.reductions.lock().unwrap().iter() {
+                    assert_eq!(
+                        request
+                            .params
+                            .filter
+                            .as_option()
+                            .map(|filter| filter.checks.len()),
+                        checks,
+                        "the worker must check exactly the constraints the ranges leave open: {sql}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_filters_check_only_the_constraints_key_ranges_leave_open() {
+        let fixture = Fixture::new().await;
+        install_regions(&fixture).await;
+
+        // The ranges enforce region, and seq where it follows one region, so the worker never
+        // needs those key columns. It checks the constraints on v, w, and x alone.
+        let unstorable = format!("region = '{}' AND v >= 0", unstorable_regions()[0]);
+        check_worker_filters(
+            &fixture,
+            "c",
+            &["COUNT(*), SUM(v)", "MAX(w), COUNT(x)"],
+            &[
+                ("region = 'eu' AND v >= 25", 1, 5, Some(1)),
+                ("region = 'eu' AND v >= 25 AND w IS NOT NULL", 1, 5, Some(2)),
+                ("region = 'eu' AND v IN (23, 26, 99)", 1, 5, Some(1)),
+                ("region = 'eu' AND seq <= 2 AND v IS NULL", 1, 3, Some(1)),
+                (
+                    "region = 'eu' AND seq > 0 AND seq < 3 AND w > 0",
+                    1,
+                    2,
+                    Some(1),
+                ),
+                ("region = 'eu' AND seq = 3 AND w = 8", 1, 1, Some(1)),
+                (
+                    "region = 'eu' AND seq IN (1, 3, 9) AND v >= 0",
+                    3,
+                    2,
+                    Some(1),
+                ),
+                ("region IN ('eu', 'us') AND v < 400", 2, 7, Some(1)),
+                ("region = 'eu' AND x >= 0.0", 1, 5, Some(1)),
+                ("region = 'eu' AND x > 0.0", 1, 5, Some(1)),
+                ("region = 'eu' AND x < 1.5 AND w IS NOT NULL", 1, 5, Some(2)),
+                ("region = 'eu' AND x IS NULL", 1, 5, Some(1)),
+                ("region = '' AND v = 1", 1, 1, Some(1)),
+                ("region = 'eu\0x' AND w <= 100", 1, 1, Some(1)),
+                ("region = 'missing' AND v >= 0", 1, 0, Some(1)),
+                (unstorable.as_str(), 0, 0, None),
+                ("v >= 25", 1, 13, Some(1)),
+                ("x >= 0.0 AND w IS NOT NULL", 1, 13, Some(2)),
+            ],
+        )
+        .await;
+        fixture
+            .check(
+                "SELECT w, COUNT(*), SUM(v) FROM c WHERE region = 'eu' AND v >= 25 \
+                 GROUP BY w ORDER BY w",
+                1,
+            )
+            .await;
+
+        // CASE arms that divide by the same zero share one argument, so the aggregate is
+        // reduced with a check on v alone.
+        fixture
+            .check(
+                "SELECT MIN(CASE WHEN v = 25 THEN x / -0.0 WHEN v = 26 THEN x / -0.0 END) \
+                 FROM c WHERE region = 'eu'",
+                1,
+            )
+            .await;
+
+        // Arms that divide by zeros of opposite sign give infinities of opposite sign, so they
+        // are different arguments and the aggregate stays in DataFusion.
+        let sql = "SELECT MIN(CASE WHEN v = 25 THEN x / 0.0 WHEN v = 26 THEN x / -0.0 END) \
+                   FROM c WHERE region = 'eu'";
+        fixture.rows.reductions.lock().unwrap().clear();
+        let native = values(&fixture.native, sql).await.unwrap();
+        assert_eq!(native, [[ScalarValue::Float64(Some(f64::NEG_INFINITY))]]);
+        assert_eq!(
+            values(fixture.context.datafusion(), sql).await.unwrap(),
+            native,
+            "{sql}"
+        );
+        assert!(
+            fixture.rows.reductions.lock().unwrap().is_empty(),
+            "arms with different values must not share one reducer argument: {sql}"
+        );
+
+        // The ranges of these predicates admit rows that fail a constraint on seq, and the
+        // worker cannot read seq from the key, so aggregation stays in DataFusion.
         for sql in [
             "SELECT COUNT(*), SUM(v) FROM c WHERE region IN ('eu', 'us') AND seq <= 2",
-            "SELECT COUNT(*), SUM(v) FROM c WHERE region = 'eu' AND v >= 25",
             "SELECT COUNT(*), SUM(v) FROM c WHERE seq <= 2",
+            "SELECT COUNT(*), SUM(v) FROM c WHERE seq = 1 AND v >= 1",
         ] {
             fixture.rows.reductions.lock().unwrap().clear();
             assert_eq!(
@@ -6063,9 +6206,86 @@ mod tests {
             );
             assert!(
                 fixture.rows.reductions.lock().unwrap().is_empty(),
-                "a predicate the ranges do not enforce must not lose its filter: {sql}"
+                "a constraint the ranges leave open must not lose its check: {sql}"
             );
         }
+
+        // Every key column of this table has a fixed width, so the worker can read the ones
+        // the ranges leave open: a column after a range or an IN list, and a column after an
+        // unconstrained one.
+        let grid: Vec<(i64, i64, i64)> = (0..3)
+            .flat_map(|a| (1..4).flat_map(move |b| (2..5).map(move |c| (a, b, c))))
+            .collect();
+        let floats = [
+            Some(f64::NAN),
+            Some(-0.0),
+            Some(0.0),
+            Some(1.5),
+            None,
+            Some(-1.0),
+            Some(f64::INFINITY),
+        ];
+        let value = |&(a, b, c): &(i64, i64, i64)| a * 100 + b * 10 + c;
+        let float = |idx: usize| floats[idx % floats.len()];
+        fixture
+            .install_indexed_table(
+                "grid",
+                vec![
+                    TableColumnConfig::new("a", DataType::Int64, false),
+                    TableColumnConfig::new("b", DataType::Int64, false),
+                    TableColumnConfig::new("c", DataType::Int64, false),
+                    TableColumnConfig::new("v", DataType::Int64, false),
+                    TableColumnConfig::new("x", DataType::Float64, true),
+                ],
+                &["a", "b", "c"],
+                vec![],
+                grid.iter()
+                    .enumerate()
+                    .map(|(idx, key)| KvRow {
+                        values: vec![
+                            CellValue::Int64(key.0),
+                            CellValue::Int64(key.1),
+                            CellValue::Int64(key.2),
+                            CellValue::Int64(value(key)),
+                            float(idx).map_or(CellValue::Null, CellValue::Float64),
+                        ],
+                    })
+                    .collect(),
+                vec![
+                    Arc::new(Int64Array::from_iter_values(grid.iter().map(|key| key.0))),
+                    Arc::new(Int64Array::from_iter_values(grid.iter().map(|key| key.1))),
+                    Arc::new(Int64Array::from_iter_values(grid.iter().map(|key| key.2))),
+                    Arc::new(Int64Array::from_iter_values(grid.iter().map(value))),
+                    Arc::new(Float64Array::from_iter((0..grid.len()).map(float))),
+                ],
+            )
+            .await;
+        check_worker_filters(
+            &fixture,
+            "grid",
+            &["COUNT(*), SUM(v)", "MIN(v), COUNT(x)"],
+            &[
+                ("a = 1 AND b = 2 AND c = 3", 1, 1, None),
+                ("a = 1 AND b = 2 AND c >= 3", 1, 2, None),
+                ("a = 1 AND v >= 123", 1, 9, Some(1)),
+                ("a = 1 AND b >= 2 AND c = 3", 1, 6, Some(1)),
+                ("a = 1 AND b IN (1, 3) AND c >= 3", 2, 6, Some(1)),
+                ("a IN (1, 2) AND b = 2", 2, 18, Some(1)),
+                ("a >= 1 AND b = 2 AND c = 3", 1, 18, Some(2)),
+                ("a = 1 AND c = 3", 1, 9, Some(1)),
+                ("b = 2", 1, 27, Some(1)),
+                ("a > 0 AND a < 2 AND b >= 2 AND v < 1000", 1, 6, Some(1)),
+                ("a = 1 AND b = 2 AND c >= 3 AND x >= 0.0", 1, 2, Some(1)),
+                (
+                    "a = 1 AND b = 2 AND c IN (2, 4) AND x IS NULL",
+                    2,
+                    2,
+                    Some(1),
+                ),
+                ("a = 2 AND b <= 2 AND x > 0.0 AND v >= 212", 1, 6, Some(2)),
+            ],
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -6078,7 +6298,7 @@ mod tests {
             ),
             (
                 "SELECT COUNT(*), SUM(amount) FROM orders WHERE id >= 2 AND status = 'open'",
-                Some(2),
+                Some(1),
             ),
             (
                 "SELECT COUNT(*), SUM(amount) FROM orders WHERE status = 'open'",

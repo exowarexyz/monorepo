@@ -112,14 +112,16 @@ DataFusion aggregation.
   index narrows the scanned range. Variable-width key columns, and key columns after
   them, have no fixed byte offset, so they are read from stored index values when
   available and otherwise fall back to native decoding. A filter on such a column needs
-  no worker check when the primary-key ranges enforce the whole predicate, as with
-  `region = 'eu'` on a primary key of `(region, seq)`.
+  no worker check when the primary-key ranges enforce it, as they do for
+  `region = 'eu'` on a primary key of `(region, seq)`. The worker then checks only the
+  other filters, such as `v >= 25` in `region = 'eu' AND v >= 25`.
 
 ### Semantics
 
 Workers apply each request's row predicate before updating aggregate state, because raw
-range bounds can include rows that scan-time key checks would exclude. A request carries
-no predicate when its primary-key ranges hold exactly the rows the filters accept.
+range bounds can include rows that scan-time key checks would exclude. A request over
+primary-key ranges carries only the filters those ranges do not enforce, and no predicate
+when they hold exactly the rows the filters accept.
 Workers evaluate expressions with DataFusion and Arrow, so results follow ordinary
 DataFusion semantics:
 
