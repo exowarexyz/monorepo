@@ -22,6 +22,7 @@ use crate::{
     builder::ProjectedBatchBuilder,
     codec::decode_primary_key_selected,
     filter::ScanAccessPlan,
+    nesting::{plan_statement, verify_predicate_nesting},
     predicate::QueryPredicate,
     proto::sql::v1::{
         Column as ProtoColumn, Index as ProtoIndex, IndexLayout as ProtoIndexLayout, QueryRequest,
@@ -29,7 +30,7 @@ use crate::{
         Table as ProtoTable, TablesRequest, TablesResponse,
     },
     schema::KvSchema,
-    types::{IndexLayout, ResolvedIndexSpec, TableModel},
+    types::{IndexLayout, ResolvedIndexSpec, TableModel, MAX_TABLE_NAME_LEN},
     SqlContext,
 };
 #[cfg(test)]
@@ -38,23 +39,30 @@ use connectrpc::{ConnectError, ConnectRpcService, RequestContext as Context, Ser
 use datafusion::{
     arrow::{
         datatypes::{DataType, SchemaRef},
+        error::ArrowError,
         ipc::writer::StreamWriter,
         record_batch::RecordBatch,
     },
     common::{
+        plan_err,
         tree_node::{TreeNode, TreeNodeRecursion},
         DFSchema, DataFusionError, Result as DataFusionResult, TableReference,
     },
     logical_expr::{
-        simplify::SimplifyContext, DdlStatement, Expr, ExprSchemable, LogicalPlan, Statement,
+        dml::InsertOp, simplify::SimplifyContext, DdlStatement, DmlStatement, Expr, ExprSchemable,
+        LogicalPlan, Statement, WriteOp,
     },
     optimizer::simplify_expressions::ExprSimplifier,
     physical_expr::PhysicalExpr,
-    physical_plan::filter::batch_filter,
+    physical_plan::{filter::batch_filter, SendableRecordBatchStream},
     prelude::SessionContext as DataFusionContext,
 };
 use exoware_sdk::{
     kv_codec::{decode_stored_row, Utf8},
+    proto::{
+        google::rpc::{bad_request::FieldViolation, BadRequest, ErrorInfo},
+        with_bad_request_detail, with_error_info_detail,
+    },
     selector::Selector,
     stream_filter::StreamFilter,
     PrefixedStoreClient, ReadSession, StoreBatch, StoreBatchEntry, StreamSubscription,
@@ -137,9 +145,9 @@ impl TableStream {
 /// Construct with [`SqlServer::new`], pass to [`sql_stack`] to mount
 /// on an axum router.
 pub struct SqlServer {
-    /// Shared context for all requests. `Query` reads through a per-request copy with its own
-    /// read session, while session commands such as `SET` and `CREATE FUNCTION` run here and
-    /// persist across requests.
+    /// Catalog, settings, functions, and prepared statements that every request starts from.
+    /// `Query` runs each statement on a copy with its own read session and rejects the
+    /// statements that would change this context, so only the embedder configures it.
     ctx: Arc<SqlContext>,
     /// Unique table names and subscription state in schema declaration order. A linear lookup
     /// suffices because a schema holds at most `MAX_TABLES` tables.
@@ -285,6 +293,10 @@ impl Service for SqlConnect {
     ) -> impl Future<Output = connectrpc::ServiceResult<SubscribeStream>> + Send {
         let server = self.server.clone();
         async move {
+            // Enforce the buf.validate lengths declared in stream.proto.
+            validate_field_length("table", request.table, 1, MAX_TABLE_NAME_LEN)?;
+            validate_field_length("where_sql", request.where_sql, 0, 4096)?;
+
             let table_name = request.table.to_string();
             let where_sql = request.where_sql.trim().to_string();
             let since = request.since_sequence_number.filter(|seq| *seq != 0);
@@ -334,52 +346,36 @@ impl Service for SqlConnect {
     ) -> impl Future<Output = connectrpc::ServiceResult<QueryResponse>> + Send {
         let server = self.server.clone();
         AssertUnwindSafe(async move {
+            // Enforce the buf.validate length declared in query.proto.
+            validate_field_length("sql", request.sql, 1, 65_535)?;
+
             let sql = request.sql.to_string();
             let min_sequence_number = request.min_sequence_number;
             let read_session = ReadSession::monotonic(server.store.clone(), min_sequence_number);
             let ctx = server.ctx.with_read_session(read_session.clone());
-            let plan = ctx
-                .datafusion()
-                .state()
-                .create_logical_plan(&sql)
+
+            // A statement is measured while it is parsed and planned, because everything after
+            // that recurses along its nesting.
+            let state = ctx.datafusion().state();
+            let plan = plan_statement(&state, &sql)
                 .await
                 .map_err(datafusion_error_to_connect)?;
+            verify_remote_plan(&plan).map_err(datafusion_error_to_connect)?;
 
-            // Session commands must outlive the request. Data reads keep the request's floor.
-            let execution_ctx = match &plan {
-                LogicalPlan::Statement(
-                    Statement::SetVariable(_)
-                    | Statement::ResetVariable(_)
-                    | Statement::Prepare(_)
-                    | Statement::Deallocate(_),
-                )
-                | LogicalPlan::Ddl(
-                    DdlStatement::CreateFunction(_) | DdlStatement::DropFunction(_),
-                ) => server.ctx.datafusion(),
-                _ => ctx.datafusion(),
-            };
-            let df = execution_ctx
+            // The frame holds the plan that runs. For an EXECUTE that is the statement the
+            // embedder prepared, which is held to the same rules as a statement sent directly.
+            let df = ctx
+                .datafusion()
                 .execute_logical_plan(plan)
                 .await
                 .map_err(datafusion_error_to_connect)?;
-            let mut batches = df
+            verify_remote_plan(df.logical_plan()).map_err(datafusion_error_to_connect)?;
+            let batches = df
                 .execute_stream()
                 .await
                 .map_err(datafusion_error_to_connect)?;
-            let mut writer = StreamWriter::try_new(Vec::new(), &batches.schema())
-                .map_err(|error| datafusion_error_to_connect(error.into()))?;
-            while let Some(batch) = batches
-                .try_next()
-                .await
-                .map_err(datafusion_error_to_connect)?
-            {
-                writer
-                    .write(&batch)
-                    .map_err(|error| datafusion_error_to_connect(error.into()))?;
-            }
-            let results = writer
-                .into_inner()
-                .map_err(|error| datafusion_error_to_connect(error.into()))?
+            let results = encode_query_results(batches, MAX_CONNECTRPC_BODY_BYTES)
+                .await?
                 .into();
 
             let sequence_number = read_session.evaluated_sequence();
@@ -394,6 +390,41 @@ impl Service for SqlConnect {
             result.unwrap_or_else(|_| Err(ConnectError::internal("SQL query execution panicked")))
         })
     }
+}
+
+/// Encodes query results as one Arrow IPC stream. Encoding fails with `resource_exhausted`
+/// as soon as the stream exceeds `limit` bytes. That early return drops the batch stream and
+/// so cancels the rest of the query.
+async fn encode_query_results(
+    mut batches: SendableRecordBatchStream,
+    limit: usize,
+) -> Result<Vec<u8>, ConnectError> {
+    let exceeded = || {
+        ConnectError::resource_exhausted(format!(
+            "query results exceed the {limit}-byte response limit"
+        ))
+    };
+    let mut writer = StreamWriter::try_new(Vec::new(), &batches.schema())
+        .map_err(|error| datafusion_error_to_connect(error.into()))?;
+    while let Some(batch) = batches
+        .try_next()
+        .await
+        .map_err(datafusion_error_to_connect)?
+    {
+        writer
+            .write(&batch)
+            .map_err(|error| datafusion_error_to_connect(error.into()))?;
+        if writer.get_ref().len() > limit {
+            return Err(exceeded());
+        }
+    }
+    let results = writer
+        .into_inner()
+        .map_err(|error| datafusion_error_to_connect(error.into()))?;
+    if results.len() > limit {
+        return Err(exceeded());
+    }
+    Ok(results)
 }
 
 type BatchEvaluator =
@@ -543,6 +574,72 @@ fn evaluate_batch(
     }))
 }
 
+/// Rejects remote statements that would read or write the server's files, change state that
+/// every caller shares, or write other than with `INSERT INTO`. Like DataFusion's
+/// `SQLOptions::verify_plan`, the check visits every node, including subqueries and the
+/// inputs of `EXPLAIN` and `PREPARE`.
+///
+/// The shared state is the catalog, the runtime environment, the settings, the functions,
+/// and the prepared statements. A caller has no session of its own, so a change to any of
+/// them would reach every other caller's statements. Embedders change them on the server's
+/// [`SqlContext`], and `EXECUTE` runs the statements they prepare there.
+///
+/// Both matches name every kind of plan and statement, so a kind that a DataFusion upgrade
+/// adds does not compile until it is classified here.
+fn verify_remote_plan(plan: &LogicalPlan) -> DataFusionResult<()> {
+    plan.apply_with_subqueries(|node| {
+        let what = match node {
+            LogicalPlan::Copy(_) => "COPY",
+            LogicalPlan::Ddl(DdlStatement::CreateExternalTable(_)) => "CREATE EXTERNAL TABLE",
+            LogicalPlan::Ddl(DdlStatement::CreateFunction(_)) => "CREATE FUNCTION",
+            LogicalPlan::Ddl(DdlStatement::DropFunction(_)) => "DROP FUNCTION",
+            LogicalPlan::Ddl(_) => "changing the catalog",
+            LogicalPlan::Dml(DmlStatement {
+                op: WriteOp::Insert(InsertOp::Append),
+                ..
+            }) => return Ok(TreeNodeRecursion::Continue),
+            LogicalPlan::Dml(_) => "a write other than INSERT INTO",
+            LogicalPlan::Statement(statement) => match statement {
+                Statement::SetVariable(_) => "SET",
+                Statement::ResetVariable(_) => "RESET",
+                Statement::Prepare(_) => "PREPARE",
+                Statement::Deallocate(_) => "DEALLOCATE",
+                Statement::TransactionStart(_) => "starting a transaction",
+                Statement::TransactionEnd(_) => "ending a transaction",
+                // DataFusion runs the prepared statement only of an EXECUTE that is the whole
+                // plan, and the caller checks the statement that one runs.
+                Statement::Execute(_) if std::ptr::eq(node, plan) => {
+                    return Ok(TreeNodeRecursion::Continue)
+                }
+                Statement::Execute(_) => "EXECUTE inside another statement",
+            },
+            LogicalPlan::Projection(_)
+            | LogicalPlan::Filter(_)
+            | LogicalPlan::Window(_)
+            | LogicalPlan::Aggregate(_)
+            | LogicalPlan::Sort(_)
+            | LogicalPlan::Join(_)
+            | LogicalPlan::Repartition(_)
+            | LogicalPlan::Union(_)
+            | LogicalPlan::TableScan(_)
+            | LogicalPlan::EmptyRelation(_)
+            | LogicalPlan::Subquery(_)
+            | LogicalPlan::SubqueryAlias(_)
+            | LogicalPlan::Limit(_)
+            | LogicalPlan::Values(_)
+            | LogicalPlan::Explain(_)
+            | LogicalPlan::Analyze(_)
+            | LogicalPlan::Extension(_)
+            | LogicalPlan::Distinct(_)
+            | LogicalPlan::DescribeTable(_)
+            | LogicalPlan::Unnest(_)
+            | LogicalPlan::RecursiveQuery(_) => return Ok(TreeNodeRecursion::Continue),
+        };
+        plan_err!("{what} is not supported by the SQL service")
+    })
+    .map(|_| ())
+}
+
 fn compile_subscription_predicate(
     ctx: &DataFusionContext,
     schema: &SchemaRef,
@@ -552,6 +649,8 @@ fn compile_subscription_predicate(
     if where_sql.trim().is_empty() {
         return Ok(None);
     }
+    let state = ctx.state();
+    verify_predicate_nesting(&state, where_sql)?;
     let df_schema = DFSchema::try_from_qualified_schema(TableReference::bare(table_name), schema)?;
     let expression = ctx.parse_sql_expr(where_sql, &df_schema)?;
     expression.apply(|expr| {
@@ -575,7 +674,6 @@ fn compile_subscription_predicate(
         }
         Ok(TreeNodeRecursion::Continue)
     })?;
-    let state = ctx.state();
     let context = SimplifyContext::builder()
         .with_schema(Arc::new(df_schema.clone()))
         .with_config_options(state.config_options().clone())
@@ -599,6 +697,8 @@ fn compile_subscription_predicate(
 
 fn datafusion_error_to_connect(err: DataFusionError) -> ConnectError {
     // DataFusion wraps planner errors in Diagnostic and Context layers, so classify the root cause.
+    // Arithmetic and conversion failures come from the values a statement computes, so they are the
+    // caller's errors.
     match err.find_root() {
         DataFusionError::Plan(msg)
         | DataFusionError::Configuration(msg)
@@ -609,6 +709,18 @@ fn datafusion_error_to_connect(err: DataFusionError) -> ConnectError {
         DataFusionError::SchemaError(schema_error, _) => {
             ConnectError::invalid_argument(schema_error.to_string())
         }
+        DataFusionError::ArrowError(arrow_error, _)
+            if matches!(
+                **arrow_error,
+                ArrowError::DivideByZero
+                    | ArrowError::ArithmeticOverflow(_)
+                    | ArrowError::CastError(_)
+                    | ArrowError::ParseError(_)
+            ) =>
+        {
+            ConnectError::invalid_argument(arrow_error.to_string())
+        }
+        DataFusionError::ResourcesExhausted(msg) => ConnectError::resource_exhausted(msg.clone()),
         DataFusionError::External(external) => {
             match external.downcast_ref::<exoware_sdk::ClientError>() {
                 Some(client_error) => client_error_to_connect(client_error),
@@ -627,10 +739,52 @@ fn client_error_to_connect(err: &exoware_sdk::ClientError) -> ConnectError {
     }
 }
 
+/// Rejects a string field whose length, in Unicode code points as buf.validate counts it, is
+/// outside `min_len..=max_len`. The error carries `BadRequest` and `ErrorInfo` details shaped
+/// like the Store's request validation errors.
+fn validate_field_length(
+    field: &str,
+    value: &str,
+    min_len: usize,
+    max_len: usize,
+) -> Result<(), ConnectError> {
+    let len = value.chars().count();
+    if (min_len..=max_len).contains(&len) {
+        return Ok(());
+    }
+    let description = format!("{field} must have {min_len} to {max_len} characters, got {len}");
+    let error = with_bad_request_detail(
+        ConnectError::invalid_argument(format!("{field} length is outside SQL service limits")),
+        BadRequest {
+            field_violations: vec![FieldViolation {
+                field: field.to_string(),
+                description: description.clone(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    );
+    Err(with_error_info_detail(
+        error,
+        ErrorInfo {
+            reason: "INVALID_FIELD_LENGTH".to_string(),
+            domain: "sql".to_string(),
+            metadata: [
+                ("min_len".to_string(), min_len.to_string()),
+                ("max_len".to_string(), max_len.to_string()),
+                ("description".to_string(), description),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        },
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TableColumnConfig;
+    use crate::{types::KvTable, TableColumnConfig};
     use axum::serve::{Listener, ListenerExt};
     use buffa::Message;
     use datafusion::{
@@ -644,8 +798,9 @@ mod tests {
             ipc::reader::StreamReader,
             record_batch::RecordBatchOptions,
         },
-        datasource::MemTable,
+        datasource::{source_as_provider, MemTable},
         logical_expr::{create_udf, ColumnarValue, Volatility},
+        physical_plan::stream::RecordBatchStreamAdapter,
     };
     use exoware_sdk::{transport::set_tcp_nodelay, StoreClient};
     use futures::{FutureExt, StreamExt};
@@ -693,6 +848,81 @@ mod tests {
             assert_eq!(server.stream(name).unwrap().model.columns[0].name, name);
         }
         assert!(server.stream("unknown").is_err());
+    }
+
+    #[tokio::test]
+    async fn declared_table_names_are_exact_on_every_surface() {
+        // Parsed as SQL, `Orders` would fold to `orders`, the dotted names would split into a
+        // schema and a table, and the last name would lose its quotes.
+        let names = [
+            "orders",
+            "Orders",
+            "Order Events",
+            "a.b",
+            "public.Orders",
+            "\"Orders\"",
+        ];
+        let mut schema = KvSchema::new(StoreClient::new("http://127.0.0.1:1").unprefixed());
+        for name in names {
+            schema = schema
+                .table(
+                    name,
+                    vec![TableColumnConfig::new("id", DataType::Int64, false)],
+                    vec!["id".into()],
+                    vec![],
+                )
+                .unwrap();
+        }
+        let server = SqlServer::new(schema).unwrap();
+
+        // The prefix of the table a query scans tells which declared table its name reached.
+        let scanned_prefix = async |sql: String| {
+            let state = server.context().datafusion().state();
+            let plan = state.create_logical_plan(&sql).await.unwrap();
+            let mut prefix = None;
+            plan.apply(|node| {
+                if let LogicalPlan::TableScan(scan) = node {
+                    let provider = source_as_provider(&scan.source)?;
+                    let table = provider.downcast_ref::<KvTable>().unwrap();
+                    prefix = Some(table.model.table_prefix);
+                }
+                Ok(TreeNodeRecursion::Continue)
+            })
+            .unwrap();
+            prefix.unwrap()
+        };
+
+        // `Tables` lists the declared names.
+        let listed: Vec<_> = server
+            .describe_tables()
+            .into_iter()
+            .map(|table| table.name)
+            .collect();
+        assert_eq!(listed, names);
+
+        for (position, name) in names.into_iter().enumerate() {
+            let prefix = position as u8;
+
+            // `Subscribe` finds the table by its declared name, and a predicate qualifies
+            // columns with that name as a quoted identifier.
+            let stream = server.stream(name).unwrap();
+            assert_eq!(stream.model.table_prefix, prefix, "{name}");
+            let quoted = format!("\"{}\"", name.replace('"', "\"\""));
+            compile_subscription_predicate(
+                server.context().datafusion(),
+                &stream.model.schema,
+                name,
+                &format!("{quoted}.id = 1"),
+            )
+            .unwrap_or_else(|error| panic!("the qualifier {quoted} must resolve: {error}"));
+
+            // A query reaches the same table through the same quoted identifier.
+            let sql = format!("SELECT id FROM {quoted} WHERE {quoted}.id = 1");
+            assert_eq!(scanned_prefix(sql).await, prefix, "{name}");
+        }
+
+        // SQL folds an unquoted identifier to lower case, so it names another table.
+        assert_eq!(scanned_prefix("SELECT id FROM Orders".into()).await, 0);
     }
 
     #[test]
@@ -1028,6 +1258,448 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remote_writes_other_than_insert_into_are_rejected() {
+        let ctx = DataFusionContext::new();
+        for name in ["target", "source"] {
+            let batch = predicate_batch();
+            ctx.register_table(
+                name,
+                Arc::new(MemTable::try_new(batch.schema(), vec![vec![batch]]).unwrap()),
+            )
+            .unwrap();
+        }
+        let verify = async |sql: &str| {
+            let plan = ctx.state().create_logical_plan(sql).await.unwrap();
+            verify_remote_plan(&plan)
+        };
+
+        // Writes other than INSERT INTO are rejected, even INSERT OVERWRITE and REPLACE INTO.
+        for sql in [
+            "DELETE FROM target WHERE id = 1",
+            "UPDATE target SET status = 'x' WHERE id = 1",
+            "TRUNCATE TABLE target",
+            "MERGE INTO target USING source ON target.id = source.id WHEN MATCHED THEN DELETE",
+            "INSERT OVERWRITE target VALUES (5, 'x')",
+            "REPLACE INTO target VALUES (5, 'x')",
+        ] {
+            assert!(verify(sql).await.is_err(), "{sql}");
+        }
+
+        // INSERT INTO the same table passes, so the rejections come from the write kind.
+        verify("INSERT INTO target VALUES (5, 'x')").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn remote_statements_that_change_shared_state_are_rejected() {
+        let ctx = DataFusionContext::new();
+        let batch = predicate_batch();
+        ctx.register_table(
+            "target",
+            Arc::new(MemTable::try_new(batch.schema(), vec![vec![batch]]).unwrap()),
+        )
+        .unwrap();
+        let verify = async |sql: &str| {
+            let plan = ctx.state().create_logical_plan(sql).await.unwrap();
+            verify_remote_plan(&plan)
+        };
+
+        // Each statement changes a setting, a function, or a prepared statement that every
+        // caller would see, or starts or ends a transaction, alone or inside another statement.
+        for sql in [
+            "SET datafusion.execution.target_partitions = 2048",
+            "SET datafusion.execution.batch_size = 17",
+            "SET TIME ZONE = 'America/New_York'",
+            "RESET datafusion.execution.target_partitions",
+            "PREPARE item AS SELECT id FROM target",
+            "DEALLOCATE item",
+            "CREATE FUNCTION double(BIGINT) RETURNS BIGINT RETURN $1 + $1",
+            "DROP FUNCTION count",
+            "START TRANSACTION",
+            "COMMIT",
+            "ROLLBACK",
+            "EXPLAIN SET datafusion.execution.batch_size = 17",
+            "EXPLAIN PREPARE item AS SELECT id FROM target",
+            "PREPARE setter AS SET datafusion.execution.batch_size = 17",
+            "EXPLAIN EXECUTE item(1)",
+            "EXPLAIN ANALYZE EXECUTE item(1)",
+        ] {
+            assert!(verify(sql).await.is_err(), "{sql}");
+        }
+
+        // Statements that read, insert, or run a prepared statement pass.
+        for sql in [
+            "SELECT count(*) FROM target",
+            "EXPLAIN ANALYZE SELECT id FROM target",
+            "DESCRIBE target",
+            "INSERT INTO target VALUES (5, 'x')",
+            "EXECUTE item(1)",
+        ] {
+            verify(sql)
+                .await
+                .unwrap_or_else(|error| panic!("{sql}: {error}"));
+        }
+    }
+
+    /// Serves `server` on a local port and returns a client for it.
+    async fn serve(
+        server: Arc<SqlServer>,
+    ) -> (
+        crate::proto::sql::v1::ServiceClient<connectrpc::client::HttpClient>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .tap_io(set_tcp_nodelay);
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().fallback_service(sql_stack(server));
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = crate::proto::sql::v1::ServiceClient::new(
+            connectrpc::client::HttpClient::plaintext(),
+            connectrpc::client::ClientConfig::new(format!("http://{address}").parse().unwrap()),
+        );
+        (client, task)
+    }
+
+    #[tokio::test]
+    async fn query_rejects_statements_nested_past_the_limits() {
+        use crate::nesting::{
+            FILTER_COST, JOIN_COST, MAX_QUERY_DEPTH, MAX_RELATIONS, MAX_TYPE_DEPTH, NESTING_BUDGET,
+            NESTING_COST, OPERATOR_COST, PLAN_BUDGET,
+        };
+
+        let schema = KvSchema::new(StoreClient::new("http://127.0.0.1:1").unprefixed());
+        let server = Arc::new(SqlServer::new(schema).unwrap());
+        let batch = predicate_batch();
+        server
+            .context()
+            .register_table(
+                "items",
+                Arc::new(MemTable::try_new(batch.schema(), vec![vec![batch]]).unwrap()),
+            )
+            .unwrap();
+        let (client, task) = serve(server).await;
+        let query = async |sql: String| {
+            client
+                .query(QueryRequest {
+                    sql,
+                    ..Default::default()
+                })
+                .await
+        };
+        let wrap = |prefix: &str, body: &str, suffix: &str, times: usize| {
+            format!("{}{body}{}", prefix.repeat(times), suffix.repeat(times))
+        };
+
+        // Each shape builds a statement from a count, with the largest count the limits
+        // accept. The statement at that count is planned and run, on a 2 MiB test thread like
+        // the 2 MiB stack of a server worker, and one more is rejected.
+        let operators = (NESTING_BUDGET - NESTING_COST) / OPERATOR_COST;
+        let levels = NESTING_BUDGET / NESTING_COST - 1;
+        let keys = (NESTING_BUDGET - 2 * NESTING_COST - 2 * OPERATOR_COST) / OPERATOR_COST + 1;
+        let whens = (NESTING_BUDGET - 2 * NESTING_COST - OPERATOR_COST) / OPERATOR_COST;
+        // A projection and the relation it reads enclose each chain of plan steps.
+        let steps = PLAN_BUDGET - 2;
+        // The subquery below is a name, a projection of one level, an aggregation of one
+        // level, a filter of one level, and a named table.
+        let subquery = 1 + 2 + (JOIN_COST + 1) + (FILTER_COST + 1) + 2;
+        type Shape<'a> = Box<dyn Fn(usize) -> String + 'a>;
+        let shapes: [(usize, Shape<'_>); 23] = [
+            (
+                operators,
+                Box::new(|n| format!("SELECT id{} FROM items", "+id".repeat(n))),
+            ),
+            (
+                operators,
+                Box::new(|n| format!("SELECT status{} FROM items", " || ','".repeat(n))),
+            ),
+            (
+                operators,
+                Box::new(|n| {
+                    let terms = vec!["id > 0"; n].join(" AND ");
+                    format!("SELECT id FROM items WHERE {terms}")
+                }),
+            ),
+            (
+                keys,
+                Box::new(|n| {
+                    let keys: Vec<_> = (0..n)
+                        .map(|key| format!("(id = {key} AND status = '{key}')"))
+                        .collect();
+                    format!("SELECT id FROM items WHERE {}", keys.join(" OR "))
+                }),
+            ),
+            (
+                levels,
+                Box::new(|n| format!("SELECT {} FROM items", wrap("abs(", "id", ")", n))),
+            ),
+            (
+                levels,
+                Box::new(|n| format!("SELECT {} FROM items", wrap("(", "id", ")", n))),
+            ),
+            (
+                whens,
+                Box::new(|n| {
+                    let whens: String = (0..n)
+                        .map(|when| format!(" WHEN id = {when} THEN false"))
+                        .collect();
+                    format!("SELECT CASE{whens} END FROM items")
+                }),
+            ),
+            (
+                steps,
+                Box::new(|n| format!("SELECT 1{}", " UNION ALL SELECT 1".repeat(n))),
+            ),
+            (
+                steps / (JOIN_COST + 1),
+                Box::new(|n| {
+                    let more = " UNION SELECT id FROM items".repeat(n);
+                    format!("SELECT id FROM items{more}")
+                }),
+            ),
+            (
+                steps / (2 * JOIN_COST),
+                Box::new(|n| {
+                    let more = " INTERSECT SELECT id FROM items".repeat(n);
+                    format!("SELECT id FROM items{more}")
+                }),
+            ),
+            (
+                (steps - 1) / (JOIN_COST + 1),
+                Box::new(|n| {
+                    let joins: String = (1..=n)
+                        .map(|i| format!(" JOIN items a{i} ON a{i}.id = a0.id"))
+                        .collect();
+                    format!("SELECT a0.id FROM items a0{joins}")
+                }),
+            ),
+            (
+                steps / 2,
+                Box::new(|n| {
+                    let tables: String = (1..n)
+                        .map(|i| format!(", c{i} AS (SELECT id FROM c{})", i - 1))
+                        .collect();
+                    format!(
+                        "WITH c0 AS (SELECT id FROM items){tables} SELECT id FROM c{}",
+                        n - 1
+                    )
+                }),
+            ),
+            (
+                steps / 3,
+                Box::new(|n| {
+                    let tables: String = (1..n)
+                        .map(|i| format!(", c{i} AS (SELECT id + 1 AS id FROM c{})", i - 1))
+                        .collect();
+                    format!(
+                        "WITH c0 AS (SELECT id + 1 AS id FROM items){tables} SELECT id FROM c{}",
+                        n - 1
+                    )
+                }),
+            ),
+            (
+                steps,
+                Box::new(|n| {
+                    let renames: String = (0..n).map(|i| format!(" |> AS a{i}")).collect();
+                    format!("SELECT id FROM items{renames}")
+                }),
+            ),
+            (
+                steps / (FILTER_COST + 1),
+                Box::new(|n| {
+                    let filters: String = (0..n).map(|i| format!(" |> WHERE id > -{i}")).collect();
+                    format!("SELECT id FROM items{filters}")
+                }),
+            ),
+            (
+                steps / (JOIN_COST + 2),
+                Box::new(|n| {
+                    let windows: Vec<_> = (0..n)
+                        .map(|i| format!("count(*) OVER (ORDER BY id + {i})"))
+                        .collect();
+                    format!("SELECT {} FROM items", windows.join(", "))
+                }),
+            ),
+            (
+                (PLAN_BUDGET - 1 - subquery) / JOIN_COST,
+                Box::new(|n| {
+                    let subqueries: Vec<_> = (0..n)
+                        .map(|i| format!("(SELECT max(i.id) + {i} FROM items i WHERE i.id = o.id)"))
+                        .collect();
+                    format!("SELECT {} FROM items o", subqueries.join(", "))
+                }),
+            ),
+            (
+                MAX_RELATIONS.ilog(4) as usize,
+                Box::new(|n| {
+                    let tables: String = (1..=n)
+                        .map(|i| {
+                            let last = i - 1;
+                            format!(
+                                ", c{i} AS (SELECT a.x FROM c{last} a, c{last} b, c{last} c, \
+                                 c{last} d)"
+                            )
+                        })
+                        .collect();
+                    format!("WITH c0 AS (SELECT 1 AS x){tables} SELECT count(*) FROM c{n}")
+                }),
+            ),
+            (
+                MAX_QUERY_DEPTH - 1,
+                Box::new(|n| wrap("SELECT id FROM (", "SELECT id FROM items", ") d", n)),
+            ),
+            (
+                MAX_QUERY_DEPTH - 1,
+                Box::new(|n| format!("SELECT {}", wrap("(SELECT ", "max(id) FROM items", ")", n))),
+            ),
+            (
+                MAX_TYPE_DEPTH,
+                Box::new(|n| format!("SELECT CAST(NULL AS INT{})", "[]".repeat(n))),
+            ),
+            (
+                MAX_TYPE_DEPTH,
+                Box::new(|n| format!("SELECT CAST(NULL AS {})", wrap("ARRAY<", "INT", ">", n))),
+            ),
+            (
+                MAX_TYPE_DEPTH,
+                Box::new(|n| format!("SELECT arrow_cast(1, '{}')", wrap("List(", "Int64", ")", n))),
+            ),
+        ];
+        for (accepted, shape) in shapes {
+            let sql = shape(accepted);
+            query(sql.clone())
+                .await
+                .unwrap_or_else(|error| panic!("{sql:.60} must run: {error}"));
+            let sql = shape(accepted + 1);
+            let error = query(sql.clone()).await.unwrap_err();
+            assert_eq!(
+                error.code,
+                connectrpc::ErrorCode::InvalidArgument,
+                "{sql:.60}: {error}"
+            );
+        }
+
+        // Each statement is far past a limit. Planning or parsing it overflowed the stack or
+        // did not finish, and the second is as long as a request may be.
+        let whens: String = (0..800)
+            .map(|when| format!(" WHEN id = {when} THEN false"))
+            .collect();
+        let fan: String = (1..=20)
+            .map(|i| {
+                let last = i - 1;
+                format!(", c{i} AS (SELECT a.x FROM c{last} a, c{last} b, c{last} c)")
+            })
+            .collect();
+        for (sql, what) in [
+            (
+                format!("SELECT id{} FROM items", "+id".repeat(2_047)),
+                "expressions nested",
+            ),
+            (
+                format!("SELECT 1{}", "+1".repeat(32_763)),
+                "expressions nested",
+            ),
+            (
+                format!("SELECT CASE{whens} END FROM items"),
+                "expressions nested",
+            ),
+            (
+                format!("SELECT 1{}", " UNION ALL SELECT 1".repeat(3_000)),
+                "nested more than",
+            ),
+            (
+                format!("SELECT 1 FROM items{}", ", items".repeat(8_000)),
+                "relations",
+            ),
+            (
+                format!("WITH c0 AS (SELECT 1 AS x){fan} SELECT count(*) FROM c20"),
+                "relations",
+            ),
+            (
+                format!("SELECT 1 AS x{}", " |> WHERE true".repeat(4_500)),
+                "plans nested",
+            ),
+            (
+                format!(
+                    "WITH c0 AS (SELECT id FROM items){} SELECT id FROM c1500",
+                    (1..=1_500)
+                        .map(|i| format!(", c{i} AS (SELECT id FROM c{})", i - 1))
+                        .collect::<String>()
+                ),
+                "plans nested",
+            ),
+            (
+                format!(
+                    "SELECT {} FROM items o",
+                    (0..1_000)
+                        .map(|i| format!("(SELECT max(i.id) + {i} FROM items i WHERE i.id = o.id)"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                "plans nested",
+            ),
+            (
+                format!(
+                    "{}SELECT 1{}",
+                    "IF true THEN ".repeat(45),
+                    "; END IF".repeat(45)
+                ),
+                "statements nested",
+            ),
+            (
+                format!("{}SELECT 1", "EXPLAIN ".repeat(100)),
+                "statements nested",
+            ),
+            (
+                format!("SELECT NULL{}", "['a']".repeat(1_000)),
+                "data types nested",
+            ),
+            (
+                format!("SELECT CAST(NULL AS INT{})", "[]".repeat(1_577)),
+                "data types nested",
+            ),
+            (
+                format!("SELECT CAST(NULL AS {})", wrap("ARRAY<", "INT", ">", 3_583)),
+                "data types nested",
+            ),
+            (
+                format!(
+                    "SELECT CAST(NULL AS {})",
+                    wrap("STRUCT<a ", "INT", ">", 1_358)
+                ),
+                "data types nested",
+            ),
+            (
+                format!(
+                    "SELECT arrow_cast(1, '{}')",
+                    wrap("List(", "Int64", ")", 1_577)
+                ),
+                "data types nested",
+            ),
+            (
+                "SELECT arrow_cast(1, repeat('List(', 3000) || 'Int8' || repeat(')', 3000))"
+                    .to_string(),
+                "string literal",
+            ),
+        ] {
+            let error = query(sql.clone()).await.unwrap_err();
+            assert_eq!(
+                error.code,
+                connectrpc::ErrorCode::InvalidArgument,
+                "{sql:.60}: {error}"
+            );
+            let message = error.message.unwrap_or_default();
+            assert!(message.contains(what), "{sql:.60}: {message}");
+        }
+
+        // The server still answers.
+        query("SELECT count(*) FROM items".to_string())
+            .await
+            .unwrap();
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn query_rpc_returns_internal_on_count_overflow_and_remains_usable() {
         use crate::{proto::sql::v1::ServiceClient, TableColumnConfig};
         use buffa::Message;
@@ -1278,6 +1950,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_results_stop_at_the_encoded_size_limit() {
+        // Encoding abandons the stream at the first batch that passes the limit.
+        let batch = RecordBatch::try_from_iter([(
+            "value",
+            Arc::new(Int64Array::from_iter_values(0..1024)) as ArrayRef,
+        )])
+        .unwrap();
+        let pulled = Arc::new(AtomicUsize::new(0));
+        let batches = stream::iter((0..3).map({
+            let (batch, pulled) = (batch.clone(), pulled.clone());
+            move |_| {
+                pulled.fetch_add(1, Ordering::Relaxed);
+                Ok(batch.clone())
+            }
+        }));
+        let batches = Box::pin(RecordBatchStreamAdapter::new(batch.schema(), batches));
+        let Err(error) = encode_query_results(batches, 1024).await else {
+            panic!("an 8 KiB batch must not encode under a 1 KiB limit");
+        };
+        assert_eq!(error.code, connectrpc::ErrorCode::ResourceExhausted);
+        assert_eq!(pulled.load(Ordering::Relaxed), 1);
+
+        // The limit covers the complete stream, including its end-of-stream marker.
+        let ctx = DataFusionContext::new();
+        let encode = async |limit| {
+            let batches = ctx
+                .sql("SELECT value FROM generate_series(1, 100000)")
+                .await
+                .unwrap()
+                .execute_stream()
+                .await
+                .unwrap();
+            encode_query_results(batches, limit).await
+        };
+        let results = encode(MAX_CONNECTRPC_BODY_BYTES).await.unwrap();
+        let rows: usize = StreamReader::try_new(results.as_slice(), None)
+            .unwrap()
+            .map(|batch| batch.unwrap().num_rows())
+            .sum();
+        assert_eq!(rows, 100_000);
+        assert_eq!(encode(results.len()).await.unwrap(), results);
+        let Err(error) = encode(results.len() - 1).await else {
+            panic!("a stream one byte longer than its limit must not encode");
+        };
+        assert_eq!(error.code, connectrpc::ErrorCode::ResourceExhausted);
+    }
+
+    #[tokio::test]
     async fn query_parse_errors_map_to_invalid_argument() {
         let ctx = DataFusionContext::new();
         let DataFusionError::SQL(parser_error, _) = ctx.sql("SELECT FROM").await.unwrap_err()
@@ -1327,6 +2047,24 @@ mod tests {
                 "{sql}"
             );
         }
+    }
+
+    #[test]
+    fn wrapped_resource_exhaustion_maps_to_resource_exhausted() {
+        let error =
+            DataFusionError::ResourcesExhausted("memory pool is full".into()).context("sorting");
+        assert_eq!(
+            datafusion_error_to_connect(error).code,
+            connectrpc::ErrorCode::ResourceExhausted
+        );
+    }
+
+    #[test]
+    fn field_lengths_count_code_points() {
+        // Each "é" is one code point encoded in two bytes.
+        assert!(validate_field_length("table", &"é".repeat(255), 1, 255).is_ok());
+        let error = validate_field_length("table", &"é".repeat(256), 1, 255).unwrap_err();
+        assert_eq!(error.code, connectrpc::ErrorCode::InvalidArgument);
     }
 
     enum ControlledEvent {
@@ -1592,6 +2330,50 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn subscription_predicates_nest_up_to_the_limits() {
+        use crate::nesting::{MAX_TYPE_DEPTH, NESTING_BUDGET, NESTING_COST, OPERATOR_COST};
+
+        let ctx = DataFusionContext::new();
+        let batch = predicate_batch();
+        let compile =
+            |sql: &str| compile_subscription_predicate(&ctx, &batch.schema(), "orders", sql);
+
+        // The comparison is one more operator above the chain.
+        let operators = (NESTING_BUDGET - NESTING_COST) / OPERATOR_COST;
+        let chain = |operators: usize| format!("id{} > 0", "+1".repeat(operators));
+        let predicate = compile(&chain(operators - 1)).unwrap().unwrap();
+        assert_eq!(matching_ids(&predicate, &batch), vec![1, 2, 3, 4]);
+        for (sql, what) in [
+            (chain(operators), "expressions nested"),
+            // The longest predicate a subscription may carry.
+            (chain(2_043), "expressions nested"),
+            (
+                format!("id IN ({})", "SELECT 1 UNION ALL ".repeat(200) + "SELECT 1"),
+                "nested more than",
+            ),
+            (
+                format!("status{} IS NULL", "['a']".repeat(800)),
+                "data types nested",
+            ),
+            (
+                format!("CAST(id AS INT{}) IS NULL", "[]".repeat(MAX_TYPE_DEPTH + 1)),
+                "data types nested",
+            ),
+            (
+                format!(
+                    "arrow_cast(id, '{}Int8{}') IS NULL",
+                    "List(".repeat(600),
+                    ")".repeat(600)
+                ),
+                "data types nested",
+            ),
+        ] {
+            let error = compile(&sql).unwrap_err().to_string();
+            assert!(error.contains(what), "{sql:.40}: {error}");
+        }
     }
 
     #[test]

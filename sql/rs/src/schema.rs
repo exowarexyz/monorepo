@@ -3,10 +3,16 @@ use async_trait::async_trait;
 use datafusion::{
     arrow::datatypes::SchemaRef,
     catalog::Session,
-    common::{tree_node::TreeNode, DataFusionError, Result as DataFusionResult, SchemaExt},
+    common::{
+        tree_node::TreeNode, DataFusionError, Result as DataFusionResult, SchemaExt, TableReference,
+    },
     datasource::{sink::DataSinkExec, TableProvider},
     logical_expr::{dml::InsertOp, Expr, TableProviderFilterPushDown, TableType},
-    physical_plan::ExecutionPlan,
+    physical_expr::{
+        expressions::{cast, Column},
+        PhysicalExpr,
+    },
+    physical_plan::{projection::ProjectionExec, ExecutionPlan},
 };
 use exoware_sdk::{kv_codec::decode_stored_row, PrefixedStoreClient};
 use std::sync::Arc;
@@ -32,6 +38,16 @@ impl KvSchema {
         }
     }
 
+    /// Adds a table. `name` is the table's exact, case-sensitive name in SQL, in the `Tables`
+    /// and `Subscribe` RPCs, and in this crate's APIs. It has 1 to 255 characters, the range a
+    /// `Subscribe` request carries.
+    ///
+    /// In SQL, a double-quoted identifier always names the table. The quotes are optional for
+    /// a lower-case identifier, because SQL folds unquoted identifiers to lower case.
+    ///
+    /// DataFusion parses a table name passed as a string the same way, for example in
+    /// [`SqlContext::table`] and `DataFrame::write_table`. Double-quote the name there too, or
+    /// pass `TableReference::bare(name)` where a reference is accepted.
     pub fn table(
         mut self,
         name: impl Into<String>,
@@ -40,6 +56,11 @@ impl KvSchema {
         index_specs: Vec<IndexSpec>,
     ) -> DataFusionResult<Self> {
         let name = name.into();
+        if !(1..=MAX_TABLE_NAME_LEN).contains(&name.chars().count()) {
+            return Err(DataFusionError::Plan(format!(
+                "table name must have 1 to {MAX_TABLE_NAME_LEN} characters"
+            )));
+        }
         if self.tables.iter().any(|(existing, _)| existing == &name) {
             return Err(DataFusionError::Plan(format!(
                 "duplicate table name '{name}'"
@@ -105,8 +126,11 @@ impl KvSchema {
 
     /// Registers the tables in a SQL context.
     pub(crate) fn register_all(self, ctx: &SqlContext) -> DataFusionResult<()> {
+        // A declared name is the table's exact name, so each table is registered under a bare
+        // reference. DataFusion parses a plain string as SQL, folding its case and splitting it on
+        // dots.
         for (name, table) in self.tables {
-            ctx.register_table(name, table)?;
+            ctx.register_table(TableReference::bare(name), table)?;
         }
         Ok(())
     }
@@ -373,18 +397,22 @@ impl TableProvider for KvTable {
         filters
             .iter()
             .map(|expr| {
-                let relational = expr.exists(|node| {
-                    Ok(matches!(
-                        node,
+                // The scan evaluates filters synchronously on its own batches. Subqueries, outer
+                // references, unnest, and async functions need DataFusion operators, so filters
+                // using them stay above the scan.
+                let unsupported = expr.exists(|node| {
+                    Ok(match node {
                         Expr::ScalarSubquery(_)
-                            | Expr::InSubquery(_)
-                            | Expr::Exists(_)
-                            | Expr::SetComparison(_)
-                            | Expr::OuterReferenceColumn(..)
-                            | Expr::Unnest(_)
-                    ))
+                        | Expr::InSubquery(_)
+                        | Expr::Exists(_)
+                        | Expr::SetComparison(_)
+                        | Expr::OuterReferenceColumn(..)
+                        | Expr::Unnest(_) => true,
+                        Expr::ScalarFunction(function) => function.func.as_async().is_some(),
+                        _ => false,
+                    })
                 })?;
-                Ok(if relational || expr.is_volatile() {
+                Ok(if unsupported || expr.is_volatile() {
                     TableProviderFilterPushDown::Unsupported
                 } else {
                     TableProviderFilterPushDown::Exact
@@ -411,17 +439,338 @@ impl TableProvider for KvTable {
         input: Arc<dyn ExecutionPlan>,
         insert_op: InsertOp,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        self.schema()
-            .logically_equivalent_names_and_types(&input.schema())?;
+        let schema = self.schema();
+        let input_schema = input.schema();
+        schema.logically_equivalent_names_and_types(&input_schema)?;
         if insert_op != InsertOp::Append {
             return Err(DataFusionError::NotImplemented(format!(
                 "{insert_op} not implemented for kv table"
             )));
         }
 
+        // DataFusion accepts any input column castable to the table type, but only SQL
+        // INSERT plans the cast. Cast here with the same semantics so the sink always
+        // receives the table's types.
+        let input = if schema
+            .fields()
+            .iter()
+            .zip(input_schema.fields())
+            .all(|(table, input)| table.data_type() == input.data_type())
+        {
+            input
+        } else {
+            let exprs = schema
+                .fields()
+                .iter()
+                .enumerate()
+                .map(|(idx, field)| {
+                    let column: Arc<dyn PhysicalExpr> = Arc::new(Column::new(field.name(), idx));
+                    let expr = cast(column, &input_schema, field.data_type().clone())?;
+                    Ok((expr, field.name().clone()))
+                })
+                .collect::<DataFusionResult<Vec<_>>>()?;
+            Arc::new(ProjectionExec::try_new(exprs, input)?)
+        };
+
         let sink = KvIngestSink {
             table: self.clone(),
         };
         Ok(Arc::new(DataSinkExec::new(input, Arc::new(sink), None)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{KvSchema, SqlContext, TableColumnConfig};
+    use async_trait::async_trait;
+    use datafusion::{
+        arrow::{
+            array::{
+                ArrayRef, Decimal128Array, DictionaryArray, Int32Array, Int64Array, NullArray,
+                TimestampMicrosecondArray,
+            },
+            datatypes::{DataType, Field, Int32Type, Schema, TimeUnit},
+            record_batch::RecordBatch,
+            util::pretty::pretty_format_batches,
+        },
+        common::{internal_err, DataFusionError, Result as DataFusionResult},
+        dataframe::DataFrameWriteOptions,
+        logical_expr::{
+            async_udf::{AsyncScalarUDF, AsyncScalarUDFImpl},
+            ColumnarValue, ScalarFunctionArgs, ScalarUDFImpl, Signature, Volatility,
+        },
+    };
+    use std::sync::Arc;
+
+    async fn write_batch(
+        ctx: &SqlContext,
+        table: &str,
+        batch: RecordBatch,
+    ) -> DataFusionResult<()> {
+        ctx.datafusion()
+            .read_batch(batch)?
+            .write_table(table, DataFrameWriteOptions::new())
+            .await
+            .map(|_| ())
+    }
+
+    async fn query(ctx: &SqlContext, sql: &str) -> Vec<String> {
+        let batches = ctx.sql(sql).await.unwrap().collect().await.unwrap();
+        pretty_format_batches(&batches)
+            .unwrap()
+            .to_string()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn batch(columns: Vec<(&str, ArrayRef)>) -> RecordBatch {
+        let fields = columns
+            .iter()
+            .map(|(name, array)| Field::new(*name, array.data_type().clone(), true))
+            .collect::<Vec<_>>();
+        RecordBatch::try_new(
+            Arc::new(Schema::new(fields)),
+            columns.into_iter().map(|(_, array)| array).collect(),
+        )
+        .unwrap()
+    }
+
+    /// DataFrame inserts cast each column to the table type the way SQL INSERT does.
+    #[tokio::test]
+    async fn dataframe_insert_casts_input_to_table_types() {
+        let (_task, url) = exoware_simulator::open_temp()
+            .await
+            .expect("the simulator must start");
+        let store = exoware_sdk::StoreClient::new(&url).unprefixed();
+        let schema = KvSchema::new(store.clone())
+            .table(
+                "prices",
+                vec![
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("amount", DataType::Decimal128(10, 2), true),
+                    TableColumnConfig::new(
+                        "at",
+                        DataType::Timestamp(TimeUnit::Microsecond, Some("+07:00".into())),
+                        true,
+                    ),
+                ],
+                vec!["id".to_string()],
+                vec![],
+            )
+            .unwrap()
+            .table(
+                "items",
+                vec![
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("qty", DataType::Int64, true),
+                    TableColumnConfig::new("name", DataType::Utf8, true),
+                    TableColumnConfig::new("stock", DataType::UInt64, true),
+                ],
+                vec!["id".to_string()],
+                vec![],
+            )
+            .unwrap();
+        let ctx = SqlContext::new(store);
+        ctx.register_schema(schema).unwrap();
+
+        // A DataFrame and a SQL INSERT rescale the decimal and reinterpret the timestamp alike.
+        write_batch(
+            &ctx,
+            "prices",
+            batch(vec![
+                ("id", Arc::new(Int64Array::from(vec![1]))),
+                (
+                    "amount",
+                    Arc::new(
+                        Decimal128Array::from(vec![12345])
+                            .with_precision_and_scale(10, 4)
+                            .unwrap(),
+                    ),
+                ),
+                ("at", Arc::new(TimestampMicrosecondArray::from(vec![0]))),
+            ]),
+        )
+        .await
+        .unwrap();
+        ctx.sql(
+            "INSERT INTO prices VALUES (2, arrow_cast(1.2345, 'Decimal128(10, 4)'), \
+             arrow_cast(0, 'Timestamp(Microsecond, None)'))",
+        )
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+        assert_eq!(
+            query(
+                &ctx,
+                "SELECT id, CAST(amount AS VARCHAR) AS amount, CAST(at AS BIGINT) AS at \
+                 FROM prices ORDER BY id"
+            )
+            .await,
+            vec![
+                "+----+--------+--------------+",
+                "| id | amount | at           |",
+                "+----+--------+--------------+",
+                "| 1  | 1.23   | -25200000000 |",
+                "| 2  | 1.23   | -25200000000 |",
+                "+----+--------+--------------+",
+            ]
+        );
+
+        // Narrower integers, dictionary strings, and an all-null column cast to the table types.
+        write_batch(
+            &ctx,
+            "items",
+            batch(vec![
+                ("id", Arc::new(Int64Array::from(vec![1]))),
+                ("qty", Arc::new(Int32Array::from(vec![5]))),
+                (
+                    "name",
+                    Arc::new(DictionaryArray::<Int32Type>::from_iter(["bolt"])),
+                ),
+                ("stock", Arc::new(NullArray::new(1))),
+            ]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            query(&ctx, "SELECT * FROM items").await,
+            vec![
+                "+----+-----+------+-------+",
+                "| id | qty | name | stock |",
+                "+----+-----+------+-------+",
+                "| 1  | 5   | bolt |       |",
+                "+----+-----+------+-------+",
+            ]
+        );
+
+        // A value that does not fit its table type fails the write and stores nothing.
+        let err = write_batch(
+            &ctx,
+            "items",
+            batch(vec![
+                ("id", Arc::new(Int64Array::from(vec![2]))),
+                ("qty", Arc::new(Int64Array::from(vec![5]))),
+                (
+                    "name",
+                    Arc::new(DictionaryArray::<Int32Type>::from_iter(["nut"])),
+                ),
+                ("stock", Arc::new(Int64Array::from(vec![-1]))),
+            ]),
+        )
+        .await
+        .expect_err("a negative stock does not fit UInt64");
+        assert!(
+            err.to_string()
+                .contains("Can't cast value -1 to type UInt64"),
+            "{err}"
+        );
+        assert_eq!(query(&ctx, "SELECT id FROM items").await.len(), 5);
+    }
+
+    /// Async identity function over Int64 that has no synchronous implementation.
+    #[derive(Debug, PartialEq, Eq, Hash)]
+    struct AsyncIdentity {
+        signature: Signature,
+    }
+
+    impl ScalarUDFImpl for AsyncIdentity {
+        fn name(&self) -> &str {
+            "async_identity"
+        }
+
+        fn signature(&self) -> &Signature {
+            &self.signature
+        }
+
+        fn return_type(&self, _arg_types: &[DataType]) -> DataFusionResult<DataType> {
+            Ok(DataType::Int64)
+        }
+
+        fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> DataFusionResult<ColumnarValue> {
+            internal_err!("async_identity only runs asynchronously")
+        }
+    }
+
+    #[async_trait]
+    impl AsyncScalarUDFImpl for AsyncIdentity {
+        async fn invoke_async_with_args(
+            &self,
+            args: ScalarFunctionArgs,
+        ) -> DataFusionResult<ColumnarValue> {
+            Ok(args.args[0].clone())
+        }
+    }
+
+    /// A filter that calls an async function stays above the scan, where DataFusion
+    /// evaluates it asynchronously.
+    #[tokio::test]
+    async fn filters_calling_async_functions_run_in_datafusion() {
+        let (_task, url) = exoware_simulator::open_temp()
+            .await
+            .expect("the simulator must start");
+        let store = exoware_sdk::StoreClient::new(&url).unprefixed();
+        let schema = KvSchema::new(store.clone())
+            .table(
+                "items",
+                vec![
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("qty", DataType::Int64, false),
+                ],
+                vec!["id".to_string()],
+                vec![],
+            )
+            .unwrap();
+        let ctx = SqlContext::new(store);
+        ctx.register_schema(schema).unwrap();
+        ctx.register_udf(
+            AsyncScalarUDF::new(Arc::new(AsyncIdentity {
+                signature: Signature::exact(vec![DataType::Int64], Volatility::Immutable),
+            }))
+            .into_scalar_udf(),
+        );
+        ctx.sql("INSERT INTO items VALUES (1, 2), (2, 5), (3, 4), (4, 1)")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+        // The async filter runs above the scan and keeps only rows whose qty exceeds 3.
+        assert_eq!(
+            query(
+                &ctx,
+                "SELECT id, qty FROM items WHERE async_identity(qty) > 3 ORDER BY id"
+            )
+            .await,
+            vec![
+                "+----+-----+",
+                "| id | qty |",
+                "+----+-----+",
+                "| 2  | 5   |",
+                "| 3  | 4   |",
+                "+----+-----+",
+            ]
+        );
+    }
+
+    #[test]
+    fn table_names_fit_the_subscribe_request() {
+        let declare = |name: String| {
+            KvSchema::new(exoware_sdk::StoreClient::new("http://127.0.0.1:1").unprefixed()).table(
+                name,
+                vec![TableColumnConfig::new("id", DataType::Int64, false)],
+                vec!["id".to_string()],
+                vec![],
+            )
+        };
+
+        // Each "é" is one character in two bytes, so the limit counts characters.
+        assert!(declare("é".repeat(255)).is_ok());
+        for name in [String::new(), "é".repeat(256)] {
+            assert!(matches!(declare(name), Err(DataFusionError::Plan(_))));
+        }
     }
 }

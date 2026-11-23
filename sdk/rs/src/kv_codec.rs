@@ -5,6 +5,9 @@ use commonware_codec::{
 };
 use std::cmp::Ordering;
 
+/// Maximum list nesting accepted by the stored-value decoder.
+const MAX_STORED_LIST_DEPTH: usize = 8;
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Utf8(pub String);
 
@@ -187,6 +190,7 @@ pub enum KvReducedValue {
     FixedSizeBinary(Bytes),
 }
 
+/// A value in a stored row. Decoding rejects lists nested more than eight levels deep.
 #[derive(Debug, Clone)]
 pub enum StoredValue {
     Int64(i64),
@@ -250,6 +254,12 @@ impl EncodeSize for StoredValue {
 impl Read for StoredValue {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        Self::read_with_depth(buf, 0)
+    }
+}
+
+impl StoredValue {
+    fn read_with_depth(buf: &mut impl Buf, depth: usize) -> Result<Self, CodecError> {
         let range: RangeCfg<usize> = (..).into();
         match u8::read(buf)? {
             0 => Ok(Self::Int64(i64::read(buf)?)),
@@ -262,7 +272,17 @@ impl Read for StoredValue {
                 Ok(Self::Bytes(bytes))
             }
             6 => {
-                let items = Vec::<Self>::read_cfg(buf, &(range, ()))?;
+                if depth == MAX_STORED_LIST_DEPTH {
+                    return Err(CodecError::Invalid(
+                        "StoredValue",
+                        "list nesting exceeds limit",
+                    ));
+                }
+                let len = usize::read_cfg(buf, &range)?;
+                let mut items = Vec::new();
+                for _ in 0..len {
+                    items.push(Self::read_with_depth(buf, depth + 1)?);
+                }
                 Ok(Self::List(items))
             }
             v => Err(CodecError::InvalidEnum(v)),
@@ -716,6 +736,59 @@ mod tests {
     use super::*;
     use crate::keys::MAX_KEY_LEN;
     use commonware_codec::Encode;
+
+    fn nested_list_bytes(depth: usize) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for _ in 0..depth {
+            6u8.write(&mut bytes);
+            1usize.write(&mut bytes);
+        }
+        StoredValue::Int64(7).write(&mut bytes);
+        bytes
+    }
+
+    #[test]
+    fn stored_value_round_trips_at_list_depth_limit() {
+        let mut value = StoredValue::Int64(7);
+        for _ in 0..MAX_STORED_LIST_DEPTH {
+            value = StoredValue::List(vec![value]);
+        }
+        let bytes = value.encode();
+        let decoded = StoredValue::read(&mut Copying(&bytes))
+            .expect("a list nested to the depth limit must decode");
+        assert_eq!(decoded.encode(), bytes);
+    }
+
+    #[test]
+    fn stored_value_rejects_excessive_list_nesting() {
+        let bytes = nested_list_bytes(MAX_STORED_LIST_DEPTH + 1);
+        let error = StoredValue::read(&mut Copying(&bytes)).expect_err("excessive list nesting");
+        assert!(matches!(
+            error,
+            CodecError::Invalid("StoredValue", "list nesting exceeds limit")
+        ));
+    }
+
+    #[test]
+    fn stored_value_bounds_recursion_on_small_stack() {
+        let bytes = nested_list_bytes(100_000);
+
+        // On a 64 KiB stack, decoding 100,000 levels returns the nesting error and does not
+        // overflow.
+        std::thread::Builder::new()
+            .stack_size(64 * 1024)
+            .spawn(move || {
+                let error =
+                    StoredValue::read(&mut Copying(&bytes)).expect_err("excessive list nesting");
+                assert!(matches!(
+                    error,
+                    CodecError::Invalid("StoredValue", "list nesting exceeds limit")
+                ));
+            })
+            .expect("the decoder thread must spawn")
+            .join()
+            .expect("the decoder thread must not panic");
+    }
 
     #[test]
     fn float_bounds_follow_total_order() {

@@ -6,21 +6,23 @@ use axum::{
     serve::{Listener, ListenerExt},
     Router,
 };
-use connectrpc::{client::ClientConfig, ErrorCode};
+use connectrpc::{client::ClientConfig, ConnectError, ErrorCode};
 use datafusion::{
     arrow::{
-        array::{ArrayRef, Int64Array},
-        datatypes::DataType,
+        array::{ArrayRef, AsArray, Int64Array},
+        datatypes::{DataType, Int64Type},
         ipc::reader::StreamReader,
         record_batch::RecordBatch,
     },
     common::ScalarValue,
     datasource::{MemTable, ViewTable},
 };
-use exoware_sdk::{proto::PreferZstdHttpClient, transport::set_tcp_nodelay, StoreKeyPrefix};
+use exoware_sdk::{
+    proto::PreferZstdHttpClient, transport::set_tcp_nodelay, StoreClient, StoreKeyPrefix,
+};
 use exoware_sql::{
-    proto::sql::v1::{QueryRequest, ServiceClient},
-    sql_stack, CellValue, IndexSpec, KvSchema, SqlServer, TableColumnConfig,
+    proto::sql::v1::{QueryRequest, ServiceClient, SubscribeRequest},
+    sql_stack, CellValue, IndexSpec, KvSchema, SqlContext, SqlServer, TableColumnConfig,
 };
 use std::sync::Arc;
 
@@ -281,45 +283,550 @@ async fn serve_sql(
     (client, handle)
 }
 
+async fn query_error(client: &ServiceClient<PreferZstdHttpClient>, sql: &str) -> ConnectError {
+    let Err(error) = client
+        .query(QueryRequest {
+            sql: sql.to_string(),
+            ..Default::default()
+        })
+        .await
+    else {
+        panic!("{} must be rejected", sql.trim_end());
+    };
+    error
+}
+
+async fn query_row_count(client: &ServiceClient<PreferZstdHttpClient>, sql: &str) -> usize {
+    let response = client
+        .query(QueryRequest {
+            sql: sql.to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect(sql)
+        .into_view()
+        .to_owned_message();
+    result_row_count(&response.results)
+}
+
+fn items_schema(store: &StoreClient) -> KvSchema {
+    KvSchema::new(store.unprefixed())
+        .table(
+            "items",
+            vec![
+                TableColumnConfig::new("id", DataType::Int64, false),
+                TableColumnConfig::new("value", DataType::Utf8, false),
+            ],
+            vec!["id".to_string()],
+            Vec::new(),
+        )
+        .expect("the items schema must build")
+}
+
 #[tokio::test]
-async fn connect_query_preserves_session_settings() {
-    let schema = KvSchema::new(common::local_store_client().await.unprefixed());
-    let server = Arc::new(SqlServer::new(schema).expect("SQL server"));
-    let initial_batch_size = server.context().datafusion().state().config().batch_size();
+async fn connect_query_rejects_server_file_and_runtime_access() {
+    let store = common::local_store_client().await;
+    let server = Arc::new(SqlServer::new(items_schema(&store)).expect("the server must build"));
+    let (client, handle) = serve_sql(server.clone()).await;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock must be past the Unix epoch")
+        .as_nanos();
+    let dir =
+        std::env::temp_dir().join(format!("exoware-sql-files-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("the temp dir must be created");
+    std::fs::write(dir.join("local.csv"), "local\n").expect("the local file must be written");
+    let path = |name: &str| dir.join(name).display().to_string();
+
+    // Each statement would read or write server files, or replace the runtime environment.
+    for (sql, written) in [
+        (
+            format!(
+                "EXPLAIN ANALYZE COPY (SELECT 1 AS id) TO '{}' STORED AS CSV",
+                path("explained.csv")
+            ),
+            Some("explained.csv"),
+        ),
+        (
+            format!(
+                "CREATE EXTERNAL TABLE local_file (line VARCHAR) STORED AS CSV LOCATION '{}'",
+                path("local.csv")
+            ),
+            None,
+        ),
+        (
+            format!(
+                "COPY (SELECT 1 AS id) TO '{}' STORED AS CSV",
+                path("copied.csv")
+            ),
+            Some("copied.csv"),
+        ),
+        (
+            format!(
+                "SET datafusion.runtime.temp_directory = '{}'",
+                path("spill")
+            ),
+            Some("spill"),
+        ),
+        ("RESET datafusion.runtime.temp_directory".to_string(), None),
+    ] {
+        let error = query_error(&client, &sql).await;
+        assert_eq!(error.code, ErrorCode::InvalidArgument, "{sql}: {error:?}");
+        if let Some(written) = written {
+            assert!(!dir.join(written).exists(), "{sql}");
+        }
+    }
+    assert!(server.context().table_provider("local_file").await.is_err());
+
+    // Queries, Store writes, and statements the embedder prepared remain available.
+    assert_eq!(
+        query_row_count(&client, "INSERT INTO items VALUES (1, 'one')").await,
+        1
+    );
+    assert_eq!(
+        query_row_count(&client, "SELECT value FROM items WHERE id = 1").await,
+        1
+    );
+    server
+        .context()
+        .sql("PREPARE item AS SELECT value FROM items WHERE id = 1")
+        .await
+        .expect("the embedder must prepare a statement");
+    assert_eq!(query_row_count(&client, "EXECUTE item").await, 1);
+
+    std::fs::remove_dir_all(&dir).expect("the temp dir must be removable");
+    handle.abort();
+}
+
+#[tokio::test]
+async fn connect_query_rejects_shared_catalog_changes() {
+    let store = common::local_store_client().await;
+    let schema = items_schema(&store);
+
+    // The served table holds one row that a replaced or dropped table would lose.
+    let mut writer = schema.batch_writer();
+    writer
+        .insert(
+            "items",
+            vec![CellValue::Int64(1), CellValue::Utf8("one".to_string())],
+        )
+        .expect("the insert must succeed");
+    writer
+        .flush()
+        .await
+        .expect("the flush must succeed")
+        .expect("the writer must hold a row");
+    let server = Arc::new(SqlServer::new(schema).expect("the server must build"));
     let (client, handle) = serve_sql(server.clone()).await;
 
-    for (sql, expected) in [
-        ("SET datafusion.execution.batch_size = 17", 17),
-        ("RESET datafusion.execution.batch_size", initial_batch_size),
+    // Each statement would change the catalog, or how names resolve in it, for every caller.
+    for sql in [
+        "CREATE OR REPLACE TABLE items AS SELECT 2 AS id, 'two' AS value",
+        "DROP TABLE items",
+        "CREATE OR REPLACE VIEW items AS SELECT 3 AS id, 'three' AS value",
+        "CREATE TABLE copied_items AS SELECT * FROM items",
+        "CREATE TABLE empty_items (id BIGINT)",
+        "CREATE VIEW item_values AS SELECT value FROM items",
+        "CREATE SCHEMA scratch",
+        "CREATE DATABASE scratch_catalog",
+        "DROP SCHEMA public CASCADE",
+        "SET datafusion.catalog.default_schema = 'scratch'",
+        "SET datafusion.catalog.information_schema = true",
+        "RESET datafusion.catalog.default_schema",
     ] {
-        client
+        let error = query_error(&client, sql).await;
+        assert_eq!(error.code, ErrorCode::InvalidArgument, "{sql}: {error:?}");
+    }
+
+    let response = client
+        .query(QueryRequest {
+            sql: "SELECT value FROM items WHERE id = 1".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("the served table must still answer")
+        .into_view()
+        .to_owned_message();
+    let batches = StreamReader::try_new(response.results.as_ref(), None)
+        .expect("the results must be an Arrow IPC stream")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("each Arrow IPC batch must decode");
+    let values: Vec<_> = batches
+        .iter()
+        .flat_map(|batch| {
+            let column = batch.column(0).as_string::<i32>();
+            column
+                .iter()
+                .map(|value| value.map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(values, vec![Some("one".to_string())]);
+
+    // No rejected statement reached the server's catalog or options, and the accepted one did.
+    let ctx = server.context();
+    for table in ["copied_items", "empty_items", "item_values"] {
+        assert!(ctx.table_provider(table).await.is_err(), "{table}");
+    }
+    assert!(ctx.datafusion().catalog("scratch_catalog").is_none());
+    let catalog = ctx
+        .datafusion()
+        .catalog("datafusion")
+        .expect("the default catalog must exist");
+    assert!(catalog.schema("scratch").is_none());
+    let options = ctx.datafusion().state().config().options().clone();
+    assert_eq!(options.catalog.default_schema, "public");
+    assert!(!options.catalog.information_schema);
+    handle.abort();
+}
+
+async fn sorted_ids(ctx: &SqlContext, table: &str) -> Vec<i64> {
+    let batches = ctx
+        .sql(&format!("SELECT id FROM {table} ORDER BY id"))
+        .await
+        .expect("the id query must plan")
+        .collect()
+        .await
+        .expect("the id query must run");
+    batches
+        .iter()
+        .flat_map(|batch| {
+            batch
+                .column(0)
+                .as_primitive::<Int64Type>()
+                .values()
+                .to_vec()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn connect_query_rejects_writes_other_than_insert() {
+    let schema = KvSchema::new(common::local_store_client().await.unprefixed());
+    let server = Arc::new(SqlServer::new(schema).expect("the server must build"));
+    let batch = RecordBatch::try_from_iter(vec![(
+        "id",
+        Arc::new(Int64Array::from(vec![1, 2, 3])) as ArrayRef,
+    )])
+    .expect("the configured batch must build");
+    let table = MemTable::try_new(batch.schema(), vec![vec![batch]])
+        .expect("the configured table must build");
+    server
+        .context()
+        .register_table("configured_ids", Arc::new(table))
+        .expect("the configured table must register");
+    let (client, handle) = serve_sql(server.clone()).await;
+
+    // A MemTable applies DELETE and UPDATE while its physical plan is built, so EXPLAIN alone
+    // would change its rows.
+    for sql in [
+        "DELETE FROM configured_ids WHERE id = 1",
+        "UPDATE configured_ids SET id = 9 WHERE id = 2",
+        "EXPLAIN DELETE FROM configured_ids WHERE id = 3",
+        "PREPARE remove_id AS DELETE FROM configured_ids WHERE id = $1",
+    ] {
+        let error = query_error(&client, sql).await;
+        assert_eq!(error.code, ErrorCode::InvalidArgument, "{sql}: {error:?}");
+    }
+    query_error(&client, "EXECUTE remove_id(1)").await;
+
+    // A statement the embedder prepared follows the same rule when a caller executes it.
+    server
+        .context()
+        .sql("PREPARE remove_id AS DELETE FROM configured_ids WHERE id = $1")
+        .await
+        .expect("the embedder must prepare the delete");
+    for sql in [
+        "EXECUTE remove_id(1)",
+        "EXPLAIN EXECUTE remove_id(2)",
+        "EXPLAIN ANALYZE EXECUTE remove_id(3)",
+    ] {
+        let error = query_error(&client, sql).await;
+        assert_eq!(error.code, ErrorCode::InvalidArgument, "{sql}: {error:?}");
+    }
+    assert_eq!(
+        sorted_ids(server.context(), "configured_ids").await,
+        [1, 2, 3]
+    );
+
+    assert_eq!(
+        query_row_count(&client, "INSERT INTO configured_ids VALUES (4)").await,
+        1
+    );
+    assert_eq!(
+        sorted_ids(server.context(), "configured_ids").await,
+        [1, 2, 3, 4]
+    );
+    handle.abort();
+}
+
+#[tokio::test]
+async fn connect_query_reports_invalid_values_as_invalid_argument() {
+    let schema = KvSchema::new(common::local_store_client().await.unprefixed());
+    let server = Arc::new(SqlServer::new(schema).expect("the server must build"));
+    let (client, handle) = serve_sql(server).await;
+
+    // Division by zero, failed casts, and integer overflow come from the caller's values.
+    for sql in [
+        "SELECT 1/0",
+        "SELECT CAST('abc' AS BIGINT)",
+        "SELECT CAST('x' AS TIMESTAMP)",
+        "SELECT -(-9223372036854775807 - 1)",
+    ] {
+        let error = query_error(&client, sql).await;
+        assert_eq!(error.code, ErrorCode::InvalidArgument, "{sql}: {error:?}");
+    }
+    handle.abort();
+}
+
+/// Returns the error a subscription ends with, whether the call or its first message carries it.
+async fn subscribe_error(
+    client: &ServiceClient<PreferZstdHttpClient>,
+    request: SubscribeRequest,
+) -> ConnectError {
+    let mut stream = match client.subscribe(request).await {
+        Ok(stream) => stream,
+        Err(error) => return error,
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(1), stream.message()).await {
+        Ok(Err(error)) => error,
+        _ => panic!("the subscription must be rejected"),
+    }
+}
+
+#[tokio::test]
+async fn connect_requests_enforce_declared_field_lengths() {
+    let store = common::local_store_client().await;
+    let server = Arc::new(SqlServer::new(items_schema(&store)).expect("the server must build"));
+    let (client, handle) = serve_sql(server).await;
+    let padded = |prefix: &str, len: usize| format!("{prefix}{}", " ".repeat(len - prefix.len()));
+
+    // A statement at its 65,535-character limit runs.
+    assert_eq!(
+        query_row_count(&client, &padded("SELECT 1", 65_535)).await,
+        1
+    );
+
+    // Each request breaks one declared length, by one past its limit or by an empty table name.
+    let mut errors = vec![(
+        "sql",
+        query_error(&client, &padded("SELECT 1", 65_536)).await,
+    )];
+    for (field, request) in [
+        (
+            "table",
+            SubscribeRequest {
+                table: "x".repeat(256),
+                ..Default::default()
+            },
+        ),
+        (
+            "table",
+            SubscribeRequest {
+                table: String::new(),
+                ..Default::default()
+            },
+        ),
+        (
+            "where_sql",
+            SubscribeRequest {
+                table: "items".to_string(),
+                where_sql: padded("id = 1", 4_097),
+                ..Default::default()
+            },
+        ),
+    ] {
+        errors.push((field, subscribe_error(&client, request).await));
+    }
+
+    // Each rejection is invalid_argument, names its field, and carries the sql error domain.
+    for (field, error) in errors {
+        assert_eq!(error.code, ErrorCode::InvalidArgument, "{field}: {error:?}");
+        let details = exoware_sdk::proto::decode_connect_error(&error)
+            .expect("the error must carry decodable details");
+        assert_eq!(
+            details
+                .bad_request
+                .expect("the details must include a BadRequest")
+                .field_violations[0]
+                .field,
+            field
+        );
+        assert_eq!(
+            details
+                .error_info
+                .expect("the details must include an ErrorInfo")
+                .domain,
+            "sql"
+        );
+    }
+
+    // A predicate at its 4,096-character limit opens a subscription that stays open.
+    let mut stream = client
+        .subscribe(SubscribeRequest {
+            table: "items".to_string(),
+            where_sql: padded("id = 1", 4_096),
+            ..Default::default()
+        })
+        .await
+        .expect("a subscription at the length limit must be accepted");
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(500), stream.message())
+            .await
+            .is_err(),
+        "a subscription at the length limit must stay open"
+    );
+    handle.abort();
+}
+
+#[tokio::test]
+async fn connect_query_runs_long_filters_on_store_tables() {
+    let store = common::local_store_client().await;
+    let schema = items_schema(&store);
+    let mut writer = schema.batch_writer();
+    for id in 0..100 {
+        writer
+            .insert(
+                "items",
+                vec![CellValue::Int64(id), CellValue::Utf8(id.to_string())],
+            )
+            .expect("the insert must succeed");
+    }
+    writer
+        .flush()
+        .await
+        .expect("the flush must succeed")
+        .expect("the writer must hold rows");
+    let server = Arc::new(SqlServer::new(schema).expect("the server must build"));
+    let (client, handle) = serve_sql(server).await;
+
+    // A lookup by a composite key is an OR of ANDs with one branch per key. These are the
+    // most keys and the most AND-ed comparisons the expression limit admits.
+    let keys: Vec<_> = (0..87)
+        .map(|key| format!("(id = {key} AND value = '{key}')"))
+        .collect();
+    let lookup = format!("SELECT value FROM items WHERE {}", keys.join(" OR "));
+    assert_eq!(query_row_count(&client, &lookup).await, 87);
+    let bounds: Vec<_> = (0..92).map(|bound| format!("id >= {bound}")).collect();
+    let filter = format!("SELECT value FROM items WHERE {}", bounds.join(" AND "));
+    assert_eq!(query_row_count(&client, &filter).await, 9);
+
+    // One more key or comparison is rejected as the caller's error.
+    for sql in [
+        format!("{lookup} OR (id = 87 AND value = '87')"),
+        format!("{filter} AND id >= 92"),
+    ] {
+        let error = query_error(&client, &sql).await;
+        assert_eq!(
+            error.code,
+            ErrorCode::InvalidArgument,
+            "{sql:.60}: {error:?}"
+        );
+    }
+    handle.abort();
+}
+
+#[tokio::test]
+async fn connect_query_rejects_changes_to_the_shared_session() {
+    let store = common::local_store_client().await;
+    let schema = items_schema(&store);
+    let mut writer = schema.batch_writer();
+    writer
+        .insert(
+            "items",
+            vec![CellValue::Int64(1), CellValue::Utf8("one".to_string())],
+        )
+        .expect("the insert must succeed");
+    writer
+        .flush()
+        .await
+        .expect("the flush must succeed")
+        .expect("the writer must hold a row");
+    let server = Arc::new(SqlServer::new(schema).expect("the server must build"));
+    let ctx = server.context();
+    ctx.sql("PREPARE item AS SELECT value FROM items WHERE id = 1")
+        .await
+        .expect("the embedder must prepare a statement");
+    let initial = ctx.datafusion().state().config().options().clone();
+
+    // Two clients stand for two callers of one server.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("the server must bind")
+        .tap_io(set_tcp_nodelay);
+    let base = format!(
+        "http://{}",
+        listener
+            .local_addr()
+            .expect("the server must have an address")
+    );
+    let app = Router::new().fallback_service(sql_stack(server.clone()));
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("the server must serve");
+    });
+    let caller = || {
+        ServiceClient::new(
+            PreferZstdHttpClient::plaintext(),
+            ClientConfig::new(base.parse().expect("the server URI must parse")),
+        )
+    };
+    let (first, second) = (caller(), caller());
+
+    // The first caller sends statements that would change what every caller sees.
+    let mut outcomes = Vec::new();
+    for sql in [
+        "DROP FUNCTION count",
+        "DROP FUNCTION abs",
+        "CREATE FUNCTION twice(BIGINT) RETURNS BIGINT RETURN $1 + $1",
+        "SET datafusion.execution.target_partitions = 2048",
+        "SET datafusion.execution.batch_size = 17",
+        "SET TIME ZONE = 'America/New_York'",
+        "RESET datafusion.execution.target_partitions",
+        "PREPARE mine AS SELECT 1",
+        "EXPLAIN PREPARE hidden AS SELECT 1",
+        "DEALLOCATE item",
+        "START TRANSACTION",
+        "COMMIT",
+        "ROLLBACK",
+    ] {
+        let outcome = first
             .query(QueryRequest {
                 sql: sql.to_string(),
                 ..Default::default()
             })
-            .await
-            .expect("update session setting");
-        assert_eq!(
-            server.context().datafusion().state().config().batch_size(),
-            expected,
-            "{sql}"
-        );
+            .await;
+        outcomes.push((sql, outcome.err()));
     }
 
-    client
-        .query(QueryRequest {
-            sql: "DROP FUNCTION abs".to_string(),
-            ..Default::default()
-        })
-        .await
-        .expect("drop session function");
-    client
-        .query(QueryRequest {
-            sql: "SELECT abs(-7)".to_string(),
-            ..Default::default()
-        })
-        .await
-        .expect_err("function remains absent in the next request");
+    // The second caller still finds the functions and the embedder's prepared statement, and
+    // nothing the first caller tried to add.
+    for sql in [
+        "SELECT count(*) FROM items",
+        "SELECT abs(-7)",
+        "EXECUTE item",
+    ] {
+        assert_eq!(query_row_count(&second, sql).await, 1, "{sql}");
+    }
+    for sql in ["SELECT twice(2)", "EXECUTE mine", "EXECUTE hidden"] {
+        query_error(&second, sql).await;
+    }
+
+    // The server's options keep their values.
+    let options = ctx.datafusion().state().config().options().clone();
+    assert_eq!(
+        options.execution.target_partitions,
+        initial.execution.target_partitions
+    );
+    assert_eq!(options.execution.batch_size, initial.execution.batch_size);
+    assert_eq!(options.execution.time_zone, initial.execution.time_zone);
+
+    // Each statement was rejected as the caller's error.
+    for (sql, error) in outcomes {
+        let error = error.unwrap_or_else(|| panic!("{sql} must be rejected"));
+        assert_eq!(error.code, ErrorCode::InvalidArgument, "{sql}: {error:?}");
+    }
     handle.abort();
 }
 
@@ -511,6 +1018,11 @@ async fn connect_query_preserves_configured_tables_and_views() {
             Arc::new(ViewTable::new(programmatic_plan, None)),
         )
         .expect("register programmatic view");
+    server
+        .context()
+        .sql("PREPARE other_item AS SELECT id FROM other_items WHERE id = 2")
+        .await
+        .expect("prepare namespaced query");
     let server = Arc::new(server);
 
     let (client, handle) = serve_sql(server).await;
@@ -527,14 +1039,6 @@ async fn connect_query_preserves_configured_tables_and_views() {
         .to_owned_message();
     assert!(response.sequence_number.unwrap() >= write_sequence);
     assert_eq!(result_row_count(&response.results), 1);
-
-    client
-        .query(QueryRequest {
-            sql: "PREPARE other_item AS SELECT id FROM other_items WHERE id = 2".to_string(),
-            ..Default::default()
-        })
-        .await
-        .expect("prepare namespaced query");
 
     for sql in [
         "EXECUTE other_item",
@@ -571,7 +1075,7 @@ async fn connect_query_preserves_configured_tables_and_views() {
 
     for sql in [
         "EXECUTE other_item",
-        "CREATE TABLE copied_items AS SELECT * FROM other_items",
+        "INSERT INTO items SELECT id, 'copied' FROM other_items",
     ] {
         let error = client
             .query(QueryRequest {
@@ -583,21 +1087,6 @@ async fn connect_query_preserves_configured_tables_and_views() {
             .expect_err("data reads retain their request floor");
         assert_eq!(error.code, ErrorCode::Aborted, "{sql}");
     }
-    client
-        .query(QueryRequest {
-            sql: "DEALLOCATE other_item".to_string(),
-            ..Default::default()
-        })
-        .await
-        .expect("deallocate prepared query");
-    client
-        .query(QueryRequest {
-            sql: "EXECUTE other_item".to_string(),
-            ..Default::default()
-        })
-        .await
-        .expect_err("prepared query remains absent in the next request");
-
     let response = client
         .query(QueryRequest {
             sql: "SELECT value FROM configured_items".to_string(),

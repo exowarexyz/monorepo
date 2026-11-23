@@ -390,7 +390,9 @@ pub const __TABLES_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::bu
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct Table {
-    /// Name clients pass to `Subscribe.table` / reference in `Query.sql`.
+    /// Exact, case-sensitive table name. Pass it unchanged as `Subscribe.table`.
+    /// In SQL, double-quote it. The quotes are optional for a lower-case
+    /// identifier.
     ///
     /// Field 1: `name`
     #[serde(
@@ -2374,7 +2376,9 @@ pub mod __buffa {
         /// Server-registered table.
         #[derive(Clone, Debug, Default)]
         pub struct TableView<'a> {
-            /// Name clients pass to `Subscribe.table` / reference in `Query.sql`.
+            /// Exact, case-sensitive table name. Pass it unchanged as `Subscribe.table`.
+            /// In SQL, double-quote it. The quotes are optional for a lower-case
+            /// identifier.
             ///
             /// Field 1: `name`
             pub name: &'a str,
@@ -2749,7 +2753,9 @@ pub mod __buffa {
             pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
                 self.0.into_bytes()
             }
-            /// Name clients pass to `Subscribe.table` / reference in `Query.sql`.
+            /// Exact, case-sensitive table name. Pass it unchanged as `Subscribe.table`.
+            /// In SQL, double-quote it. The quotes are optional for a lower-case
+            /// identifier.
             ///
             /// Field 1: `name`
             #[must_use]
