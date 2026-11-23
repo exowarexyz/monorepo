@@ -222,7 +222,7 @@ pub(crate) struct AggregateReduceJob {
     pub(crate) request: RangeReduceParams,
     /// Primary key or secondary index key ranges to reduce, each sent as its own request.
     /// The ranges may cover more rows than the filters accept, and `request.filter` enforces
-    /// the rest. Primary-key ranges that hold exactly the accepted rows need no filter.
+    /// the rest. Ranges that hold exactly the accepted rows need no filter.
     /// Empty when the predicate yields no range, so the job reduces nothing.
     pub(crate) ranges: Vec<KeyRange>,
 }
@@ -1381,22 +1381,31 @@ pub(crate) fn build_aggregate_reduce_job(
         None => (Vec::new(), None),
     };
 
-    // Every filter is a supported constraint, so the primary-key ranges are complete, and every
-    // row they hold passes the constraints they enforce. The worker checks the remaining
-    // constraints alone, so it never needs a key column that the ranges enforce and a worker
-    // filter cannot read. When the ranges enforce every constraint, the worker needs no filter.
-    let primary_key = matches!(access_path, AggregateAccessPath::PrimaryKey);
+    // Every filter is a supported constraint, so the job's key ranges are complete, and every
+    // row or index entry they hold passes the constraints they enforce. The worker checks the
+    // remaining constraints alone, so it never needs a key column that the ranges enforce and a
+    // worker filter cannot read. When the ranges enforce every constraint, the worker needs no
+    // filter.
     let mut unenforced = predicate.clone();
-    if primary_key {
-        let enforced = access_plan.primary_key_positions_enforced_by_ranges(&table.model);
-        unenforced.constraints.retain(|col_idx, _| {
-            table
-                .model
-                .pk_position(*col_idx)
-                .is_none_or(|pk_pos| !enforced[pk_pos])
-        });
+    match &access_path {
+        AggregateAccessPath::PrimaryKey => {
+            let enforced = access_plan.primary_key_positions_enforced_by_ranges(&table.model);
+            unenforced.constraints.retain(|col_idx, _| {
+                table
+                    .model
+                    .pk_position(*col_idx)
+                    .is_none_or(|pk_pos| !enforced[pk_pos])
+            });
+        }
+        AggregateAccessPath::SecondaryIndex { spec_idx } => {
+            let enforced = access_plan
+                .columns_enforced_by_index_ranges(&table.model, &table.index_specs[*spec_idx]);
+            unenforced
+                .constraints
+                .retain(|col_idx, _| !enforced[*col_idx]);
+        }
     }
-    let filter = if filters.is_empty() || (primary_key && unenforced.constraints.is_empty()) {
+    let filter = if unenforced.constraints.is_empty() {
         None
     } else {
         let Some(filter) =
@@ -4936,7 +4945,7 @@ mod tests {
                 ],
             ),
             // One job reads the index and the other the primary key, so only the first
-            // has a constrained prefix.
+            // has a constrained prefix. The ranges of both enforce their guards.
             (
                 "SELECT SUM(amount) FILTER (WHERE category = 1), \
                  SUM(amount) FILTER (WHERE id = 2) FROM indexed",
@@ -4951,8 +4960,8 @@ mod tests {
                         "primary_key",
                     ],
                     vec!["predicate:", "category = 1; id = 2"],
-                    vec!["exact: false; true"],
-                    vec!["row_recheck:", "true; false"],
+                    vec!["exact: true; true"],
+                    vec!["row_recheck:", "false; false"],
                     vec!["ranges: 1; 1"],
                     vec!["full_scan_like:", "false; false"],
                     vec!["constrained_prefix:", "1; none"],
@@ -6308,6 +6317,228 @@ mod tests {
         .await;
     }
 
+    /// Installs the table `events` with primary key `(tenant, id)`, `rows` rows, an index on the
+    /// text column `status` that covers `amount`, and an index on `kind` that covers nothing
+    /// more. A worker reads no key column behind `status`, and every key column behind `kind`.
+    async fn install_events(fixture: &Fixture, rows: i64) {
+        let statuses = ["open", "held", "closed"];
+        let scores = [
+            Some(f64::NAN),
+            Some(-0.0),
+            Some(0.0),
+            Some(1.5),
+            None,
+            Some(-1.0),
+        ];
+        let tenant = |row: i64| row / (rows / 3);
+        let status = |row: i64| statuses[row as usize % 3];
+        let amount = |row: i64| (row % 5 != 0).then_some(row * 10);
+        let score = |row: i64| scores[row as usize % 6];
+        fixture
+            .install_indexed_table(
+                "events",
+                vec![
+                    TableColumnConfig::new("tenant", DataType::Int64, false),
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("status", DataType::Utf8, false),
+                    TableColumnConfig::new("kind", DataType::Int64, false),
+                    TableColumnConfig::new("amount", DataType::Int64, true),
+                    TableColumnConfig::new("score", DataType::Float64, true),
+                ],
+                &["tenant", "id"],
+                vec![
+                    IndexSpec::new("status_idx", vec!["status".to_string()])
+                        .unwrap()
+                        .with_cover_columns(vec!["amount".to_string()]),
+                    IndexSpec::new("kind_idx", vec!["kind".to_string()]).unwrap(),
+                ],
+                (0..rows)
+                    .map(|row| KvRow {
+                        values: vec![
+                            CellValue::Int64(tenant(row)),
+                            CellValue::Int64(row),
+                            CellValue::Utf8(status(row).to_string()),
+                            CellValue::Int64(row % 4),
+                            amount(row).map_or(CellValue::Null, CellValue::Int64),
+                            score(row).map_or(CellValue::Null, CellValue::Float64),
+                        ],
+                    })
+                    .collect(),
+                vec![
+                    Arc::new(Int64Array::from_iter_values((0..rows).map(tenant))),
+                    Arc::new(Int64Array::from_iter_values(0..rows)),
+                    Arc::new(StringArray::from_iter_values((0..rows).map(status))),
+                    Arc::new(Int64Array::from_iter_values((0..rows).map(|row| row % 4))),
+                    Arc::new(Int64Array::from_iter((0..rows).map(amount))),
+                    Arc::new(Float64Array::from_iter((0..rows).map(score))),
+                ],
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn index_jobs_check_only_the_constraints_index_ranges_leave_open() {
+        let fixture = Fixture::new().await;
+        install_events(&fixture, 12).await;
+
+        // The bounds of a status range fix status, then bound tenant, and bound id once tenant
+        // is fixed. The worker cannot read tenant or id behind the text key, and does not have
+        // to. It checks the covered amount alone.
+        check_worker_filters(
+            &fixture,
+            "events",
+            &["COUNT(*), SUM(amount)", "MIN(amount)"],
+            &[
+                ("status = 'open'", 1, 4, None),
+                ("status = 'open' AND tenant = 1", 1, 1, None),
+                ("status = 'held' AND tenant = 1 AND id >= 5", 1, 1, None),
+                ("status IN ('open', 'held') AND tenant >= 1", 2, 5, None),
+                ("status = 'open' AND amount >= 20", 1, 4, Some(1)),
+                (
+                    "status = 'held' AND tenant = 1 AND amount IS NOT NULL",
+                    1,
+                    2,
+                    Some(1),
+                ),
+            ],
+        )
+        .await;
+        fixture
+            .check(
+                "SELECT amount, COUNT(*) FROM events WHERE status = 'held' AND tenant = 1 \
+                 GROUP BY amount ORDER BY amount",
+                1,
+            )
+            .await;
+
+        // Every key column behind the fixed-width kind key is readable, so the worker checks
+        // the ones the bounds leave open: id behind a free tenant, and tenant behind a kind
+        // range.
+        check_worker_filters(
+            &fixture,
+            "events",
+            &["COUNT(*), MAX(id)", "MIN(tenant)"],
+            &[
+                ("kind = 3 AND tenant = 1", 1, 1, None),
+                ("kind = 3 AND tenant >= 1", 1, 2, None),
+                ("kind = 3 AND id >= 5", 1, 3, Some(1)),
+                ("kind >= 2 AND tenant = 1", 1, 5, Some(1)),
+            ],
+        )
+        .await;
+
+        // The status index does not cover score, so this job reads the primary key. Its ranges
+        // enforce tenant, and the worker checks status in the row.
+        check_worker_filters(
+            &fixture,
+            "events",
+            &["MAX(score)"],
+            &[("status = 'open' AND tenant = 1", 1, 4, Some(1))],
+        )
+        .await;
+
+        // The bounds leave these constraints on id and tenant open, and the worker cannot read
+        // either behind the text key, so aggregation stays in DataFusion.
+        for sql in [
+            "SELECT COUNT(*), SUM(amount) FROM events WHERE status = 'open' AND id >= 5",
+            "SELECT COUNT(*), SUM(amount) FROM events WHERE status = 'open' AND tenant IN (0, 2)",
+        ] {
+            fixture.rows.reductions.lock().unwrap().clear();
+            assert_eq!(
+                values(fixture.context.datafusion(), sql).await.unwrap(),
+                values(&fixture.native, sql).await.unwrap(),
+                "{sql}"
+            );
+            assert!(
+                fixture.rows.reductions.lock().unwrap().is_empty(),
+                "a constraint the ranges leave open must not lose its check: {sql}"
+            );
+        }
+
+        // EXPLAIN reports a job as exact when its ranges enforce the whole predicate, and a row
+        // check when the job sends a worker filter.
+        for (predicate, reported) in [
+            (
+                "status = 'open' AND tenant = 1",
+                "exact=true, row_recheck=false, ranges=1, ",
+            ),
+            (
+                "status = 'open' AND amount >= 20",
+                "exact=false, row_recheck=true, ranges=1, ",
+            ),
+        ] {
+            let explain = values(
+                fixture.context.datafusion(),
+                &format!("EXPLAIN SELECT COUNT(*), SUM(amount) FROM events WHERE {predicate}"),
+            )
+            .await
+            .unwrap();
+            assert!(
+                explain.iter().any(|row| {
+                    let plan = row[1].to_string();
+                    plan.contains("mode=secondary_index(status_idx, lexicographic)")
+                        && plan.contains(reported)
+                }),
+                "{predicate} must report {reported}: {explain:?}"
+            );
+        }
+
+        // A z-order key interleaves its columns, so its ranges enforce neither bound and the
+        // worker checks both.
+        let points: Vec<(i64, i64)> = (0..5).flat_map(|x| (0..5).map(move |y| (x, y))).collect();
+        fixture
+            .install_indexed_table(
+                "points",
+                vec![
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("x", DataType::Int64, false),
+                    TableColumnConfig::new("y", DataType::Int64, false),
+                ],
+                &["id"],
+                vec![IndexSpec::z_order("xy", vec!["x".to_string(), "y".to_string()]).unwrap()],
+                points
+                    .iter()
+                    .map(|&(x, y)| KvRow {
+                        values: vec![
+                            CellValue::Int64(x * 5 + y),
+                            CellValue::Int64(x),
+                            CellValue::Int64(y),
+                        ],
+                    })
+                    .collect(),
+                vec![
+                    Arc::new(Int64Array::from_iter_values(
+                        points.iter().map(|&(x, y)| x * 5 + y),
+                    )),
+                    Arc::new(Int64Array::from_iter_values(
+                        points.iter().map(|point| point.0),
+                    )),
+                    Arc::new(Int64Array::from_iter_values(
+                        points.iter().map(|point| point.1),
+                    )),
+                ],
+            )
+            .await;
+        fixture.rows.reductions.lock().unwrap().clear();
+        fixture
+            .check_reduced(
+                "SELECT COUNT(*), SUM(id) FROM points WHERE x >= 1 AND x <= 2 AND y >= 1 AND y <= 2",
+            )
+            .await;
+        let requests = fixture.rows.reductions.lock().unwrap();
+        assert!(
+            !requests.is_empty()
+                && requests.iter().all(|request| {
+                    request
+                        .params
+                        .filter
+                        .as_option()
+                        .is_some_and(|filter| filter.checks.len() == 2)
+                }),
+            "a z-order job must keep the whole worker filter: {requests:?}"
+        );
+    }
+
     #[tokio::test]
     async fn worker_filters_keep_the_checks_key_ranges_do_not_enforce() {
         let fixture = Fixture::new().await;
@@ -6338,8 +6569,9 @@ mod tests {
             );
         }
 
-        // The primary key alone would enforce this predicate. The planner reads the index on b, and
-        // its ranges bound b only, so they also hold rows of other a values.
+        // The primary key alone would enforce this predicate. The planner reads the index on b,
+        // and its ranges enforce the bound on b only, so they also hold rows of other a values
+        // and the worker checks a.
         let pairs = [(1, 1), (1, 2), (1, 3), (2, 2), (2, 3)];
         fixture
             .install_indexed_table(
@@ -6385,8 +6617,8 @@ mod tests {
                 .filter
                 .as_option()
                 .map(|filter| filter.checks.len()),
-            Some(2),
-            "index ranges must keep the worker filter: {sql}"
+            Some(1),
+            "the worker must check the constraint the index ranges leave open: {sql}"
         );
     }
 }

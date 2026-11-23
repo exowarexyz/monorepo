@@ -875,44 +875,11 @@ impl QueryPredicate {
         // indexes and primary-key access available.
         let mut best: Option<IndexPlan> = None;
         for (spec_idx, spec) in specs.iter().enumerate() {
-            let (ranges, constrained_prefix_len, constrained_column_count) = match spec.layout {
-                IndexLayout::Lexicographic => {
-                    // Lexicographic bounds require constraints on a leading key prefix.
-                    let constrained_prefix_len = self.leading_constrained_prefix(model, spec);
-                    if constrained_prefix_len == 0 {
-                        continue;
-                    }
-                    let ranges = match self.expand_index_ranges(model, spec, constrained_prefix_len)
-                    {
-                        Ok(r) if !r.is_empty() => r,
-                        _ => continue,
-                    };
-                    (
-                        ranges,
-                        constrained_prefix_len,
-                        self.lexicographic_candidate_score(model, spec),
-                    )
-                }
-                IndexLayout::ZOrder => {
-                    // Z-order bounds can use constrained dimensions anywhere in the key.
-                    let constrained_column_count =
-                        self.zorder_constrained_column_count(model, spec);
-                    if constrained_column_count == 0 {
-                        continue;
-                    }
-                    let ranges = match self.expand_zorder_index_ranges(model, spec) {
-                        Ok(r) if !r.is_empty() => r,
-                        _ => continue,
-                    };
-                    (ranges, constrained_column_count, constrained_column_count)
-                }
-            };
-
-            let mut ranges = ranges;
-            ranges.retain(|range| range.start.len() <= max_logical_key_len);
-            if ranges.is_empty() {
+            let Some((mut ranges, constrained_prefix_len, constrained_column_count)) =
+                self.index_key_ranges(model, spec, max_logical_key_len)
+            else {
                 continue;
-            }
+            };
 
             // Keep ranges disjoint so overlapping bounds do not return the same row twice.
             ranges.sort_by(|left, right| left.start.cmp(&right.start));
@@ -952,6 +919,47 @@ impl QueryPredicate {
             }
         }
         best
+    }
+
+    /// Builds the key ranges this predicate reads from one index, with the constrained prefix
+    /// length and the count of constrained columns that rank the index. Returns `None` when the
+    /// predicate constrains no usable column of the index, its bounds cannot be encoded, or
+    /// the lower bound of every range is longer than `max_logical_key_len`.
+    pub(crate) fn index_key_ranges(
+        &self,
+        model: &TableModel,
+        spec: &ResolvedIndexSpec,
+        max_logical_key_len: usize,
+    ) -> Option<(Vec<KeyRange>, usize, usize)> {
+        let (mut ranges, constrained_prefix_len, constrained_column_count) = match spec.layout {
+            IndexLayout::Lexicographic => {
+                // Lexicographic bounds require constraints on a leading key prefix.
+                let constrained_prefix_len = self.leading_constrained_prefix(model, spec);
+                if constrained_prefix_len == 0 {
+                    return None;
+                }
+                (
+                    self.expand_index_ranges(model, spec, constrained_prefix_len)
+                        .ok()?,
+                    constrained_prefix_len,
+                    self.lexicographic_candidate_score(model, spec),
+                )
+            }
+            IndexLayout::ZOrder => {
+                // Z-order bounds can use constrained dimensions anywhere in the key.
+                let constrained_column_count = self.zorder_constrained_column_count(model, spec);
+                if constrained_column_count == 0 {
+                    return None;
+                }
+                (
+                    self.expand_zorder_index_ranges(model, spec).ok()?,
+                    constrained_column_count,
+                    constrained_column_count,
+                )
+            }
+        };
+        ranges.retain(|range| range.start.len() <= max_logical_key_len);
+        (!ranges.is_empty()).then_some((ranges, constrained_prefix_len, constrained_column_count))
     }
 
     pub(crate) fn expand_index_ranges(

@@ -121,16 +121,20 @@ DataFusion aggregation.
   index narrows the scanned range. Variable-width key columns, and key columns after
   them, have no fixed byte offset, so they are read from stored index values when
   available and otherwise fall back to native decoding. A filter on such a column needs
-  no worker check when the primary-key ranges enforce it, as they do for
+  no worker check when the key ranges enforce it, as primary-key ranges do for
   `region = 'eu'` on a primary key of `(region, seq)`. The worker then checks only the
-  other filters, such as `v >= 25` in `region = 'eu' AND v >= 25`.
+  other filters, such as `v >= 25` in `region = 'eu' AND v >= 25`. The ranges of a
+  lexicographic index enforce filters the same way, on its key columns and on the
+  primary-key columns that follow them, so `status = 'open' AND tenant = 1` over an
+  index on `status` and a primary key of `(tenant, id)` needs no worker check either.
+  The ranges of a z-order index enforce no single filter, so its worker checks them all.
 
 ### Semantics
 
 Workers apply each request's row predicate before updating aggregate state, because raw
-range bounds can include rows that scan-time key checks would exclude. A request over
-primary-key ranges carries only the filters those ranges do not enforce, and no predicate
-when they hold exactly the rows the filters accept.
+range bounds can include rows that scan-time key checks would exclude. A request carries
+only the filters its key ranges do not enforce, and no predicate when they hold exactly
+the rows the filters accept.
 Workers evaluate expressions with DataFusion and Arrow, so results follow ordinary
 DataFusion semantics:
 
@@ -226,11 +230,11 @@ A pushed grouped aggregate, for
 `SELECT status, SUM(amount_cents) ... WHERE status = 'open' GROUP BY status`:
 
 ```text
-KvAggregateExec: grouped=true, seed_job=none, aggregate_jobs=[job0{mode=secondary_index(status_idx, lexicographic), predicate=status = 'open', exact=false, row_recheck=true, ranges=1, full_scan_like=false, constrained_prefix=1}], query_stats=range_reduce(detail.extra: server-defined metadata)
+KvAggregateExec: grouped=true, seed_job=none, aggregate_jobs=[job0{mode=secondary_index(status_idx, lexicographic), predicate=status = 'open', exact=true, row_recheck=false, ranges=1, full_scan_like=false, constrained_prefix=1}], query_stats=range_reduce(detail.extra: server-defined metadata)
 ```
 
-Here the worker reads only the `status_idx` range, checks the complete predicate, and
-returns partial sums that DataFusion merges. This is the plan to aim for with
+Here the worker reads only the `status_idx` range, which holds exactly the open rows,
+and returns partial sums that DataFusion merges. This is the plan to aim for with
 selective grouped aggregates.
 
 `mode=primary_key` with `predicate=<none>` or `full_scan_like=true`, or an unexpectedly

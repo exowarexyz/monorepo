@@ -383,12 +383,12 @@ impl ScanAccessPlan {
             .all(|check| matches!(check, PredicateAccess::Pk { .. }))
     }
 
-    /// Whether the key ranges planned for an index are proven to admit only the entries the
-    /// predicate accepts.
+    /// Marks the table columns whose constraints the key ranges planned for an index enforce.
     ///
-    /// The proof is conservative. `true` means the ranges are exact, and `false` means only
-    /// that the proof does not cover them. It covers lexicographic indexes. A z-order key
-    /// interleaves its columns, and the proof does not analyze its ranges.
+    /// Every entry those ranges admit passes the constraint on each marked column. The marking
+    /// is conservative: an unmarked column may still be enforced, and a caller must check its
+    /// constraint some other way. It covers lexicographic indexes. A z-order key interleaves its
+    /// columns, so no column of one is marked.
     ///
     /// A range bound holds the index key columns and then the primary-key columns, compared as
     /// one tuple. Bounds can therefore fix each leading column to one value and give the next
@@ -406,26 +406,31 @@ impl ScanAccessPlan {
     /// ```
     ///
     /// Here `min` and `max` are the ends of a column's type. An entry with a greater `c` sorts
-    /// between the bounds whatever its `id`, so the proof counts no column after that range as
-    /// enforced. It accepts a predicate whose every constraint sits in the enforced part and is
-    /// one the bounds are known to encode.
+    /// between the bounds whatever its `id`, so no column after that range is marked. A column
+    /// is marked when it sits in the enforced part and its constraint is one the bounds are
+    /// known to encode.
     ///
     /// - An index key column encodes a single value, an IN list as one range per value, and an
     ///   inclusive range within its type. A strict float bound admits the bound itself, and a date
-    ///   bound that no date can meet is clamped to admit the type's first or last date, so the
-    ///   proof accepts neither.
+    ///   bound that no date can meet is clamped to admit the type's first or last date, so
+    ///   neither is marked.
     /// - A primary-key column in the suffix encodes only an `Int64` or `UInt64` range. For any
     ///   other constraint or column type, its bounds span every value of the column.
     /// - A primary-key column that is also an index key column is enforced there. Its suffix
-    ///   position repeats that value, and the proof treats the position as fixed only for an
-    ///   integer column.
-    pub(crate) fn predicate_fully_enforced_by_index_key(
+    ///   position repeats that value, and counts as fixed only for an integer column.
+    ///
+    /// A key can name a column more than once, as a primary key of `(tenant, id, tenant)` does.
+    /// Among the index key columns, and among the suffix columns, a later occurrence that the
+    /// bounds do not enforce clears the mark an earlier one set. Such a column can be left
+    /// unmarked while the bounds enforce it.
+    pub(crate) fn columns_enforced_by_index_ranges(
         &self,
         model: &TableModel,
         spec: &ResolvedIndexSpec,
-    ) -> bool {
+    ) -> Vec<bool> {
+        let mut enforced = vec![false; model.columns.len()];
         if spec.layout == IndexLayout::ZOrder {
-            return false;
+            return enforced;
         }
         let constraint_on = |col_idx: usize| {
             let pk_pos = model.pk_position(col_idx);
@@ -457,16 +462,13 @@ impl ScanAccessPlan {
             let strict = matches!(constraint, PredicateConstraint::FloatRange { min, max }
                 if min.is_some_and(|(_, inclusive)| !inclusive)
                     || max.is_some_and(|(_, inclusive)| !inclusive));
-            if !fixed
-                || strict
-                || !matches!(
+            enforced[col_idx] = fixed
+                && !strict
+                && matches!(
                     compile_encoded_constraint(kind, constraint),
                     EncodedConstraintCompile::Encoded(_)
-                )
-            {
-                return false;
-            }
-            fixed = QueryPredicate::constraint_is_point(kind, constraint);
+                );
+            fixed = enforced[col_idx] && QueryPredicate::constraint_is_point(kind, constraint);
         }
 
         // The suffix bounds carry integer ranges alone. A suffix position stays fixed for an
@@ -478,28 +480,41 @@ impl ScanAccessPlan {
         {
             let constraint = constraint_on(col_idx);
             let integer = matches!(kind, ColumnKind::Int64 | ColumnKind::UInt64);
-            let ranged = matches!(
-                constraint,
-                Some(
-                    PredicateConstraint::IntRange { .. } | PredicateConstraint::UInt64Range { .. }
-                )
-            );
-            if constraint.is_some()
-                && !spec.key_columns.contains(&col_idx)
-                && !(fixed && integer && ranged)
-            {
-                return false;
+            if constraint.is_some() && !spec.key_columns.contains(&col_idx) {
+                let ranged = matches!(
+                    constraint,
+                    Some(
+                        PredicateConstraint::IntRange { .. }
+                            | PredicateConstraint::UInt64Range { .. }
+                    )
+                );
+                enforced[col_idx] = fixed && integer && ranged;
+                fixed &= enforced[col_idx];
             }
             fixed &= integer
                 && constraint.is_some_and(|constraint| {
                     QueryPredicate::constraint_is_point(kind, constraint)
                 });
         }
+        enforced
+    }
 
-        // No bound holds a column outside the index key and the primary key.
+    /// Whether the key ranges planned for an index are proven to admit only the entries the
+    /// predicate accepts, which holds when they enforce the constraint on every constrained
+    /// column.
+    pub(crate) fn predicate_fully_enforced_by_index_key(
+        &self,
+        model: &TableModel,
+        spec: &ResolvedIndexSpec,
+    ) -> bool {
+        // An unconstrained z-order scan is not counted as exact either.
+        if spec.layout == IndexLayout::ZOrder {
+            return false;
+        }
+        let enforced = self.columns_enforced_by_index_ranges(model, spec);
         self.predicate_checks.iter().all(|check| match check {
-            PredicateAccess::Pk { .. } => true,
-            PredicateAccess::NonPk { col_idx, .. } => spec.key_columns.contains(col_idx),
+            PredicateAccess::Pk { pk_pos, .. } => enforced[model.primary_key_indices[*pk_pos]],
+            PredicateAccess::NonPk { col_idx, .. } => enforced[*col_idx],
         })
     }
 }
@@ -699,7 +714,9 @@ mod tests {
         }
     }
 
-    /// Builds a table with one lexicographic index per list of key columns.
+    /// Builds a table with one index per list of key columns. A column whose name ends in `?` is
+    /// nullable. A list that starts with `z-order` builds a z-order index over the columns after
+    /// it, and every other list a lexicographic one.
     fn indexed_table(
         columns: &[(&str, DataType)],
         primary_key: &[&str],
@@ -715,12 +732,23 @@ mod tests {
             0,
             columns
                 .iter()
-                .map(|(name, data_type)| TableColumnConfig::new(*name, data_type.clone(), false))
+                .map(|(name, data_type)| {
+                    TableColumnConfig::new(
+                        name.trim_end_matches('?'),
+                        data_type.clone(),
+                        name.ends_with('?'),
+                    )
+                })
                 .collect(),
             names(primary_key),
             indexes
                 .iter()
-                .map(|keys| IndexSpec::new(keys.join("_"), names(keys)).unwrap())
+                .map(|keys| match keys.split_first() {
+                    Some((&"z-order", keys)) => {
+                        IndexSpec::z_order(format!("z_{}", keys.join("_")), names(keys)).unwrap()
+                    }
+                    _ => IndexSpec::new(keys.join("_"), names(keys)).unwrap(),
+                })
                 .collect(),
         )
         .unwrap();
@@ -871,6 +899,9 @@ mod tests {
         }
     }
 
+    /// A text value long enough that the namespace of one table cannot hold its index keys.
+    const LONG_TEXT: &str = "llllllllllll";
+
     /// Returns point, range, and IN-list constraints for a column of `kind`. The last binary
     /// list holds a value one byte short, which no column value equals.
     fn constraints(kind: ColumnKind) -> Vec<PredicateConstraint> {
@@ -894,6 +925,8 @@ mod tests {
                 StringEq("n".into()),
                 StringEq(String::new()),
                 StringIn(vec![String::new(), "o".into()]),
+                StringEq(LONG_TEXT.into()),
+                StringIn(vec![LONG_TEXT.into(), "n".into()]),
             ],
             ColumnKind::Float64 => vec![
                 float(Some((1.0, true)), Some((1.0, true))),
@@ -950,7 +983,9 @@ mod tests {
         match kind {
             ColumnKind::Int64 => [4, 5, 6].map(CellValue::Int64).to_vec(),
             ColumnKind::UInt64 => [1, 2, 3].map(CellValue::UInt64).to_vec(),
-            ColumnKind::Utf8 => ["", "n", "o"].map(|v| CellValue::Utf8(v.into())).to_vec(),
+            ColumnKind::Utf8 => ["", LONG_TEXT, "n", "o"]
+                .map(|v| CellValue::Utf8(v.into()))
+                .to_vec(),
             ColumnKind::Float64 => [-0.0, 0.0, 0.5, 1.0, 2.0, f64::NAN]
                 .map(CellValue::Float64)
                 .to_vec(),
@@ -1078,14 +1113,19 @@ mod tests {
         );
     }
 
-    /// An exact answer must hold against the ranges the planner builds. Over small tables and
-    /// every mix of constraints, the ranges admit every matching index entry, and exact ranges
-    /// admit no other entry.
+    /// The columns reported as enforced must hold against the ranges the planner builds. Over
+    /// small tables and every mix of constraints, the ranges admit every matching index entry the
+    /// namespace can hold, every entry they admit passes the constraint on each enforced column,
+    /// and exact ranges admit no entry that fails the predicate.
     #[test]
-    fn exact_index_ranges_admit_only_matching_entries() {
-        // The tables put integers and strings in each position of the index key and of the
-        // primary-key suffix, with and without a key column the suffix repeats.
-        for (model, specs) in [
+    fn index_ranges_enforce_the_columns_they_report() {
+        // The tables put every kind of key column in each position of the index key and of the
+        // primary-key suffix, with and without a key column the suffix repeats. The last two add
+        // a nullable column beside a z-order index, and a namespace too small for the keys of
+        // the long text value.
+        let roomy = exoware_sdk::keys::MAX_KEY_LEN;
+        let (mut partly_enforced, mut zorder_plans, mut unstorable) = (0, 0, 0);
+        for ((model, specs), max_logical_key_len) in [
             indexed_table(
                 &[
                     ("a", DataType::Int64),
@@ -1178,11 +1218,47 @@ mod tests {
                 &["code", "id"],
                 &[&["tag"], &["tag", "code"], &["tag", "id"]],
             ),
-        ] {
-            let kinds = model.columns.iter().map(|col| col.kind);
-            let rows = product(kinds.clone().map(values).collect());
-            let choices = kinds.enumerate().map(|(idx, kind)| {
-                let constrained = constraints(kind).into_iter().map(move |c| Some((idx, c)));
+            indexed_table(
+                &[
+                    ("id", DataType::Int64),
+                    ("x", DataType::Int64),
+                    ("y", DataType::UInt64),
+                    ("note?", DataType::Utf8),
+                ],
+                &["id"],
+                &[&["x"], &["z-order", "x", "y"]],
+            ),
+            indexed_table(
+                &[
+                    ("id", DataType::Int64),
+                    ("name", DataType::Utf8),
+                    ("tag", DataType::Int64),
+                ],
+                &["id"],
+                &[&["name"], &["tag", "name"]],
+            ),
+        ]
+        .into_iter()
+        .zip([roomy, roomy, roomy, roomy, roomy, roomy, roomy, 21])
+        {
+            let rows = product(
+                model
+                    .columns
+                    .iter()
+                    .map(|col| {
+                        let mut values = values(col.kind);
+                        values.extend(col.nullable.then_some(CellValue::Null));
+                        values
+                    })
+                    .collect(),
+            );
+            let choices = model.columns.iter().enumerate().map(|(idx, col)| {
+                let mut constraints = constraints(col.kind);
+                if col.nullable {
+                    constraints
+                        .extend([PredicateConstraint::IsNull, PredicateConstraint::IsNotNull]);
+                }
+                let constrained = constraints.into_iter().map(move |c| Some((idx, c)));
                 std::iter::once(None).chain(constrained).collect()
             });
             for chosen in product(choices.collect()) {
@@ -1190,12 +1266,22 @@ mod tests {
                 predicate.constraints.extend(chosen.into_iter().flatten());
                 let access = ScanAccessPlan::new(&model, &None, &predicate);
                 for spec in &specs {
-                    // An index whose ranges cannot be built is never scanned.
-                    let prefix_len = predicate.leading_constrained_prefix(&model, spec);
-                    let Ok(ranges) = predicate.expand_index_ranges(&model, spec, prefix_len) else {
+                    // An index without a range to read is never scanned.
+                    let Some((ranges, _, _)) =
+                        predicate.index_key_ranges(&model, spec, max_logical_key_len)
+                    else {
                         continue;
                     };
+                    let enforced = access.columns_enforced_by_index_ranges(&model, spec);
                     let exact = access.predicate_fully_enforced_by_index_key(&model, spec);
+                    let enforced_count = enforced.iter().filter(|enforced| **enforced).count();
+                    if spec.layout == IndexLayout::ZOrder {
+                        assert_eq!(enforced_count, 0, "a z-order key enforces no column");
+                        zorder_plans += 1;
+                    }
+                    if 0 < enforced_count && enforced_count < predicate.constraints.len() {
+                        partly_enforced += 1;
+                    }
                     for values in &rows {
                         let row = KvRow {
                             values: values.clone(),
@@ -1203,6 +1289,12 @@ mod tests {
                         let key =
                             encode_secondary_index_key(model.table_prefix, spec, &model, &row)
                                 .unwrap();
+
+                        // Writers reject an entry whose key the namespace cannot hold.
+                        if key.len() > max_logical_key_len {
+                            unstorable += 1;
+                            continue;
+                        }
                         let admitted = ranges
                             .iter()
                             .any(|range| range.start <= key && key <= range.end);
@@ -1219,9 +1311,26 @@ mod tests {
                             spec.name,
                             predicate.describe(&model)
                         );
+                        for (col_idx, constraint) in &predicate.constraints {
+                            assert!(
+                                !enforced[*col_idx]
+                                    || !admitted
+                                    || matches_constraint(row.value_at(*col_idx), constraint),
+                                "index {} enforces {} for {}, so its ranges must not admit \
+                                 {values:?}",
+                                spec.name,
+                                model.column(*col_idx).name,
+                                predicate.describe(&model)
+                            );
+                        }
                     }
                 }
             }
         }
+        assert!(
+            partly_enforced > 0 && zorder_plans > 0 && unstorable > 0,
+            "the tables must reach a partly enforced predicate, a z-order plan, and a key the \
+             namespace cannot hold: {partly_enforced}, {zorder_plans}, {unstorable}"
+        );
     }
 }

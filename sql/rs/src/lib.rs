@@ -990,8 +990,7 @@ mod tests {
         assert!(explain.contains("grouped=true"));
         assert!(explain.contains("job0{mode=secondary_index(status_idx, lexicographic)"));
         assert!(explain.contains("predicate=status = 'open'"));
-        assert!(explain.contains("exact=false"));
-        assert!(explain.contains("row_recheck=true"));
+        assert!(explain.contains("exact=true, row_recheck=false"));
         assert_explain_includes_query_stats_surface(
             &explain,
             QueryStatsExplainSurface::RangeReduceDetail,
