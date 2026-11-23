@@ -119,7 +119,11 @@ pub(crate) enum AggregatePushdownFunction {
 ///
 /// The tree is independent of the access path. It becomes a `KvExpr` only once a job has
 /// chosen where each referenced column is decoded from.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Two expressions are equal when they are the same tree with the same literals. A `Float64`
+/// literal equals only a literal with the same bits. Zeros of opposite sign are different
+/// divisors, and a NaN is the same value wherever it is written.
+#[derive(Debug, Clone)]
 pub(crate) enum PushdownValueExpr {
     /// Column at this index in the table model's columns.
     Column(usize),
@@ -139,6 +143,29 @@ pub(crate) enum PushdownValueExpr {
     Lower(Box<Self>),
     /// `date_trunc('day', ...)` of a date or timezone-free timestamp operand.
     DateTruncDay(Box<Self>),
+}
+
+impl PartialEq for PushdownValueExpr {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Column(left), Self::Column(right)) => left == right,
+            (
+                Self::Literal(KvReducedValue::Float64(left)),
+                Self::Literal(KvReducedValue::Float64(right)),
+            ) => left.to_bits() == right.to_bits(),
+            (Self::Literal(left), Self::Literal(right)) => left == right,
+            (Self::Add(left, right), Self::Add(other_left, other_right))
+            | (Self::Sub(left, right), Self::Sub(other_left, other_right))
+            | (Self::Mul(left, right), Self::Mul(other_left, other_right))
+            | (Self::Div(left, right), Self::Div(other_left, other_right)) => {
+                left == other_left && right == other_right
+            }
+            (Self::CastFloat64(inner), Self::CastFloat64(other_inner))
+            | (Self::Lower(inner), Self::Lower(other_inner))
+            | (Self::DateTruncDay(inner), Self::DateTruncDay(other_inner)) => inner == other_inner,
+            _ => false,
+        }
+    }
 }
 
 impl PushdownValueExpr {
@@ -201,11 +228,20 @@ pub(crate) struct AggregateReduceJob {
 }
 
 impl AggregateReduceJob {
-    /// Whether one request per range can carry the reducers of both jobs.
+    /// Whether one request per range can carry the reducers of both jobs. The jobs must read
+    /// the same ranges and send the Store the same group keys and row filter, compared in
+    /// their wire form so that float literals and bounds match bit for bit.
     fn shares_request(&self, other: &Self) -> bool {
-        self.ranges == other.ranges
-            && self.request.group_by == other.request.group_by
-            && self.request.filter == other.request.filter
+        let group_keys_and_filter = |job: &Self| {
+            buffa::Message::encode_to_bytes(&exoware_proto::to_proto_reduce_params(
+                RangeReduceParams {
+                    reducers: Vec::new(),
+                    group_by: job.request.group_by.clone(),
+                    filter: job.request.filter.clone(),
+                },
+            ))
+        };
+        self.ranges == other.ranges && group_keys_and_filter(self) == group_keys_and_filter(other)
     }
 }
 
@@ -3311,9 +3347,11 @@ mod tests {
 
         // A projection evaluates these expressions on every row before any guard, so the division
         // fails on the row whose quantity is zero and the cast on a status. Casts, function calls,
-        // and arithmetic stay where DataFusion evaluates them. So does IS TRUE, because DataFusion
-        // cannot plan it beneath an aggregate for a nullable operand. Each case names the error
-        // both plans must raise, if they must.
+        // and arithmetic stay where DataFusion evaluates them. So does IS TRUE on a nullable
+        // operand. DataFusion 55.2 fails to plan it when two aggregates share it, natively as
+        // well as here (apache/datafusion#27404). Each case names the error both plans must
+        // raise, if they must. The IS TRUE case names none, so it holds with and without the
+        // upstream fix.
         let mut refused = Vec::new();
         for (condition, raises) in [
             ("amount / qty > 1", Some("Divide by zero")),
@@ -3357,6 +3395,80 @@ mod tests {
                 "an expression that is not known to be safe must stay ahead of its guard: {sql}"
             );
         }
+    }
+
+    /// CASE arms become one reducer argument only when their values are the same expression.
+    /// Float literals are the same only bit for bit, because dividing by zeros of opposite sign
+    /// gives infinities of opposite sign.
+    #[tokio::test]
+    async fn case_arms_share_an_argument_only_when_their_values_are_identical() {
+        // The key ranges enforce both guards on the fixed-width key, so no worker filter is
+        // involved. The first query takes its arms from different rows and must match native
+        // DataFusion without a reduction.
+        let fixture = Fixture::new().await;
+        let sql =
+            "SELECT MIN(CASE WHEN id = 1 THEN amount / 0.0 WHEN id = 2 THEN amount / -0.0 END) \
+                   FROM orders";
+        let native = values(&fixture.native, sql).await.unwrap();
+        assert_eq!(native, [[ScalarValue::Float64(Some(f64::NEG_INFINITY))]]);
+        assert_eq!(
+            values(fixture.context.datafusion(), sql).await.unwrap(),
+            native,
+            "{sql}"
+        );
+        assert!(
+            fixture.rows.reductions.lock().unwrap().is_empty(),
+            "arms with different values must not share one reducer argument: {sql}"
+        );
+        fixture
+            .check(
+                "SELECT MIN(CASE WHEN id = 1 THEN amount / -0.0 WHEN id = 2 THEN amount / -0.0 END) \
+                 FROM orders",
+                2,
+            )
+            .await;
+
+        let zero = |value: f64| PushdownValueExpr::Literal(KvReducedValue::Float64(value));
+        assert_ne!(zero(0.0), zero(-0.0));
+        assert_eq!(zero(f64::NAN), zero(f64::NAN));
+        assert_ne!(zero(f64::NAN), zero(-f64::NAN));
+        assert_eq!(
+            PushdownValueExpr::Div(Box::new(PushdownValueExpr::Column(3)), Box::new(zero(-0.0))),
+            PushdownValueExpr::Div(Box::new(PushdownValueExpr::Column(3)), Box::new(zero(-0.0)))
+        );
+    }
+
+    /// Jobs share a request only when the Store would receive the same group keys and row
+    /// filter. Zeros of opposite sign are different literals and different bounds, and a NaN
+    /// is the same literal wherever it is written.
+    #[test]
+    fn jobs_share_a_request_only_when_its_group_keys_and_filter_are_identical() {
+        let job = |group: f64, bound: f64| AggregateReduceJob {
+            request: RangeReduceParams {
+                reducers: Vec::new(),
+                group_by: vec![KvExpr::Literal(KvReducedValue::Float64(group))],
+                filter: Some(KvPredicate {
+                    checks: vec![KvPredicateCheck {
+                        field: KvFieldRef::Value {
+                            index: 1,
+                            kind: KvFieldKind::Float64,
+                            nullable: true,
+                        },
+                        constraint: KvPredicateConstraint::FloatRange {
+                            min: Some((bound, true)),
+                            max: None,
+                        },
+                    }],
+                    contradiction: false,
+                }),
+            },
+            ranges: Vec::new(),
+        };
+        assert!(job(1.0, 0.0).shares_request(&job(1.0, 0.0)));
+        assert!(job(f64::NAN, 1.0).shares_request(&job(f64::NAN, 1.0)));
+        assert!(!job(1.0, 0.0).shares_request(&job(1.0, -0.0)));
+        assert!(!job(0.0, 1.0).shares_request(&job(-0.0, 1.0)));
+        assert!(!job(1.0, 0.0).shares_request(&job(1.0, 2.0)));
     }
 
     #[test]
