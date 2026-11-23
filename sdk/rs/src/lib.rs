@@ -498,13 +498,7 @@ impl PrefixedStoreClient {
         &self,
         key: &Key,
         min_sequence_number: Option<u64>,
-    ) -> Result<
-        (
-            exoware_proto::query::GetResponse,
-            Option<proto_query::Detail>,
-        ),
-        ClientError,
-    > {
+    ) -> Result<(Option<Bytes>, Option<u64>), ClientError> {
         self.client
             .send_get(&self.encode_store_key(key)?, min_sequence_number)
             .await
@@ -1063,6 +1057,42 @@ pub enum RangeMode {
     Reverse,
 }
 
+/// Records a stream frame's sequence number in the session, if there is one.
+fn observe_frame_detail(
+    observed_sequence: Option<&ObservedSequence>,
+    detail: Option<&proto_query::DetailView<'_>>,
+) {
+    if let (Some(sequence_store), Some(detail)) = (observed_sequence, detail) {
+        sequence_store.observe(detail.sequence_number);
+    }
+}
+
+/// Builds the owned `Detail` a chunk exposes. Converting just the detail, not the whole
+/// frame, leaves `Detail.extra` as the only allocation.
+fn owned_frame_detail(detail: Option<&proto_query::DetailView<'_>>) -> Option<proto_query::Detail> {
+    detail.map(|detail| {
+        buffa::MessageView::to_owned_message(detail)
+            .expect("a wire-decoded view always converts to its owned message")
+    })
+}
+
+/// Slices a stream row's key out of its frame buffer and strips the client's prefix.
+fn decode_frame_key(
+    key_prefix: Option<&StoreKeyPrefix>,
+    wire: &Bytes,
+    key: &[u8],
+) -> Result<Key, ClientError> {
+    let key = match key_prefix {
+        Some(prefix) => prefix
+            .inner
+            .strip_slice(key)
+            .ok_or(StoreKeyPrefixError::PrefixMismatch)?,
+        None => key,
+    };
+    // Every borrowed field of a decoded frame points into `wire`.
+    Ok(wire.slice_ref(key))
+}
+
 #[derive(Clone, Debug)]
 pub struct RangeChunk {
     /// Rows returned in this stream frame.
@@ -1083,7 +1113,7 @@ pub struct GetManyChunk {
 pub struct RangeStream {
     stream:
         ConnectServerStream<ProtoErasedResponseBody, exoware_proto::query::RangeFrameView<'static>>,
-    pending_frame: Option<exoware_proto::query::RangeFrame>,
+    pending_frame: Option<connectrpc::StreamMessage<exoware_proto::query::RangeFrame>>,
     rows_seen: usize,
     final_count: Option<usize>,
     finished: bool,
@@ -1124,12 +1154,10 @@ impl RangeStream {
         }
         match self.stream.message().await? {
             Some(frame) => {
-                let frame = frame.to_owned_message();
-                if let (Some(sequence_store), Some(detail)) =
-                    (&self.observed_sequence, frame.detail.as_option())
-                {
-                    sequence_store.observe(detail.sequence_number);
-                }
+                observe_frame_detail(
+                    self.observed_sequence.as_deref(),
+                    frame.view().detail.as_option(),
+                );
                 self.pending_frame = Some(frame);
                 Ok(())
             }
@@ -1167,34 +1195,32 @@ impl RangeStream {
                     self.final_count = Some(self.rows_seen);
                     return Ok(None);
                 };
-                let frame = frame.to_owned_message();
-                if let (Some(sequence_store), Some(detail)) =
-                    (&self.observed_sequence, frame.detail.as_option())
-                {
-                    sequence_store.observe(detail.sequence_number);
-                }
+                observe_frame_detail(
+                    self.observed_sequence.as_deref(),
+                    frame.view().detail.as_option(),
+                );
                 frame
             };
 
-            let detail = frame.detail.as_option().cloned();
-            let n = frame.results.len();
+            let view = frame.view();
+            let n = view.results.len();
 
             // Hide default/empty wire frames from the SDK's semantic chunk stream.
-            if n == 0 && detail.is_none() {
+            if n == 0 && view.detail.as_option().is_none() {
                 continue;
             }
 
+            let wire = frame.bytes();
             let mut out = Vec::with_capacity(n);
-            for entry in frame.results {
-                let key = Bytes::from(entry.key);
-                let key = match &self.key_prefix {
-                    Some(prefix) => prefix.decode_key(&key)?,
-                    None => key,
-                };
-                out.push((key, entry.value));
+            for entry in view.results.iter() {
+                let key = decode_frame_key(self.key_prefix.as_ref(), wire, entry.key)?;
+                out.push((key, wire.slice_ref(entry.value)));
             }
             self.rows_seen += n;
-            return Ok(Some(RangeChunk { rows: out, detail }));
+            return Ok(Some(RangeChunk {
+                rows: out,
+                detail: owned_frame_detail(view.detail.as_option()),
+            }));
         }
     }
 
@@ -1220,7 +1246,7 @@ pub struct GetManyStream {
         ProtoErasedResponseBody,
         exoware_proto::query::GetManyFrameView<'static>,
     >,
-    pending_frame: Option<exoware_proto::query::GetManyFrame>,
+    pending_frame: Option<connectrpc::StreamMessage<exoware_proto::query::GetManyFrame>>,
     finished: bool,
     observed_sequence: Option<Arc<ObservedSequence>>,
     key_prefix: Option<StoreKeyPrefix>,
@@ -1253,12 +1279,10 @@ impl GetManyStream {
         }
         match self.stream.message().await? {
             Some(frame) => {
-                let frame = frame.to_owned_message();
-                if let (Some(sequence_store), Some(detail)) =
-                    (&self.observed_sequence, frame.detail.as_option())
-                {
-                    sequence_store.observe(detail.sequence_number);
-                }
+                observe_frame_detail(
+                    self.observed_sequence.as_deref(),
+                    frame.view().detail.as_option(),
+                );
                 self.pending_frame = Some(frame);
                 Ok(())
             }
@@ -1293,35 +1317,30 @@ impl GetManyStream {
                     }
                     return Ok(None);
                 };
-                let frame = frame.to_owned_message();
-                if let (Some(sequence_store), Some(detail)) =
-                    (&self.observed_sequence, frame.detail.as_option())
-                {
-                    sequence_store.observe(detail.sequence_number);
-                }
+                observe_frame_detail(
+                    self.observed_sequence.as_deref(),
+                    frame.view().detail.as_option(),
+                );
                 frame
             };
 
-            let detail = frame.detail.as_option().cloned();
-            let n = frame.results.len();
+            let view = frame.view();
+            let n = view.results.len();
 
             // Hide default/empty wire frames from the SDK's semantic chunk stream.
-            if n == 0 && detail.is_none() {
+            if n == 0 && view.detail.as_option().is_none() {
                 continue;
             }
 
+            let wire = frame.bytes();
             let mut out = Vec::with_capacity(n);
-            for entry in frame.results {
-                let key = Bytes::from(entry.key);
-                let key = match &self.key_prefix {
-                    Some(prefix) => prefix.decode_key(&key)?,
-                    None => key,
-                };
-                out.push((key, entry.value));
+            for entry in view.results.iter() {
+                let key = decode_frame_key(self.key_prefix.as_ref(), wire, entry.key)?;
+                out.push((key, entry.value.map(|value| wire.slice_ref(value))));
             }
             return Ok(Some(GetManyChunk {
                 entries: out,
-                detail,
+                detail: owned_frame_detail(view.detail.as_option()),
             }));
         }
     }
@@ -2048,8 +2067,8 @@ impl StoreClient {
         key: &Key,
         min_sequence_number: Option<u64>,
     ) -> Result<Option<Bytes>, ClientError> {
-        let (response, _detail) = self.send_get(key, min_sequence_number).await?;
-        Ok(response.value)
+        let (value, _) = self.send_get(key, min_sequence_number).await?;
+        Ok(value)
     }
 
     /// Physical `get_many` over already-encoded wire keys. The
@@ -2249,17 +2268,17 @@ impl StoreClient {
         Ok(resp.status().is_success())
     }
 
+    /// Sends a Get and returns the value and the response's sequence number, which is
+    /// `None` when the response has no `Detail`.
+    ///
+    /// Both are read from the decoded wire view. Converting the response to an owned
+    /// message would also build `Detail.extra`, a map with one `String` per entry, and no
+    /// caller reads it.
     async fn send_get(
         &self,
         key: &Key,
         min_sequence_number: Option<u64>,
-    ) -> Result<
-        (
-            exoware_proto::query::GetResponse,
-            Option<proto_query::Detail>,
-        ),
-        ClientError,
-    > {
+    ) -> Result<(Option<Bytes>, Option<u64>), ClientError> {
         if !is_valid_key_size(key.len()) {
             return Err(ClientError::WireFormat(format!(
                 "key length {} is outside valid store key range ({}..={})",
@@ -2282,24 +2301,13 @@ impl StoreClient {
                     .await
             })
             .await?;
-        let owned = response.into_owned();
-        let detail = owned.detail.as_option().cloned();
-        Ok((owned, detail))
-    }
-
-    #[cfg(test)]
-    pub async fn send_get_for_tests(
-        &self,
-        key: &Key,
-        min_sequence_number: Option<u64>,
-    ) -> Result<
-        (
-            exoware_proto::query::GetResponse,
-            Option<proto_query::Detail>,
-        ),
-        ClientError,
-    > {
-        self.send_get(key, min_sequence_number).await
+        // Every borrowed field of an `OwnedView` points into its `bytes()`, so
+        // `slice_ref` shares the value with the response buffer and can't panic.
+        let body = response.into_view();
+        let view = body.reborrow();
+        let value = view.value.map(|value| body.bytes().slice_ref(value));
+        let sequence_number = view.detail.as_option().map(|detail| detail.sequence_number);
+        Ok((value, sequence_number))
     }
 
     async fn range_stream_internal(
@@ -2938,14 +2946,14 @@ impl ReadSession {
     }
 
     pub async fn get(&self, key: &Key) -> Result<Option<Bytes>, ClientError> {
-        let (response, detail) = self
+        let (value, sequence_number) = self
             .client
             .send_get(key, self.min_sequence_number())
             .await?;
-        if let Some(detail) = detail {
-            self.observed_sequence.observe(detail.sequence_number);
+        if let Some(sequence_number) = sequence_number {
+            self.observed_sequence.observe(sequence_number);
         }
-        Ok(response.value)
+        Ok(value)
     }
 
     pub async fn get_many(
@@ -3391,9 +3399,7 @@ mod tests {
         assert!(sender.is_closed());
     }
 
-    fn reduce_body(frames: &[proto_query::ReduceResponse], final_status: &[u8]) -> Bytes {
-        use buffa::Message;
-
+    fn stream_body<M: buffa::Message>(frames: &[M], final_status: &[u8]) -> Bytes {
         let mut body = Vec::new();
         for frame in frames {
             body.extend_from_slice(
@@ -3452,12 +3458,12 @@ mod tests {
     #[tokio::test]
     async fn reduce_retries_before_first_frame_and_observes_response_details() {
         let transport = ReduceTransport::new([
-            reduce_body(
+            stream_body::<proto_query::ReduceResponse>(
                 &[],
                 br#"{"error":{"code":"unavailable","message":"retry open"}}"#,
             ),
-            reduce_body(&[count_frame(None), count_frame(Some(47))], b"{}"),
-            reduce_body(&[count_frame(Some(50))], b"{}"),
+            stream_body(&[count_frame(None), count_frame(Some(47))], b"{}"),
+            stream_body(&[count_frame(Some(50))], b"{}"),
         ]);
         let session = reduce_test_client(transport.clone()).create_session();
         let start = Bytes::from_static(b"a");
@@ -3508,7 +3514,7 @@ mod tests {
 
     #[tokio::test]
     async fn reduce_never_retries_after_a_result_frame() {
-        let transport = ReduceTransport::new([reduce_body(
+        let transport = ReduceTransport::new([stream_body(
             &[count_frame(None)],
             br#"{"error":{"code":"unavailable","message":"failed after results"}}"#,
         )]);
@@ -3704,6 +3710,66 @@ mod tests {
                     .unwrap())
             })
         }
+    }
+
+    /// Answers Get, Range and GetMany with fixed messages. Each stream sends one frame.
+    #[derive(Clone, Default)]
+    struct FixedQueryTransport {
+        get: proto_query::GetResponse,
+        range: proto_query::RangeFrame,
+        get_many: proto_query::GetManyFrame,
+    }
+
+    impl connectrpc::client::ClientTransport for FixedQueryTransport {
+        type ResponseBody =
+            http_body_util::combinators::UnsyncBoxBody<Bytes, std::convert::Infallible>;
+        type Error = ConnectError;
+
+        fn send(
+            &self,
+            request: http::Request<connectrpc::client::ClientBody>,
+        ) -> connectrpc::client::BoxFuture<
+            'static,
+            Result<http::Response<Self::ResponseBody>, Self::Error>,
+        > {
+            let response = match request.uri().path() {
+                "/store.query.v1.Service/Get" => {
+                    Ok((self.get.encode_to_bytes(), "application/proto"))
+                }
+                "/store.query.v1.Service/Range" => Ok((
+                    stream_body(std::slice::from_ref(&self.range), b"{}"),
+                    "application/connect+proto",
+                )),
+                "/store.query.v1.Service/GetMany" => Ok((
+                    stream_body(std::slice::from_ref(&self.get_many), b"{}"),
+                    "application/connect+proto",
+                )),
+                path => Err(ConnectError::unimplemented(format!(
+                    "unexpected test request path {path}"
+                ))),
+            };
+            Box::pin(async move {
+                let (body, content_type) = response?;
+                let body = http_body_util::BodyExt::boxed_unsync(http_body_util::Full::new(body));
+                Ok(http::Response::builder()
+                    .header(http::header::CONTENT_TYPE, content_type)
+                    .body(body)
+                    .unwrap())
+            })
+        }
+    }
+
+    fn fixed_query_client(
+        transport: FixedQueryTransport,
+        prefix: StoreKeyPrefix,
+    ) -> PrefixedStoreClient {
+        StoreClient::builder()
+            .url("http://query.internal")
+            .retry_config(RetryConfig::disabled())
+            .client_transport(transport)
+            .build()
+            .unwrap()
+            .prefixed(prefix)
     }
 
     #[boxed]
@@ -4298,6 +4364,146 @@ mod tests {
         }
     }
 
+    fn detail_with_extra(sequence_number: u64) -> proto_query::Detail {
+        proto_query::Detail {
+            sequence_number,
+            extra: [(
+                "store_read_ops".to_string(),
+                buffa_types::google::protobuf::Value::from(3.0),
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_chunks_slice_rows_and_keep_their_frame_detail() {
+        let prefix = StoreKeyPrefix::new("tenant/").unwrap();
+        let physical = |key: &'static [u8]| prefix.encode_key(&Bytes::from_static(key)).unwrap();
+        let entry = |key, value: &'static [u8]| exoware_proto::common::Entry {
+            key: physical(key).to_vec(),
+            value: Bytes::from_static(value),
+            ..Default::default()
+        };
+        let get_many_entry = |key, value: Option<&'static [u8]>| proto_query::GetManyEntry {
+            key: physical(key).to_vec(),
+            value: value.map(Bytes::from_static),
+            ..Default::default()
+        };
+        let client = fixed_query_client(
+            FixedQueryTransport {
+                range: proto_query::RangeFrame {
+                    results: vec![entry(b"a", b"1"), entry(b"b", b"")],
+                    detail: detail_with_extra(7).into(),
+                    ..Default::default()
+                },
+                get_many: proto_query::GetManyFrame {
+                    results: vec![
+                        get_many_entry(b"a", Some(b"1")),
+                        get_many_entry(b"b", None),
+                        get_many_entry(b"c", Some(b"")),
+                    ],
+                    detail: detail_with_extra(9).into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            prefix.clone(),
+        );
+        let key = |key: &'static [u8]| Bytes::from_static(key);
+
+        let mut range = client
+            .query()
+            .range_stream(&key(b"a"), &key(b"z"), 10, 10)
+            .await
+            .unwrap();
+        let chunk = range.next_chunk().await.unwrap().unwrap();
+        assert_eq!(
+            chunk.rows,
+            vec![(key(b"a"), key(b"1")), (key(b"b"), key(b""))]
+        );
+        assert_eq!(chunk.detail, Some(detail_with_extra(7)));
+        assert!(range.next_chunk().await.unwrap().is_none());
+        assert_eq!(range.final_count(), Some(2));
+
+        let mut get_many = client
+            .query()
+            .get_many(&[&key(b"a"), &key(b"b"), &key(b"c")], 10)
+            .await
+            .unwrap();
+        let chunk = get_many.next_chunk().await.unwrap().unwrap();
+        assert_eq!(
+            chunk.entries,
+            vec![
+                (key(b"a"), Some(key(b"1"))),
+                (key(b"b"), None),
+                (key(b"c"), Some(key(b""))),
+            ]
+        );
+        assert_eq!(chunk.detail, Some(detail_with_extra(9)));
+        assert!(get_many.next_chunk().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn stream_rows_outside_the_client_prefix_are_rejected() {
+        let foreign = b"other/key".to_vec();
+        let client = fixed_query_client(
+            FixedQueryTransport {
+                range: proto_query::RangeFrame {
+                    results: vec![exoware_proto::common::Entry {
+                        key: foreign.clone(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                get_many: proto_query::GetManyFrame {
+                    results: vec![proto_query::GetManyEntry {
+                        key: foreign,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            StoreKeyPrefix::new("tenant/").unwrap(),
+        );
+        let key = Bytes::from_static(b"key");
+
+        let mut range = client.query().range_stream(&key, &key, 1, 1).await.unwrap();
+        assert!(matches!(
+            range.next_chunk().await,
+            Err(ClientError::Prefix(StoreKeyPrefixError::PrefixMismatch))
+        ));
+        let mut get_many = client.query().get_many(&[&key], 1).await.unwrap();
+        assert!(matches!(
+            get_many.next_chunk().await,
+            Err(ClientError::Prefix(StoreKeyPrefixError::PrefixMismatch))
+        ));
+    }
+
+    #[tokio::test]
+    async fn get_keeps_empty_values_apart_from_missing_ones() {
+        let key = Bytes::from_static(b"key");
+        for value in [None, Some(Bytes::new()), Some(Bytes::from_static(b"value"))] {
+            let client = fixed_query_client(
+                FixedQueryTransport {
+                    get: proto_query::GetResponse {
+                        value: value.clone(),
+                        detail: detail_with_extra(5).into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                StoreKeyPrefix::identity(),
+            );
+            assert_eq!(client.query().get(&key).await.unwrap(), value);
+            let session = client.create_session();
+            assert_eq!(session.get(&key).await.unwrap(), value);
+            assert_eq!(session.evaluated_sequence(), Some(5));
+        }
+    }
+
     #[tokio::test]
     async fn zero_observation_is_shared_by_clones() {
         let transport = SessionSequenceTransport::with_response_sequences([Some(0), Some(5)]);
@@ -4473,9 +4679,9 @@ mod tests {
     async fn session_policies_observe_stream_frames_without_changing_in_flight_floors() {
         for monotonic in [false, true] {
             let transport = ReduceTransport::new([
-                reduce_body(&[count_frame(Some(47)), count_frame(Some(50))], b"{}"),
-                reduce_body(&[count_frame(Some(48))], b"{}"),
-                reduce_body(&[count_frame(Some(51))], b"{}"),
+                stream_body(&[count_frame(Some(47)), count_frame(Some(50))], b"{}"),
+                stream_body(&[count_frame(Some(48))], b"{}"),
+                stream_body(&[count_frame(Some(51))], b"{}"),
             ]);
             let client = reduce_test_client(transport.clone());
             let session = if monotonic {
