@@ -189,7 +189,7 @@ pub struct Ordered<
     F: Graftable,
     H,
     K: QmdbKey,
-    V: commonware_codec::Codec,
+    V: Read,
     const N: usize,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > where
