@@ -734,7 +734,8 @@ async fn verify_snapshots<F, K, V, E>(
                         assert_update(&one.operation, key, value);
                         assert!(lookup.get(tip, key, None, &wrong_root).await.is_err());
                     }
-                    (None, VerifiedKeyLookup::Miss { key: missed }) => {
+                    (None, VerifiedKeyLookup::Miss { root, key: missed }) => {
+                        assert_eq!(root, snapshot.root);
                         assert_eq!(&missed, key);
                     }
                     _ => panic!("lookup disagrees with source state"),
@@ -754,6 +755,7 @@ async fn verify_snapshots<F, K, V, E>(
                     .get_range(tip, cursor.clone(), None, 2, None, &wrong_root)
                     .await
                     .is_err());
+                assert_eq!(page.root, snapshot.root);
                 assert!(page.entries.len() <= 2);
                 for entry in page.entries {
                     let Operation::Update(update) = entry.operation else {
@@ -819,9 +821,18 @@ async fn verify_snapshots<F, K, V, E>(
                         assert_same_key_value(typed, direct)
                     }
                     (
-                        VerifiedKeyLookup::Miss { key: typed },
-                        VerifiedKeyLookup::Miss { key: direct },
-                    ) => assert_eq!(typed, direct),
+                        VerifiedKeyLookup::Miss {
+                            root: typed_root,
+                            key: typed,
+                        },
+                        VerifiedKeyLookup::Miss {
+                            root: direct_root,
+                            key: direct,
+                        },
+                    ) => {
+                        assert_eq!(typed_root, direct_root);
+                        assert_eq!(typed, direct);
+                    }
                     _ => panic!("typed and native lookups disagree"),
                 }
             }
@@ -855,6 +866,7 @@ async fn verify_snapshots<F, K, V, E>(
                 )
                 .await
                 .expect("native get_range");
+            assert_eq!(typed.root, direct.root);
             assert_eq!(typed.next_start_key, direct.next_start_key);
             assert_eq!(typed.entries.len(), direct.entries.len());
             for (typed, direct) in typed.entries.iter().zip(&direct.entries) {

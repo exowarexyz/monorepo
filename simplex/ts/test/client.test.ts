@@ -229,7 +229,7 @@ test('streams header and full block data separately', async () => {
 
   const simplex = new SimplexSubscriptions(store);
   const headerBatches = [];
-  for await (const batch of simplex.subscribeHeaders()) {
+  for await (const batch of simplex.subscribeHeadersRaw()) {
     headerBatches.push(batch);
   }
   assert.deepEqual(headerBatches[0].entries, [
@@ -242,7 +242,7 @@ test('streams header and full block data separately', async () => {
   ]);
 
   const blockBatches = [];
-  for await (const batch of simplex.subscribeBlocks()) {
+  for await (const batch of simplex.subscribeBlocksRaw()) {
     blockBatches.push(batch);
   }
   assert.deepEqual(blockBatches[0].entries, [
