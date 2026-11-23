@@ -10,12 +10,15 @@ use connectrpc::{client::ClientConfig, ConnectError, ErrorCode};
 use datafusion::{
     arrow::{
         array::{ArrayRef, AsArray, Int64Array},
-        datatypes::{DataType, Int64Type},
+        datatypes::{DataType, Field, Int64Type, Schema, SchemaRef},
         ipc::reader::StreamReader,
         record_batch::RecordBatch,
     },
-    common::ScalarValue,
+    catalog::{Session, TableProvider},
+    common::{exec_err, Result as DataFusionResult, ScalarValue},
     datasource::{MemTable, ViewTable},
+    logical_expr::{create_udf, Expr, TableType, Volatility},
+    physical_plan::ExecutionPlan,
 };
 use exoware_sdk::{
     proto::PreferZstdHttpClient, transport::set_tcp_nodelay, StoreClient, StoreKeyPrefix,
@@ -433,11 +436,15 @@ async fn connect_query_rejects_shared_catalog_changes() {
         "SET datafusion.catalog.default_schema = 'scratch'",
         "SET datafusion.catalog.information_schema = true",
         "RESET datafusion.catalog.default_schema",
+        "SET datafusion.sql_parser.dialect = 'mysql'",
+        "RESET datafusion.sql_parser.dialect",
+        "SET datafusion.sql_parser.enable_ident_normalization = false",
     ] {
         let error = query_error(&client, sql).await;
         assert_eq!(error.code, ErrorCode::InvalidArgument, "{sql}: {error:?}");
     }
 
+    // The served table still answers with its stored row.
     let response = client
         .query(QueryRequest {
             sql: "SELECT value FROM items WHERE id = 1".to_string(),
@@ -463,7 +470,7 @@ async fn connect_query_rejects_shared_catalog_changes() {
         .collect();
     assert_eq!(values, vec![Some("one".to_string())]);
 
-    // No rejected statement reached the server's catalog or options, and the accepted one did.
+    // No rejected statement reached the server's catalog or options.
     let ctx = server.context();
     for table in ["copied_items", "empty_items", "item_values"] {
         assert!(ctx.table_provider(table).await.is_err(), "{table}");
@@ -477,6 +484,8 @@ async fn connect_query_rejects_shared_catalog_changes() {
     let options = ctx.datafusion().state().config().options().clone();
     assert_eq!(options.catalog.default_schema, "public");
     assert!(!options.catalog.information_schema);
+    assert_eq!(options.sql_parser.dialect, Default::default());
+    assert!(options.sql_parser.enable_ident_normalization);
     handle.abort();
 }
 
@@ -528,7 +537,8 @@ async fn connect_query_rejects_writes_other_than_insert() {
         let error = query_error(&client, sql).await;
         assert_eq!(error.code, ErrorCode::InvalidArgument, "{sql}: {error:?}");
     }
-    query_error(&client, "EXECUTE remove_id(1)").await;
+    let error = query_error(&client, "EXECUTE remove_id(1)").await;
+    assert_eq!(error.code, ErrorCode::InvalidArgument, "{error:?}");
 
     // A statement the embedder prepared follows the same rule when a caller executes it.
     server
@@ -575,6 +585,83 @@ async fn connect_query_reports_invalid_values_as_invalid_argument() {
     ] {
         let error = query_error(&client, sql).await;
         assert_eq!(error.code, ErrorCode::InvalidArgument, "{sql}: {error:?}");
+    }
+    handle.abort();
+}
+
+#[tokio::test]
+async fn connect_query_reports_a_failed_execute_as_invalid_argument() {
+    let schema = KvSchema::new(common::local_store_client().await.unprefixed());
+    let server = Arc::new(SqlServer::new(schema).expect("the server must build"));
+    server
+        .context()
+        .sql("PREPARE taken(BIGINT) AS SELECT $1")
+        .await
+        .expect("the embedder must prepare a statement");
+    let (client, handle) = serve_sql(server).await;
+
+    // Each EXECUTE names no prepared statement or passes the wrong number of parameters.
+    for sql in ["EXECUTE nope", "EXECUTE taken", "EXECUTE taken(1, 2)"] {
+        let error = query_error(&client, sql).await;
+        assert_eq!(error.code, ErrorCode::InvalidArgument, "{sql}: {error:?}");
+    }
+    handle.abort();
+}
+
+/// A table whose source is down, so building a plan that scans it fails on the server.
+#[derive(Debug)]
+struct UnavailableTable;
+
+#[async_trait::async_trait]
+impl TableProvider for UnavailableTable {
+    fn schema(&self) -> SchemaRef {
+        Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]))
+    }
+
+    fn table_type(&self) -> TableType {
+        TableType::Base
+    }
+
+    async fn scan(
+        &self,
+        _state: &dyn Session,
+        _projection: Option<&Vec<usize>>,
+        _filters: &[Expr],
+        _limit: Option<usize>,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        exec_err!("table source is unavailable")
+    }
+}
+
+#[tokio::test]
+async fn connect_query_keeps_server_faults_in_an_execute_internal() {
+    let schema = KvSchema::new(common::local_store_client().await.unprefixed());
+    let server = Arc::new(SqlServer::new(schema).expect("the server must build"));
+    let ctx = server.context();
+    ctx.register_udf(create_udf(
+        "broken",
+        vec![DataType::Int64],
+        DataType::Int64,
+        Volatility::Volatile,
+        Arc::new(|_| exec_err!("function backend is unavailable")),
+    ));
+    ctx.register_table("unavailable", Arc::new(UnavailableTable))
+        .expect("the unavailable table must register");
+    for sql in [
+        "PREPARE scan_unavailable AS SELECT id FROM unavailable",
+        "PREPARE call_broken AS SELECT broken(1)",
+    ] {
+        ctx.sql(sql)
+            .await
+            .expect("the embedder must prepare a statement");
+    }
+    let (client, handle) = serve_sql(server.clone()).await;
+
+    // The statement an EXECUTE starts fails when its plan is built or while it runs. Neither
+    // is the caller's mistake.
+    for sql in ["EXECUTE scan_unavailable", "EXECUTE call_broken"] {
+        let error = query_error(&client, sql).await;
+        assert_eq!(error.code, ErrorCode::Internal, "{sql}: {error:?}");
     }
     handle.abort();
 }
@@ -938,6 +1025,49 @@ async fn connect_query_enforces_sequence_floor_and_returns_evaluated_sequence() 
         assert_eq!(response.sequence_number, None, "{sql}");
     }
 
+    handle.abort();
+}
+
+#[tokio::test]
+async fn connect_query_reports_the_commit_sequence_of_an_insert() {
+    let store = common::local_store_client().await;
+    let server = Arc::new(SqlServer::new(items_schema(&store)).expect("the server must build"));
+    let (client, handle) = serve_sql(server).await;
+    let query = async |sql: &str, min_sequence_number: Option<u64>| {
+        client
+            .query(QueryRequest {
+                sql: sql.to_string(),
+                min_sequence_number,
+                ..Default::default()
+            })
+            .await
+            .expect(sql)
+            .into_view()
+            .to_owned_message()
+    };
+
+    // The response carries the sequence of the batch the INSERT committed.
+    let sequence = query("INSERT INTO items VALUES (1, 'one')", None)
+        .await
+        .sequence_number
+        .expect("an INSERT must report its commit sequence");
+    let batch = store
+        .unprefixed()
+        .stream()
+        .get_batch(sequence)
+        .await
+        .expect("the Store log must be readable")
+        .expect("the commit must be in the Store log");
+    assert_eq!(batch.entries.len(), 1, "the INSERT must write one row");
+
+    // A read that requires the commit sees the row.
+    let response = query("SELECT value FROM items WHERE id = 1", Some(sequence)).await;
+    assert_eq!(result_row_count(&response.results), 1);
+    assert!(response.sequence_number >= Some(sequence));
+
+    // An INSERT that writes no rows reports no sequence.
+    let response = query("INSERT INTO items SELECT 2, 'two' WHERE false", None).await;
+    assert_eq!(response.sequence_number, None);
     handle.abort();
 }
 

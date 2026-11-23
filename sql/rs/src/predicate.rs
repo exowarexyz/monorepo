@@ -291,7 +291,14 @@ impl QueryPredicate {
             ColumnKind::Utf8 => scalar_to_string(literal).is_some(),
             ColumnKind::Int64 => scalar_to_i64(literal).is_some(),
             ColumnKind::UInt64 => scalar_to_u64(literal).is_some(),
-            ColumnKind::FixedSizeBinary(_) => scalar_to_fixed_size_binary(literal).is_some(),
+
+            // A fixed-size member of another width has no common comparison type with the
+            // column, so its list is left for DataFusion to plan and reject. A variable-width
+            // member of any length compares as bytes and is supported.
+            ColumnKind::FixedSizeBinary(width) => match literal {
+                ScalarValue::FixedSizeBinary(size, _) => usize::try_from(*size) == Ok(width),
+                _ => scalar_to_fixed_size_binary(literal).is_some(),
+            },
             _ => false,
         }
     }
@@ -627,11 +634,15 @@ impl QueryPredicate {
                 self.constraints
                     .insert(col_idx, PredicateConstraint::UInt64Range { min, max });
             }
-            ColumnKind::FixedSizeBinary(_) => {
+            ColumnKind::FixedSizeBinary(width) => {
                 if op != Operator::Eq {
                     return;
                 }
-                let Some(value) = scalar_to_fixed_size_binary(literal) else {
+
+                // A value of another width equals no value of the column.
+                let Some(value) =
+                    scalar_to_fixed_size_binary(literal).filter(|value| value.len() == width)
+                else {
                     self.contradiction = true;
                     return;
                 };
@@ -780,8 +791,13 @@ impl QueryPredicate {
                     PredicateConstraint::UInt64In,
                 );
             }
-            ColumnKind::FixedSizeBinary(_) => {
-                let values: Vec<_> = list.filter_map(scalar_to_fixed_size_binary).collect();
+            ColumnKind::FixedSizeBinary(width) => {
+                // A member of another width equals no value of the column, so it leaves the
+                // set. Every value a constraint holds then has the width that key bounds encode.
+                let values: Vec<_> = list
+                    .filter_map(scalar_to_fixed_size_binary)
+                    .filter(|value| value.len() == width)
+                    .collect();
                 let values = match self.constraints.get(&col_idx) {
                     Some(PredicateConstraint::FixedSizeBinaryEq(existing)) => {
                         if !values.contains(existing) {
@@ -1383,13 +1399,13 @@ impl QueryPredicate {
                             col.name
                         ));
                     };
-                    if data.len() > n {
+                    if data.len() != n {
                         return Err(format!(
-                            "fixed-size-binary constraint for '{}' exceeds width {}",
+                            "fixed-size-binary constraint for '{}' must have width {}",
                             col.name, n
                         ));
                     }
-                    bytes[..data.len()].copy_from_slice(data);
+                    bytes.copy_from_slice(data);
                 } else if upper {
                     bytes.fill(0xFF);
                 }

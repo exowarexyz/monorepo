@@ -297,6 +297,47 @@ test('deriving zero from an absent floor strengthens only the derived handle', a
     expect(session.minSequenceNumber()).toBeUndefined();
 });
 
+test.each([
+    { policy: 'monotonic', floor: undefined },
+    { policy: 'fixed', floor: 5n },
+] as const)('$policy sessions record writes as observations', async ({ policy, floor }) => {
+    const floors: Array<bigint | undefined> = [];
+    const client = mockClient({
+        get: async (request) => {
+            floors.push((request as GetRequest).minSequenceNumber);
+            return create(GetResponseSchema, { detail: { sequenceNumber: 3n } });
+        },
+    });
+    const store = new PrefixedStoreClient(client);
+    const session = policy === 'monotonic'
+        ? ReadSession.monotonic(store, floor)
+        : ReadSession.fixed(store, floor);
+    const clone = session.clone();
+    const floorAfter = (sequence: bigint) => (policy === 'monotonic' ? sequence : floor);
+
+    // Zero is a real commit sequence.
+    clone.observeWrite(0n);
+    expect(session.evaluatedSequence()).toBe(0n);
+    expect(session.minSequenceNumber()).toBe(floorAfter(0n));
+
+    // The highest write is kept, and only a monotonic session requires it.
+    clone.observeWrite(30n);
+    session.observeWrite(20n);
+    expect(session.evaluatedSequence()).toBe(30n);
+    expect(session.minSequenceNumber()).toBe(floorAfter(30n));
+
+    // The next read sends that floor, and its older response lowers nothing.
+    await session.get(key);
+    expect(floors).toEqual([floorAfter(30n)]);
+    expect(clone.evaluatedSequence()).toBe(30n);
+
+    // A value outside u64 is rejected and records nothing.
+    expect(() => session.observeWrite(-1n)).toThrow(RangeError);
+    expect(() => session.observeWrite(1n << 64n)).toThrow(RangeError);
+    expect(() => session.observeWrite(31 as unknown as bigint)).toThrow(TypeError);
+    expect(session.evaluatedSequence()).toBe(30n);
+});
+
 test('getMany observes empty frames and publishes detail before onChunk', async () => {
     const getFloors: Array<bigint | undefined> = [];
     const client = mockClient({

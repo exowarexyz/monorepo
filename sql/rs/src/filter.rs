@@ -321,8 +321,16 @@ impl ScanAccessPlan {
             .all(|(col_idx, required)| !*required || spec.value_column_mask[col_idx])
     }
 
-    pub(crate) fn predicate_fully_enforced_by_primary_key(&self, model: &TableModel) -> bool {
-        let mut enforced_pk_positions = vec![false; model.primary_key_indices.len()];
+    /// Marks the primary-key positions whose constraints the primary-key ranges enforce.
+    ///
+    /// The ranges fix each leading key column to one value while its constraint is a point,
+    /// then bound the next constrained column with an inclusive range or an IN list and stop.
+    /// Every row they hold passes the constraints on those columns. A constraint on a later
+    /// key column, on a key column after an unconstrained one, or of a kind that
+    /// `primary_key_range_constraint` leaves to row evaluation is not in the ranges. Neither
+    /// is any constraint on a column outside the key.
+    pub(crate) fn primary_key_positions_enforced_by_ranges(&self, model: &TableModel) -> Vec<bool> {
+        let mut enforced = vec![false; model.primary_key_indices.len()];
         let mut prefix_encoded_width = 0usize;
 
         for (pk_pos, &kind) in model.primary_key_kinds.iter().enumerate() {
@@ -343,23 +351,74 @@ impl ScanAccessPlan {
                 constraint,
             ) {
                 PrimaryKeyRangeConstraint::Point(point) => {
-                    enforced_pk_positions[pk_pos] = true;
+                    enforced[pk_pos] = true;
                     prefix_encoded_width += point.encoded_width;
                 }
                 PrimaryKeyRangeConstraint::Terminal(_) => {
-                    enforced_pk_positions[pk_pos] = true;
+                    enforced[pk_pos] = true;
                     break;
                 }
                 PrimaryKeyRangeConstraint::NotEnforced => break,
             }
         }
+        enforced
+    }
 
+    pub(crate) fn predicate_fully_enforced_by_primary_key(&self, model: &TableModel) -> bool {
+        let enforced = self.primary_key_positions_enforced_by_ranges(model);
         self.predicate_checks.iter().all(|check| match check {
-            PredicateAccess::Pk { pk_pos, .. } => enforced_pk_positions[*pk_pos],
+            PredicateAccess::Pk { pk_pos, .. } => enforced[*pk_pos],
             PredicateAccess::NonPk { .. } => false,
         })
     }
 
+    /// Whether reading the cross product of primary-key points enforces every constraint.
+    ///
+    /// Each point fixes every key column to a value its constraint admits, so a row stored
+    /// under a point passes every primary-key check. A check on another column needs the row.
+    /// The answer holds only for a scan that reads the points and not key ranges.
+    pub(crate) fn predicate_fully_enforced_by_primary_key_points(&self) -> bool {
+        self.predicate_checks
+            .iter()
+            .all(|check| matches!(check, PredicateAccess::Pk { .. }))
+    }
+
+    /// Whether the key ranges planned for an index are proven to admit only the entries the
+    /// predicate accepts.
+    ///
+    /// The proof is conservative. `true` means the ranges are exact, and `false` means only
+    /// that the proof does not cover them. It covers lexicographic indexes. A z-order key
+    /// interleaves its columns, and the proof does not analyze its ranges.
+    ///
+    /// A range bound holds the index key columns and then the primary-key columns, compared as
+    /// one tuple. Bounds can therefore fix each leading column to one value and give the next
+    /// column an inclusive range. These are the bounds of one of the two ranges for
+    /// `a = 7 AND b IN (2, 3) AND c >= 5` on an index over `(a, b, c)` with primary key `(id)`:
+    ///
+    /// ```text
+    ///            index key columns     suffix
+    ///           +-----+-----+-----+   +-----+
+    ///           |  a  |  b  |  c  |   | id  |
+    ///           +-----+-----+-----+   +-----+
+    ///   lower      7     2     5        min
+    ///   upper      7     2    max       max
+    ///           '---- enforced ---'   not enforced
+    /// ```
+    ///
+    /// Here `min` and `max` are the ends of a column's type. An entry with a greater `c` sorts
+    /// between the bounds whatever its `id`, so the proof counts no column after that range as
+    /// enforced. It accepts a predicate whose every constraint sits in the enforced part and is
+    /// one the bounds are known to encode.
+    ///
+    /// - An index key column encodes a single value, an IN list as one range per value, and an
+    ///   inclusive range within its type. A strict float bound admits the bound itself, and a date
+    ///   bound that no date can meet is clamped to admit the type's first or last date, so the
+    ///   proof accepts neither.
+    /// - A primary-key column in the suffix encodes only an `Int64` or `UInt64` range. For any
+    ///   other constraint or column type, its bounds span every value of the column.
+    /// - A primary-key column that is also an index key column is enforced there. Its suffix
+    ///   position repeats that value, and the proof treats the position as fixed only for an
+    ///   integer column.
     pub(crate) fn predicate_fully_enforced_by_index_key(
         &self,
         model: &TableModel,
@@ -368,13 +427,9 @@ impl ScanAccessPlan {
         if spec.layout == IndexLayout::ZOrder {
             return false;
         }
-
-        // Key columns bound the scan in order, whether they come from the row value or
-        // the primary key, until the first column without a point constraint.
-        let mut open_tail = false;
-        for col_idx in &spec.key_columns {
-            let pk_pos = model.pk_position(*col_idx);
-            let Some(constraint) = self.predicate_checks.iter().find_map(|check| match check {
+        let constraint_on = |col_idx: usize| {
+            let pk_pos = model.pk_position(col_idx);
+            self.predicate_checks.iter().find_map(|check| match check {
                 PredicateAccess::Pk {
                     pk_pos: check_pos,
                     constraint,
@@ -383,51 +438,67 @@ impl ScanAccessPlan {
                     col_idx: check_col_idx,
                     constraint,
                     ..
-                } if check_col_idx == col_idx => Some(constraint),
+                } if *check_col_idx == col_idx => Some(constraint),
                 _ => None,
-            }) else {
-                open_tail = true;
+            })
+        };
+
+        // Bounds restrict a column only while every column before it is fixed to one value.
+        let mut fixed = true;
+        for &col_idx in &spec.key_columns {
+            let Some(constraint) = constraint_on(col_idx) else {
+                fixed = false;
                 continue;
             };
+            let kind = model.column(col_idx).kind;
 
             // Store ranges include their endpoints, so the range for a strict float bound also
             // holds rows equal to the bound.
-            if matches!(constraint, PredicateConstraint::FloatRange { min, max }
+            let strict = matches!(constraint, PredicateConstraint::FloatRange { min, max }
                 if min.is_some_and(|(_, inclusive)| !inclusive)
-                    || max.is_some_and(|(_, inclusive)| !inclusive))
+                    || max.is_some_and(|(_, inclusive)| !inclusive));
+            if !fixed
+                || strict
+                || !matches!(
+                    compile_encoded_constraint(kind, constraint),
+                    EncodedConstraintCompile::Encoded(_)
+                )
             {
                 return false;
             }
-            let kind = model.column(*col_idx).kind;
-            if matches!(
-                compile_encoded_constraint(kind, constraint),
-                EncodedConstraintCompile::Unsupported
-            ) {
-                return false;
-            }
-            if open_tail {
-                return false;
-            }
-            if !QueryPredicate::constraint_is_point(kind, constraint) {
-                open_tail = true;
-            }
+            fixed = QueryPredicate::constraint_is_point(kind, constraint);
         }
 
-        // Remaining primary-key constraints are enforced by the appended key suffix only
-        // while every key column is fixed to one value.
-        self.predicate_checks.iter().all(|check| match check {
-            PredicateAccess::Pk { pk_pos, constraint } => {
-                spec.key_columns
-                    .contains(&model.primary_key_indices[*pk_pos])
-                    || (!open_tail
-                        && !matches!(
-                            compile_encoded_constraint(
-                                model.primary_key_kinds[*pk_pos],
-                                constraint
-                            ),
-                            EncodedConstraintCompile::Unsupported
-                        ))
+        // The suffix bounds carry integer ranges alone. A suffix position stays fixed for an
+        // integer bound to one value, including one value of an IN list on a key column.
+        for (&col_idx, &kind) in model
+            .primary_key_indices
+            .iter()
+            .zip(&model.primary_key_kinds)
+        {
+            let constraint = constraint_on(col_idx);
+            let integer = matches!(kind, ColumnKind::Int64 | ColumnKind::UInt64);
+            let ranged = matches!(
+                constraint,
+                Some(
+                    PredicateConstraint::IntRange { .. } | PredicateConstraint::UInt64Range { .. }
+                )
+            );
+            if constraint.is_some()
+                && !spec.key_columns.contains(&col_idx)
+                && !(fixed && integer && ranged)
+            {
+                return false;
             }
+            fixed &= integer
+                && constraint.is_some_and(|constraint| {
+                    QueryPredicate::constraint_is_point(kind, constraint)
+                });
+        }
+
+        // No bound holds a column outside the index key and the primary key.
+        self.predicate_checks.iter().all(|check| match check {
+            PredicateAccess::Pk { .. } => true,
             PredicateAccess::NonPk { col_idx, .. } => spec.key_columns.contains(col_idx),
         })
     }
@@ -625,6 +696,532 @@ mod tests {
                 exact,
                 "min={min:?}, max={max:?}"
             );
+        }
+    }
+
+    /// Builds a table with one lexicographic index per list of key columns.
+    fn indexed_table(
+        columns: &[(&str, DataType)],
+        primary_key: &[&str],
+        indexes: &[&[&str]],
+    ) -> (TableModel, Vec<ResolvedIndexSpec>) {
+        let names = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>()
+        };
+        let config = KvTableConfig::new(
+            0,
+            columns
+                .iter()
+                .map(|(name, data_type)| TableColumnConfig::new(*name, data_type.clone(), false))
+                .collect(),
+            names(primary_key),
+            indexes
+                .iter()
+                .map(|keys| IndexSpec::new(keys.join("_"), names(keys)).unwrap())
+                .collect(),
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+        let specs = model.resolve_index_specs(&config.index_specs).unwrap();
+        (model, specs)
+    }
+
+    fn int_range(min: Option<i64>, max: Option<i64>) -> PredicateConstraint {
+        PredicateConstraint::IntRange { min, max }
+    }
+
+    fn unsigned_range(min: Option<u64>, max: Option<u64>) -> PredicateConstraint {
+        PredicateConstraint::UInt64Range { min, max }
+    }
+
+    /// Range bounds fix each leading column of the index key and its primary-key suffix to one
+    /// value, bound the next column with an inclusive range, and enforce nothing after it.
+    #[test]
+    fn index_ranges_are_exact_only_for_what_their_bounds_enforce() {
+        use PredicateConstraint::{IntIn, StringEq};
+        let is = |value| int_range(Some(value), Some(value));
+        let from = |value| int_range(Some(value), None);
+        let unsigned_is = |value| unsigned_range(Some(value), Some(value));
+        let unsigned_from = |value| unsigned_range(Some(value), None);
+        let named = || StringEq("n".into());
+        let check =
+            |model: &TableModel, spec: &ResolvedIndexSpec, case: &str, constraints, exact| {
+                let mut predicate = QueryPredicate::default();
+                predicate.constraints.extend::<Vec<_>>(constraints);
+                let access = ScanAccessPlan::new(model, &None, &predicate);
+                assert_eq!(
+                    access.predicate_fully_enforced_by_index_key(model, spec),
+                    exact,
+                    "{case} on index {}",
+                    spec.name
+                );
+            };
+
+        // Every index key ends with the primary key (id1, id2, name).
+        let (model, specs) = indexed_table(
+            &[
+                ("id1", DataType::Int64),
+                ("id2", DataType::UInt64),
+                ("name", DataType::Utf8),
+                ("tag", DataType::Int64),
+                ("day", DataType::Date32),
+            ],
+            &["id1", "id2", "name"],
+            &[&["tag"], &["tag", "id1"], &["day"]],
+        );
+        let [id1, id2, name, tag, day] = [0, 1, 2, 3, 4];
+        let [by_tag, by_tag_id1, by_day] = [&specs[0], &specs[1], &specs[2]];
+        for (case, spec, constraints, exact) in [
+            ("no constraint", by_tag, vec![], true),
+            ("key point", by_tag, vec![(tag, is(7))], true),
+            ("key IN list", by_tag, vec![(tag, IntIn(vec![7, 9]))], true),
+            ("key range", by_tag, vec![(tag, from(7))], true),
+            (
+                "first suffix range",
+                by_tag,
+                vec![(tag, is(7)), (id1, from(5))],
+                true,
+            ),
+            (
+                "range after a suffix point",
+                by_tag,
+                vec![(tag, is(7)), (id1, is(5)), (id2, unsigned_from(2))],
+                true,
+            ),
+            (
+                "suffix range under a key IN list",
+                by_tag,
+                vec![(tag, IntIn(vec![7, 9])), (id1, from(5))],
+                true,
+            ),
+            (
+                "key IN list that the suffix repeats",
+                by_tag_id1,
+                vec![
+                    (tag, is(7)),
+                    (id1, IntIn(vec![5, 6])),
+                    (id2, unsigned_from(2)),
+                ],
+                true,
+            ),
+            ("date range", by_day, vec![(day, from(3))], true),
+            (
+                "suffix range after a free suffix column",
+                by_tag,
+                vec![(tag, is(7)), (id2, unsigned_from(2))],
+                false,
+            ),
+            (
+                "suffix IN list",
+                by_tag,
+                vec![(tag, is(7)), (id1, IntIn(vec![5, 6]))],
+                false,
+            ),
+            (
+                "string suffix column",
+                by_tag,
+                vec![
+                    (tag, is(7)),
+                    (id1, is(5)),
+                    (id2, unsigned_is(2)),
+                    (name, named()),
+                ],
+                false,
+            ),
+            (
+                "date bound outside the type",
+                by_day,
+                vec![(day, from(i64::from(i32::MAX) + 1))],
+                false,
+            ),
+        ] {
+            check(&model, spec, case, constraints, exact);
+        }
+
+        // A string leads the primary-key suffix here. Range bounds never encode it there, even
+        // when the index key fixes it.
+        let (model, specs) = indexed_table(
+            &[
+                ("name", DataType::Utf8),
+                ("id", DataType::Int64),
+                ("tag", DataType::Int64),
+            ],
+            &["name", "id"],
+            &[&["tag", "name"]],
+        );
+        let [name, id, tag] = [0, 1, 2];
+        for (case, spec, constraints, exact) in [
+            (
+                "string key column that the suffix repeats",
+                &specs[0],
+                vec![(tag, is(7)), (name, named())],
+                true,
+            ),
+            (
+                "range after a repeated string key column",
+                &specs[0],
+                vec![(tag, is(7)), (name, named()), (id, from(5))],
+                false,
+            ),
+        ] {
+            check(&model, spec, case, constraints, exact);
+        }
+    }
+
+    /// Returns point, range, and IN-list constraints for a column of `kind`. The last binary
+    /// list holds a value one byte short, which no column value equals.
+    fn constraints(kind: ColumnKind) -> Vec<PredicateConstraint> {
+        use PredicateConstraint::{
+            FixedSizeBinaryEq, FixedSizeBinaryIn, FloatRange, IntIn, StringEq, StringIn, UInt64In,
+        };
+        let float = |min, max| FloatRange { min, max };
+        match kind {
+            ColumnKind::Int64 => vec![
+                int_range(Some(5), Some(5)),
+                int_range(Some(5), None),
+                int_range(Some(4), Some(5)),
+                IntIn(vec![4, 6]),
+            ],
+            ColumnKind::UInt64 => vec![
+                unsigned_range(Some(2), Some(2)),
+                unsigned_range(None, Some(2)),
+                UInt64In(vec![1, 3]),
+            ],
+            ColumnKind::Utf8 => vec![
+                StringEq("n".into()),
+                StringEq(String::new()),
+                StringIn(vec![String::new(), "o".into()]),
+            ],
+            ColumnKind::Float64 => vec![
+                float(Some((1.0, true)), Some((1.0, true))),
+                float(Some((1.0, true)), None),
+                float(Some((1.0, false)), None),
+                float(Some((-0.0, true)), Some((0.0, true))),
+                float(None, Some((0.0, true))),
+            ],
+            ColumnKind::Date32 => vec![
+                int_range(Some(5), Some(5)),
+                int_range(None, Some(5)),
+                int_range(Some(i64::from(i32::MAX) + 1), None),
+            ],
+            ColumnKind::FixedSizeBinary(2) => vec![
+                FixedSizeBinaryEq(vec![1, 2]),
+                FixedSizeBinaryIn(vec![vec![0, 0], vec![1, 3]]),
+                FixedSizeBinaryIn(vec![vec![1], vec![1, 3]]),
+            ],
+            ColumnKind::Boolean => vec![
+                PredicateConstraint::BoolEq(true),
+                PredicateConstraint::BoolEq(false),
+            ],
+            ColumnKind::Date64 | ColumnKind::Timestamp => vec![
+                int_range(Some(5), Some(5)),
+                int_range(None, Some(5)),
+                int_range(Some(5), None),
+            ],
+            ColumnKind::Decimal128 => vec![
+                PredicateConstraint::Decimal128Range {
+                    min: Some(5),
+                    max: Some(5),
+                },
+                PredicateConstraint::Decimal128Range {
+                    min: Some(5),
+                    max: None,
+                },
+            ],
+            ColumnKind::Decimal256 => vec![
+                PredicateConstraint::Decimal256Range {
+                    min: Some(datafusion::arrow::datatypes::i256::from_i128(5)),
+                    max: Some(datafusion::arrow::datatypes::i256::from_i128(5)),
+                },
+                PredicateConstraint::Decimal256Range {
+                    min: None,
+                    max: Some(datafusion::arrow::datatypes::i256::from_i128(5)),
+                },
+            ],
+            _ => unreachable!("the tables must use only these column kinds"),
+        }
+    }
+
+    /// Returns values of `kind` on both sides of the bounds that `constraints` uses.
+    fn values(kind: ColumnKind) -> Vec<CellValue> {
+        match kind {
+            ColumnKind::Int64 => [4, 5, 6].map(CellValue::Int64).to_vec(),
+            ColumnKind::UInt64 => [1, 2, 3].map(CellValue::UInt64).to_vec(),
+            ColumnKind::Utf8 => ["", "n", "o"].map(|v| CellValue::Utf8(v.into())).to_vec(),
+            ColumnKind::Float64 => [-0.0, 0.0, 0.5, 1.0, 2.0, f64::NAN]
+                .map(CellValue::Float64)
+                .to_vec(),
+            ColumnKind::Date32 => [0, 5, i32::MAX].map(CellValue::Date32).to_vec(),
+            ColumnKind::FixedSizeBinary(2) => [[0, 0], [1, 0], [1, 2], [1, 3]]
+                .map(|v| CellValue::FixedSizeBinary(v.to_vec()))
+                .to_vec(),
+            ColumnKind::Boolean => [false, true].map(CellValue::Boolean).to_vec(),
+            ColumnKind::Date64 => [0, 5, i64::MAX].map(CellValue::Date64).to_vec(),
+            ColumnKind::Timestamp => [i64::MIN, 5, 6].map(CellValue::Timestamp).to_vec(),
+            ColumnKind::Decimal128 => [4, 5, 6].map(CellValue::Decimal128).to_vec(),
+            ColumnKind::Decimal256 => [4, 5, 6]
+                .map(|v| CellValue::Decimal256(datafusion::arrow::datatypes::i256::from_i128(v)))
+                .to_vec(),
+            _ => unreachable!("the tables must use only these column kinds"),
+        }
+    }
+
+    /// Returns every way to take one choice per column.
+    fn product<T: Clone>(columns: Vec<Vec<T>>) -> Vec<Vec<T>> {
+        columns.into_iter().fold(vec![Vec::new()], |rows, choices| {
+            let extend = |row: &Vec<T>| {
+                let row = row.clone();
+                choices.iter().map(move |choice| {
+                    let mut row = row.clone();
+                    row.push(choice.clone());
+                    row
+                })
+            };
+            rows.iter().flat_map(extend).collect()
+        })
+    }
+
+    /// The positions reported as enforced must hold against the ranges the planner builds. Over
+    /// small tables and every mix of constraints, the ranges admit every matching row, and every
+    /// row they admit passes the constraint at each enforced position.
+    #[test]
+    fn primary_key_ranges_enforce_the_positions_they_report() {
+        // The tables put integers, strings, and fixed-size binary values in each position of
+        // the primary key, beside a column outside it.
+        let mut partly_enforced = 0;
+        for (model, _) in [
+            indexed_table(
+                &[
+                    ("a", DataType::Int64),
+                    ("b", DataType::UInt64),
+                    ("name", DataType::Utf8),
+                    ("tag", DataType::Int64),
+                ],
+                &["a", "b", "name"],
+                &[],
+            ),
+            indexed_table(
+                &[
+                    ("name", DataType::Utf8),
+                    ("id", DataType::Int64),
+                    ("version", DataType::UInt64),
+                    ("score", DataType::Float64),
+                ],
+                &["name", "id", "version"],
+                &[],
+            ),
+            indexed_table(
+                &[
+                    ("code", DataType::FixedSizeBinary(2)),
+                    ("name", DataType::Utf8),
+                    ("id", DataType::Int64),
+                    ("day", DataType::Date32),
+                ],
+                &["code", "name", "id"],
+                &[],
+            ),
+        ] {
+            let kinds = model.columns.iter().map(|col| col.kind);
+            let rows = product(kinds.clone().map(values).collect());
+            let choices = kinds.enumerate().map(|(idx, kind)| {
+                let constrained = constraints(kind).into_iter().map(move |c| Some((idx, c)));
+                std::iter::once(None).chain(constrained).collect()
+            });
+            for chosen in product(choices.collect()) {
+                let mut predicate = QueryPredicate::default();
+                predicate.constraints.extend(chosen.into_iter().flatten());
+                let access = ScanAccessPlan::new(&model, &None, &predicate);
+                let ranges = predicate
+                    .primary_key_ranges(&model, exoware_sdk::keys::MAX_KEY_LEN)
+                    .unwrap();
+                let enforced = access.primary_key_positions_enforced_by_ranges(&model);
+                let enforced_count = enforced.iter().filter(|enforced| **enforced).count();
+                if 0 < enforced_count && enforced_count < predicate.constraints.len() {
+                    partly_enforced += 1;
+                }
+                for values in &rows {
+                    let row = KvRow {
+                        values: values.clone(),
+                    };
+                    let key =
+                        encode_primary_key_from_row(model.table_prefix, &row, &model).unwrap();
+                    let admitted = ranges
+                        .iter()
+                        .any(|range| range.start <= key && key <= range.end);
+                    assert!(
+                        admitted || !predicate.matches_row(&row),
+                        "the ranges must read the matching row {values:?} for {}",
+                        predicate.describe(&model)
+                    );
+                    for (pk_pos, col_idx) in model.primary_key_indices.iter().enumerate() {
+                        assert!(
+                            !enforced[pk_pos]
+                                || !admitted
+                                || matches_constraint(
+                                    row.value_at(*col_idx),
+                                    &predicate.constraints[col_idx]
+                                ),
+                            "the ranges enforce key column {pk_pos} for {}, so they must not \
+                             admit {values:?}",
+                            predicate.describe(&model)
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            partly_enforced > 0,
+            "some predicate must leave a constraint to a row check"
+        );
+    }
+
+    /// An exact answer must hold against the ranges the planner builds. Over small tables and
+    /// every mix of constraints, the ranges admit every matching index entry, and exact ranges
+    /// admit no other entry.
+    #[test]
+    fn exact_index_ranges_admit_only_matching_entries() {
+        // The tables put integers and strings in each position of the index key and of the
+        // primary-key suffix, with and without a key column the suffix repeats.
+        for (model, specs) in [
+            indexed_table(
+                &[
+                    ("a", DataType::Int64),
+                    ("b", DataType::UInt64),
+                    ("tag", DataType::Int64),
+                    ("label", DataType::Utf8),
+                ],
+                &["a", "b"],
+                &[
+                    &["tag"],
+                    &["tag", "a"],
+                    &["tag", "b"],
+                    &["tag", "label"],
+                    &["label", "tag"],
+                    &["b", "a"],
+                ],
+            ),
+            indexed_table(
+                &[
+                    ("id", DataType::Int64),
+                    ("name", DataType::Utf8),
+                    ("version", DataType::UInt64),
+                    ("tag", DataType::Int64),
+                ],
+                &["id", "name", "version"],
+                &[
+                    &["tag"],
+                    &["tag", "id"],
+                    &["tag", "name"],
+                    &["tag", "version"],
+                ],
+            ),
+            indexed_table(
+                &[
+                    ("name", DataType::Utf8),
+                    ("id", DataType::Int64),
+                    ("score", DataType::Float64),
+                    ("day", DataType::Date32),
+                ],
+                &["name", "id"],
+                &[&["score"], &["day"], &["day", "score"], &["score", "name"]],
+            ),
+            indexed_table(
+                &[
+                    ("id", DataType::Int64),
+                    ("flag", DataType::Boolean),
+                    ("at", DataType::Date64),
+                    ("price", DataType::Decimal128(10, 2)),
+                ],
+                &["id"],
+                &[
+                    &["flag"],
+                    &["flag", "at"],
+                    &["at"],
+                    &["price"],
+                    &["price", "flag"],
+                    &["at", "price"],
+                    &["flag", "id"],
+                ],
+            ),
+            indexed_table(
+                &[
+                    ("id", DataType::Int64),
+                    (
+                        "ts",
+                        DataType::Timestamp(
+                            datafusion::arrow::datatypes::TimeUnit::Microsecond,
+                            None,
+                        ),
+                    ),
+                    ("big", DataType::Decimal256(40, 0)),
+                    ("code", DataType::FixedSizeBinary(2)),
+                ],
+                &["id"],
+                &[
+                    &["ts"],
+                    &["big"],
+                    &["code"],
+                    &["code", "ts"],
+                    &["big", "code"],
+                    &["ts", "id"],
+                ],
+            ),
+            indexed_table(
+                &[
+                    ("code", DataType::FixedSizeBinary(2)),
+                    ("id", DataType::Int64),
+                    ("tag", DataType::Int64),
+                ],
+                &["code", "id"],
+                &[&["tag"], &["tag", "code"], &["tag", "id"]],
+            ),
+        ] {
+            let kinds = model.columns.iter().map(|col| col.kind);
+            let rows = product(kinds.clone().map(values).collect());
+            let choices = kinds.enumerate().map(|(idx, kind)| {
+                let constrained = constraints(kind).into_iter().map(move |c| Some((idx, c)));
+                std::iter::once(None).chain(constrained).collect()
+            });
+            for chosen in product(choices.collect()) {
+                let mut predicate = QueryPredicate::default();
+                predicate.constraints.extend(chosen.into_iter().flatten());
+                let access = ScanAccessPlan::new(&model, &None, &predicate);
+                for spec in &specs {
+                    // An index whose ranges cannot be built is never scanned.
+                    let prefix_len = predicate.leading_constrained_prefix(&model, spec);
+                    let Ok(ranges) = predicate.expand_index_ranges(&model, spec, prefix_len) else {
+                        continue;
+                    };
+                    let exact = access.predicate_fully_enforced_by_index_key(&model, spec);
+                    for values in &rows {
+                        let row = KvRow {
+                            values: values.clone(),
+                        };
+                        let key =
+                            encode_secondary_index_key(model.table_prefix, spec, &model, &row)
+                                .unwrap();
+                        let admitted = ranges
+                            .iter()
+                            .any(|range| range.start <= key && key <= range.end);
+                        let matches = predicate.matches_row(&row);
+                        assert!(
+                            admitted || !matches,
+                            "index {} must read the matching row {values:?} for {}",
+                            spec.name,
+                            predicate.describe(&model)
+                        );
+                        assert!(
+                            !exact || matches || !admitted,
+                            "index {} is exact for {}, so its ranges must not admit {values:?}",
+                            spec.name,
+                            predicate.describe(&model)
+                        );
+                    }
+                }
+            }
         }
     }
 }

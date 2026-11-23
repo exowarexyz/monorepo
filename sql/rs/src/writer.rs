@@ -23,7 +23,11 @@ use exoware_sdk::kv_codec::decode_stored_row;
 use exoware_sdk::{
     keys::Key,
     kv_codec::{StoredRow, StoredValue},
-    PrefixedStoreClient, StoreWriteBatch, StoreWriteBatchUpload,
+    limits::{
+        put_entry_encoded_len, PutTooLarge, MAX_PUT_ENTRIES, MAX_REQUEST_MESSAGE_BYTES,
+        MAX_VALUE_LEN,
+    },
+    PrefixedStoreClient, ReadSession, StoreWriteBatch, StoreWriteBatchUpload,
 };
 use futures::{future::BoxFuture, TryStreamExt};
 use std::{
@@ -67,11 +71,40 @@ impl TableRowEncoder {
     }
 }
 
+/// Checks a batch against the limits the Store places on one write, after an entry with a
+/// value of `value_len` bytes brings the batch to `entries` entries and `encoded_len` encoded
+/// bytes.
+///
+/// A value over `MAX_VALUE_LEN` fails with `Plan`, more than `MAX_PUT_ENTRIES` entries with
+/// `PutTooLarge`, and more than `MAX_REQUEST_MESSAGE_BYTES` encoded bytes with
+/// `ResourcesExhausted`.
+fn check_put_limits(value_len: usize, entries: usize, encoded_len: usize) -> DataFusionResult<()> {
+    if value_len > MAX_VALUE_LEN {
+        return Err(DataFusionError::Plan(format!(
+            "a {value_len}-byte value exceeds the {MAX_VALUE_LEN}-byte limit of one Store value"
+        )));
+    }
+    if entries > MAX_PUT_ENTRIES {
+        return Err(DataFusionError::External(Box::new(PutTooLarge {
+            entries,
+            max_entries: MAX_PUT_ENTRIES,
+        })));
+    }
+    if encoded_len > MAX_REQUEST_MESSAGE_BYTES {
+        return Err(DataFusionError::ResourcesExhausted(format!(
+            "batch exceeds the {MAX_REQUEST_MESSAGE_BYTES}-byte limit of one Store write"
+        )));
+    }
+    Ok(())
+}
+
 /// Buffers rows across a schema's tables for upload in atomic Store batches.
 ///
 /// `insert` rejects caller input with `DataFusionError::Plan`: an unknown table, a row of
-/// the wrong shape or type, or a key over the Store key limit. Upload failures from
-/// `flush` are returned as `DataFusionError::External` wrapping the Store client error.
+/// the wrong shape or type, or a key or value over the Store's limit for one. It rejects a
+/// row that would take the pending rows past the entry or byte limit of one Store write
+/// with the error SQL `INSERT` returns for that limit. Upload failures from `flush` are
+/// returned as `DataFusionError::External` wrapping the Store client error.
 #[derive(Debug)]
 pub struct BatchWriter {
     /// Store client whose namespace prefixes staged keys and that commits each batch.
@@ -87,6 +120,8 @@ pub struct BatchWriter {
     /// Encoded entries not yet taken into a batch, in insert order. Each row adds its
     /// base entry and then its index entries.
     pub(crate) pending_entries: Vec<(Key, Bytes)>,
+    /// Encoded size of `pending_entries` in one Store write under the client's namespace.
+    pending_encoded_len: usize,
 }
 
 /// Entries taken from a `BatchWriter` for one upload attempt.
@@ -148,12 +183,19 @@ impl BatchWriter {
             next_request_id: 0,
             failed_prepared: Mutex::new(Vec::new()),
             pending_entries: Vec::new(),
+            pending_encoded_len: 0,
         }
     }
 
-    /// Buffers one row's base and index entries. A row whose keys would exceed the Store
-    /// key limit under the client's namespace is rejected before anything is buffered, so
-    /// every prepared batch can be staged.
+    /// Buffers one row's base and index entries.
+    ///
+    /// A row is rejected before anything is buffered when a key under the client's namespace
+    /// or a value exceeds the Store's limit for one, or when the row would take the pending
+    /// rows past the entry or byte limit of one Store write. Every prepared batch can
+    /// therefore be staged and fits one Store write. A row rejected for the entry or byte
+    /// limit fits once a `flush` has taken the pending rows, unless it exceeds that limit
+    /// alone. Each `flush` retries one earlier failed batch while any remains, and leaves the
+    /// pending rows in place.
     pub fn insert(
         &mut self,
         table_name: &str,
@@ -164,12 +206,19 @@ impl BatchWriter {
             .get(table_name)
             .ok_or_else(|| DataFusionError::Plan(format!("unknown table '{table_name}'")))?;
         let entries = encoder.encode_row(values).map_err(DataFusionError::Plan)?;
-        for (key, _) in &entries {
-            self.store
+        let mut entry_count = self.pending_entries.len();
+        let mut encoded_len = self.pending_encoded_len;
+        for (key, value) in &entries {
+            let key = self
+                .store
                 .encode_store_key(key)
                 .map_err(|e| DataFusionError::Plan(e.to_string()))?;
+            entry_count += 1;
+            encoded_len += put_entry_encoded_len(&key, value);
+            check_put_limits(value.len(), entry_count, encoded_len)?;
         }
         self.pending_entries.extend(entries);
+        self.pending_encoded_len = encoded_len;
         Ok(self)
     }
 
@@ -188,6 +237,12 @@ impl BatchWriter {
 
     /// Uploads the next prepared batch and returns its Store sequence number, or `None`
     /// when nothing is pending.
+    ///
+    /// A batch whose upload fails is retained. Each call retries one failed batch alone,
+    /// lowest request ID first, and the pending rows wait until those batches have been
+    /// drained. A batch the Store rejects on every attempt therefore holds back the rows
+    /// behind it until the caller takes it with `prepare_upload` and drops it, which
+    /// discards its rows.
     pub async fn flush(&mut self) -> DataFusionResult<Option<u64>> {
         let Some(prepared) = self.prepare_upload()? else {
             return Ok(None);
@@ -208,6 +263,7 @@ impl BatchWriter {
         }
         let request_id = self.next_request_id;
         self.next_request_id += 1;
+        self.pending_encoded_len = 0;
         Ok(Some(PreparedUpload {
             request_id,
             entries: std::mem::take(&mut self.pending_entries),
@@ -291,8 +347,14 @@ impl StoreWriteBatchUpload for BatchWriter {
 
 /// DataFusion sink for `INSERT` into one table.
 ///
-/// Encodes every input row with its index entries and commits them in one atomic Store write
-/// after the input ends. Reports the number of input rows written.
+/// Stages each input row with its index entries in one Store write batch while it reads the
+/// input, and commits the batch as one atomic write after the input ends. Reports the number of
+/// input rows written. When the executing context has a `ReadSession`, the commit is recorded
+/// in it as an observation. An INSERT that writes no rows sends and records nothing.
+///
+/// The batch must fit the Store's limits for one write, which `check_put_limits` applies to
+/// each staged entry. On the first entry that passes a limit, the sink stops reading and fails
+/// without sending anything.
 #[derive(Debug)]
 pub(crate) struct KvIngestSink {
     /// Table provider supplying the sink's schema, row encodings, and Store namespace.
@@ -313,21 +375,35 @@ impl DataSink for KvIngestSink {
 
     async fn write_all(
         &self,
-        data: SendableRecordBatchStream,
-        _context: &Arc<TaskContext>,
+        mut data: SendableRecordBatchStream,
+        context: &Arc<TaskContext>,
     ) -> DataFusionResult<u64> {
-        let mut data = data;
-        let mut pending_entries = Vec::new();
+        let store = &self.table.store;
+        let mut staged = StoreWriteBatch::new();
         let mut logical_rows_written = 0u64;
 
         while let Some(batch) = data.try_next().await? {
-            let encoded_entries =
-                encode_insert_entries(&batch, &self.table.model, &self.table.index_specs)?;
+            for (key, value) in
+                encode_insert_entries(&batch, &self.table.model, &self.table.index_specs)?
+            {
+                let value_len = value.len();
+                staged
+                    .push(store, &key, value)
+                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                check_put_limits(value_len, staged.len(), staged.encoded_len())?;
+            }
             logical_rows_written += batch.num_rows() as u64;
-            pending_entries.extend(encoded_entries);
         }
 
-        flush_ingest_batch(&self.table.store, &mut pending_entries).await?;
+        if !staged.is_empty() {
+            let sequence_number = staged
+                .commit(store.client())
+                .await
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            if let Some(session) = context.session_config().get_extension::<ReadSession>() {
+                session.observe_write(sequence_number);
+            }
+        }
         Ok(logical_rows_written)
     }
 }
@@ -841,16 +917,29 @@ pub(crate) async fn flush_ingest_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builder::{append_archived_non_pk_value, make_column_builder};
-    use bytes::Bytes;
-    use datafusion::arrow::{
-        array::{
-            builder::Int64Builder, BinaryArray, BinaryViewArray, Int64Array, LargeBinaryArray,
-            ListBuilder, StringArray, UInt64Array,
-        },
-        datatypes::{DataType, Field, Schema},
+    use crate::{
+        builder::{append_archived_non_pk_value, make_column_builder},
+        KvSchema, SqlContext, SqlContextBuilder,
     };
-    use exoware_sdk::{kv_codec::decode_stored_row, StoreClient, StoreKeyPrefix};
+    use buffa::Message;
+    use bytes::Bytes;
+    use datafusion::{
+        arrow::{
+            array::{
+                builder::Int64Builder, BinaryArray, BinaryViewArray, Int64Array, LargeBinaryArray,
+                ListBuilder, StringArray, UInt64Array,
+            },
+            datatypes::{DataType, Field, Schema},
+        },
+        logical_expr::{create_udf, ColumnarValue, Volatility},
+        prelude::{SessionConfig, SessionContext as DataFusionContext},
+    };
+    use exoware_sdk::{
+        kv_codec::decode_stored_row,
+        limits::{PutTooLarge, MAX_PUT_ENTRIES, MAX_REQUEST_MESSAGE_BYTES, MAX_VALUE_LEN},
+        ReadSession, RetryConfig, StoreClient, StoreKeyPrefix,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn secondary_index_storage_encoding_is_stable() {
@@ -1279,6 +1368,481 @@ mod tests {
             .expect("stage retry");
         assert_eq!(retry_batch.len(), 2);
         assert_eq!(retry.entries, entries);
+    }
+
+    /// A Store that counts the Puts it receives and acknowledges each with `sequence_number`,
+    /// except that it rejects a Put of more than `max_entries` entries when that limit is set.
+    #[derive(Clone)]
+    struct AckingStore {
+        puts: Arc<AtomicUsize>,
+        sequence_number: u64,
+        max_entries: Option<usize>,
+    }
+
+    impl AckingStore {
+        fn new(sequence_number: u64) -> Self {
+            Self {
+                puts: Arc::new(AtomicUsize::new(0)),
+                sequence_number,
+                max_entries: None,
+            }
+        }
+
+        fn client(&self) -> PrefixedStoreClient {
+            StoreClient::builder()
+                .url("http://acking-store.test")
+                .client_transport(self.clone())
+                .retry_config(RetryConfig::disabled())
+                .build()
+                .unwrap()
+                .unprefixed()
+        }
+
+        fn puts(&self) -> usize {
+            self.puts.load(Ordering::SeqCst)
+        }
+
+        /// Builds a context over this Store with the table `items (id BIGINT, body TEXT)`.
+        fn items_context(
+            &self,
+            configure: impl FnOnce(SqlContextBuilder) -> SqlContextBuilder,
+        ) -> SqlContext {
+            let client = self.client();
+            let ctx = configure(SqlContext::builder(client.clone())).build();
+            ctx.register_schema(items_schema(client, &[])).unwrap();
+            ctx
+        }
+    }
+
+    /// Declares the table `items (id BIGINT, body TEXT)` with one index per name in `indexes`,
+    /// each on `id`.
+    fn items_schema(client: PrefixedStoreClient, indexes: &[&str]) -> KvSchema {
+        KvSchema::new(client)
+            .table(
+                "items",
+                vec![
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("body", DataType::Utf8, true),
+                ],
+                vec!["id".into()],
+                indexes
+                    .iter()
+                    .map(|name| IndexSpec::new(*name, vec!["id".into()]).unwrap())
+                    .collect(),
+            )
+            .unwrap()
+    }
+
+    fn item(id: i64, body: impl Into<String>) -> Vec<CellValue> {
+        vec![CellValue::Int64(id), CellValue::Utf8(body.into())]
+    }
+
+    impl connectrpc::client::ClientTransport for AckingStore {
+        type ResponseBody = axum::body::Body;
+        type Error = connectrpc::ConnectError;
+
+        fn send(
+            &self,
+            request: axum::http::Request<connectrpc::client::ClientBody>,
+        ) -> connectrpc::client::BoxFuture<
+            'static,
+            Result<axum::http::Response<Self::ResponseBody>, Self::Error>,
+        > {
+            assert_eq!(request.uri().path(), "/log.ingest.v1.Service/Put");
+            self.puts.fetch_add(1, Ordering::SeqCst);
+            let response = exoware_sdk::ingest::PutResponse {
+                sequence_number: self.sequence_number,
+                ..Default::default()
+            };
+            let max_entries = self.max_entries;
+            Box::pin(async move {
+                if let Some(max_entries) = max_entries {
+                    let body = axum::body::to_bytes(
+                        axum::body::Body::new(request.into_body()),
+                        usize::MAX,
+                    )
+                    .await
+                    .unwrap();
+                    let put = exoware_sdk::ingest::PutRequest::decode_from_slice(&body).unwrap();
+                    if put.kvs.len() > max_entries {
+                        return Err(connectrpc::ConnectError::invalid_argument(
+                            "the Put has too many entries",
+                        ));
+                    }
+                }
+                Ok(axum::http::Response::builder()
+                    .header("content-type", "application/proto")
+                    .body(axum::body::Body::from(response.encode_to_bytes()))
+                    .unwrap())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn insert_past_the_put_entry_limit_stops_reading_and_sends_nothing() {
+        let store = AckingStore::new(7);
+        let ctx = store.items_context(|builder| builder);
+
+        // `tally` counts the input rows that reach the sink.
+        let pulled = Arc::new(AtomicUsize::new(0));
+        let tally = pulled.clone();
+        ctx.register_udf(create_udf(
+            "tally",
+            vec![DataType::Int64],
+            DataType::Int64,
+            Volatility::Volatile,
+            Arc::new(move |args: &[ColumnarValue]| {
+                if let ColumnarValue::Array(ids) = &args[0] {
+                    tally.fetch_add(ids.len(), Ordering::Relaxed);
+                }
+                Ok(args[0].clone())
+            }),
+        ));
+
+        // Each row writes one entry, so the input passes the limit two thirds of the way in.
+        let rows = MAX_PUT_ENTRIES * 3 / 2;
+        let error = ctx
+            .sql(&format!(
+                "INSERT INTO items SELECT tally(value), 'x' FROM generate_series(1, {rows})"
+            ))
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .expect_err("an INSERT past the entry limit must fail");
+        let DataFusionError::External(root) = error.find_root() else {
+            panic!("the INSERT must fail with the Store's entry limit: {error}");
+        };
+        assert_eq!(
+            root.downcast_ref::<PutTooLarge>(),
+            Some(&PutTooLarge {
+                entries: MAX_PUT_ENTRIES + 1,
+                max_entries: MAX_PUT_ENTRIES,
+            }),
+            "{error}"
+        );
+        assert_eq!(store.puts(), 0, "a rejected INSERT must send no Put");
+        assert!(
+            pulled.load(Ordering::Relaxed) < rows,
+            "the sink must stop reading its input once the limit is passed"
+        );
+
+        // A small INSERT still commits in one Put.
+        ctx.sql("INSERT INTO items VALUES (1, 'a'), (2, NULL)")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(store.puts(), 1);
+    }
+
+    /// Returns body lengths for eighteen `items` rows that fill one Store write to exactly its
+    /// byte limit: the length of the first seventeen bodies, then the length of the last.
+    fn bodies_filling_one_put(table: &KvTable) -> (usize, usize) {
+        // Bytes that one row adds to the write, computed with the sink's own encoder.
+        let row_len = |body_len: usize| {
+            let batch = RecordBatch::try_new(
+                table.model.schema.clone(),
+                vec![
+                    Arc::new(Int64Array::from(vec![1])),
+                    Arc::new(StringArray::from(vec!["x".repeat(body_len)])),
+                ],
+            )
+            .unwrap();
+            let mut staged = StoreWriteBatch::new();
+            for (key, value) in
+                encode_insert_entries(&batch, &table.model, &table.index_specs).unwrap()
+            {
+                staged.push(&table.store, &key, value).unwrap();
+            }
+            staged.encoded_len()
+        };
+
+        let body_len = 15 * 1024 * 1024;
+        let last_row = MAX_REQUEST_MESSAGE_BYTES - 17 * row_len(body_len);
+        let mut last_len = last_row - row_len(0);
+        for _ in 0..3 {
+            last_len = last_len + last_row - row_len(last_len);
+        }
+        assert_eq!(
+            row_len(last_len),
+            last_row,
+            "the last body must fill the limit exactly"
+        );
+        assert_eq!(row_len(last_len + 1), last_row + 1);
+        (body_len, last_len)
+    }
+
+    #[tokio::test]
+    async fn insert_of_exactly_the_put_byte_limit_commits_and_one_byte_more_sends_nothing() {
+        let store = AckingStore::new(7);
+
+        // One-row input batches keep the input small while the staged write grows.
+        let ctx = store
+            .items_context(|builder| builder.with_config(SessionConfig::new().with_batch_size(1)));
+        let provider = ctx.table_provider("items").await.unwrap();
+        let table = provider.downcast_ref::<KvTable>().unwrap();
+
+        let (body_len, last_len) = bodies_filling_one_put(table);
+        for extra in [0, 1] {
+            let puts = store.puts();
+            let result = ctx
+                .sql(&format!(
+                    "INSERT INTO items SELECT value, \
+                     repeat('x', CASE WHEN value <= 17 THEN {body_len} ELSE {} END) \
+                     FROM generate_series(1, 18)",
+                    last_len + extra
+                ))
+                .await
+                .unwrap()
+                .collect()
+                .await;
+            if extra == 0 {
+                result.expect("an INSERT of exactly the byte limit must commit");
+                assert_eq!(store.puts(), puts + 1, "the INSERT must commit in one Put");
+            } else {
+                let error = result.expect_err("an INSERT one byte past the limit must fail");
+                assert!(
+                    matches!(error.find_root(), DataFusionError::ResourcesExhausted(_)),
+                    "the INSERT must fail with the Store's byte limit: {error}"
+                );
+                assert_eq!(store.puts(), puts, "a rejected INSERT must send no Put");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn insert_of_a_value_over_the_store_limit_sends_nothing() {
+        let store = AckingStore::new(7);
+        let ctx = store.items_context(|builder| builder);
+
+        // The stored row wraps the body, so its value is longer than the limit.
+        let error = ctx
+            .sql(&format!(
+                "INSERT INTO items VALUES (1, repeat('x', {MAX_VALUE_LEN}))"
+            ))
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .expect_err("an INSERT of a value over the Store limit must fail");
+        assert!(
+            matches!(error.find_root(), DataFusionError::Plan(_)),
+            "{error}"
+        );
+        assert_eq!(store.puts(), 0, "a rejected INSERT must send no Put");
+    }
+
+    #[tokio::test]
+    async fn writer_rejects_a_value_over_the_store_limit_and_uploads_later_rows() {
+        let (_task, url) = exoware_simulator::open_temp()
+            .await
+            .expect("the simulator must start");
+        let client = StoreClient::new(&url).unprefixed();
+        let mut writer = items_schema(client.clone(), &[]).batch_writer();
+        let ctx = SqlContext::new(client.clone());
+        ctx.register_schema(items_schema(client, &[])).unwrap();
+
+        // The stored row wraps the body, so its value is longer than the limit.
+        let error = writer
+            .insert("items", item(1, "x".repeat(MAX_VALUE_LEN)))
+            .map(|_| ())
+            .expect_err("a value over the Store limit must be rejected");
+        assert!(matches!(error, DataFusionError::Plan(_)), "{error}");
+        assert_eq!(writer.pending_entry_count(), 0);
+
+        writer.insert("items", item(2, "b")).unwrap();
+        writer
+            .flush()
+            .await
+            .expect("a row inserted after a rejected row must upload");
+        let batches = ctx
+            .sql("SELECT id FROM items")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let ids: Vec<i64> = batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column(0)
+                    .as_primitive::<Int64Type>()
+                    .values()
+                    .to_vec()
+            })
+            .collect();
+        assert_eq!(ids, [2]);
+    }
+
+    #[tokio::test]
+    async fn writer_holds_rows_up_to_the_put_entry_limit_and_rejects_the_next_until_flush() {
+        let store = AckingStore::new(7);
+
+        // Each row writes a base entry and two index entries, so the pending rows stop two
+        // entries short of the limit.
+        let mut writer = items_schema(store.client(), &["first", "second"]).batch_writer();
+        let rows = MAX_PUT_ENTRIES / 3;
+        for id in 0..rows {
+            writer.insert("items", item(id as i64, "")).unwrap();
+        }
+        assert_eq!(writer.pending_entry_count(), MAX_PUT_ENTRIES - 2);
+
+        // The next row is rejected whole and leaves the pending rows as they were.
+        let error = writer
+            .insert("items", item(rows as i64, ""))
+            .map(|_| ())
+            .expect_err("a row past the entry limit must be rejected");
+        let DataFusionError::External(root) = &error else {
+            panic!("the row must fail with the Store's entry limit: {error}");
+        };
+        assert_eq!(
+            root.downcast_ref::<PutTooLarge>(),
+            Some(&PutTooLarge {
+                entries: MAX_PUT_ENTRIES + 1,
+                max_entries: MAX_PUT_ENTRIES,
+            }),
+            "{error}"
+        );
+        assert_eq!(writer.pending_entry_count(), MAX_PUT_ENTRIES - 2);
+
+        assert_eq!(writer.flush().await.unwrap(), Some(7));
+        assert_eq!(store.puts(), 1, "the pending rows must commit in one Put");
+        writer.insert("items", item(rows as i64, "")).unwrap();
+        assert_eq!(writer.pending_entry_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn writer_holds_exactly_the_put_byte_limit_until_its_pending_rows_are_flushed() {
+        let store = AckingStore::new(7);
+        let ctx = store.items_context(|builder| builder);
+        let provider = ctx.table_provider("items").await.unwrap();
+        let (body_len, last_len) =
+            bodies_filling_one_put(provider.downcast_ref::<KvTable>().unwrap());
+
+        // An earlier batch whose upload failed stays first in line for the next flush.
+        let mut writer = items_schema(store.client(), &[]).batch_writer();
+        writer.insert("items", item(0, "")).unwrap();
+        let failed = writer.prepare_upload().unwrap().expect("the first row");
+        StoreWriteBatchUpload::mark_upload_failed(&writer, failed, String::new()).await;
+
+        for id in 1..=17 {
+            writer
+                .insert("items", item(id, "x".repeat(body_len)))
+                .unwrap();
+        }
+        let error = writer
+            .insert("items", item(18, "x".repeat(last_len + 1)))
+            .map(|_| ())
+            .expect_err("a row one byte past the limit must be rejected");
+        assert!(
+            matches!(error, DataFusionError::ResourcesExhausted(_)),
+            "the row must fail with the Store's byte limit: {error}"
+        );
+        assert_eq!(writer.pending_entry_count(), 18);
+
+        writer
+            .insert("items", item(18, "x".repeat(last_len)))
+            .unwrap();
+
+        // The first flush retries the failed batch alone, so the pending rows are still full.
+        assert_eq!(writer.flush().await.unwrap(), Some(7));
+        assert_eq!(writer.pending_entry_count(), 18);
+        writer
+            .insert("items", item(19, ""))
+            .map(|_| ())
+            .expect_err("the pending rows must still be full");
+
+        assert_eq!(writer.flush().await.unwrap(), Some(7));
+        assert_eq!(store.puts(), 2, "the pending rows must commit in one Put");
+        writer.insert("items", item(19, "")).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_batch_the_store_always_rejects_is_retried_until_the_caller_discards_it() {
+        // This Store accepts fewer entries in one Put than the writer allows.
+        let store = AckingStore {
+            max_entries: Some(1),
+            ..AckingStore::new(7)
+        };
+        let mut writer = items_schema(store.client(), &[]).batch_writer();
+        writer.insert("items", item(1, "a")).unwrap();
+        writer.insert("items", item(2, "b")).unwrap();
+        writer
+            .flush()
+            .await
+            .expect_err("the Store must reject two entries");
+
+        // The rejected batch is retried ahead of the later row and fails again.
+        writer.insert("items", item(3, "c")).unwrap();
+        writer
+            .flush()
+            .await
+            .expect_err("the retry must be rejected");
+        assert_eq!(store.puts(), 2);
+        assert_eq!(writer.pending_entry_count(), 3);
+
+        let rejected = writer
+            .prepare_upload()
+            .unwrap()
+            .expect("the rejected batch");
+        assert_eq!((rejected.request_id(), rejected.entry_count()), (0, 2));
+        drop(rejected);
+        assert_eq!(writer.pending_entry_count(), 1);
+        assert_eq!(writer.flush().await.unwrap(), Some(7));
+        assert_eq!(writer.pending_entry_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn insert_records_its_commit_as_an_observation() {
+        // Zero is a real commit sequence and is recorded like any other.
+        for sequence_number in [0, 11] {
+            let store = AckingStore::new(sequence_number);
+            let observed_after = async |ctx: &SqlContext, sql: &str| {
+                ctx.sql(sql).await.unwrap().collect().await.unwrap();
+                let session = ctx.read_session();
+                (session.evaluated_sequence(), session.min_sequence_number())
+            };
+
+            // A monotonic session requires the commit for later reads.
+            let ctx = store.items_context(|builder| builder);
+            assert_eq!(
+                observed_after(&ctx, "INSERT INTO items VALUES (1, 'a')").await,
+                (Some(sequence_number), Some(sequence_number))
+            );
+
+            // A fixed session reports the commit and keeps its floor.
+            let fixed = ReadSession::fixed(store.client(), Some(5));
+            let ctx = store.items_context(|builder| builder.with_read_session(fixed));
+            assert_eq!(
+                observed_after(&ctx, "INSERT INTO items VALUES (2, 'b')").await,
+                (Some(sequence_number), Some(5))
+            );
+
+            // An INSERT that writes no rows sends nothing and records nothing.
+            let ctx = store.items_context(|builder| builder);
+            assert_eq!(
+                observed_after(&ctx, "INSERT INTO items SELECT 3, 'c' WHERE false").await,
+                (None, None)
+            );
+            assert_eq!(store.puts(), 2);
+
+            // A DataFusion context without a read session still commits.
+            let plain = DataFusionContext::new();
+            plain
+                .register_table("items", ctx.table_provider("items").await.unwrap())
+                .unwrap();
+            plain
+                .sql("INSERT INTO items VALUES (4, 'd')")
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap();
+            assert_eq!(store.puts(), 3);
+        }
     }
 
     /// Pins the bytes `encode_insert_entries` writes for base rows and for

@@ -50,10 +50,11 @@ reject `Table.slice` and `Table.selectAt` when duplicate names have different ty
 ([apache/arrow-js#288](https://github.com/apache/arrow-js/issues/288)), so give
 columns unique SQL aliases before using those methods.
 
-The accompanying `sequenceNumber` is the highest Store sequence observed by any
-read in the query, represented as a `bigint`. It is `undefined` when the statement
-read nothing from the Store. A requested minimum does not count as an
-observation.
+The accompanying `sequenceNumber` is the highest Store sequence the statement
+observed, represented as a `bigint`. A read observes the sequence it read at,
+and an `INSERT` observes the sequence of its commit. It is `undefined` when the
+statement neither read from nor wrote to the Store. A requested minimum does not
+count as an observation.
 
 ## Read consistency
 
@@ -66,12 +67,14 @@ minimum across queries:
   starting from the optional initial floor.
 - `SqlClient.fixed(url, floor, options)` sends the same minimum with every query.
 
-To read your own writes, use the sequence returned by the write as the floor.
+An `INSERT` response carries its commit sequence, so the later queries of a
+monotonic client read the rows it inserted. To read other writes, use the
+sequence returned by the write as the floor.
 You can also pass a minimum as `query`'s second argument to strengthen one query
 without replacing the configured floor. Its response still advances a monotonic
 client's observations. Inspect those observations with `evaluatedSequence()`, or
-use `minSequenceNumber()` to see the minimum for the next query. Queries that
-read nothing from the Store leave both unchanged.
+use `minSequenceNumber()` to see the minimum for the next query. Statements that
+neither read from nor write to the Store leave both unchanged.
 
 Each query uses the minimum known when it starts. Neither policy pins a snapshot,
 so reads within one query can observe different sequences at or above that

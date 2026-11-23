@@ -207,9 +207,18 @@ do not repair it from the base row.
 Use `KvSchema::batch_writer` to write rows as `CellValue` vectors in column order.
 The `BatchWriter` encodes each row's base entry and all of its index entries, and
 `flush` uploads the pending rows across tables as one atomic Store batch. It
-returns the batch's sequence number, or `None` when nothing was pending. If a flush
-fails, the writer retains that batch and retries it alone on the next flush,
-before uploading later rows.
+returns the batch's sequence number, or `None` when nothing was pending.
+
+`insert` keeps the pending rows within the Store's limits for one write. It rejects
+a row with a key or value over the Store's limit for one, and a row that would take
+the pending rows past the Store's entry or byte limit. Such a row fits once a `flush`
+has uploaded the pending rows, unless it exceeds that limit alone.
+
+If a flush fails, the writer retains that batch. Each flush retries one failed
+batch alone, and the pending rows wait until those batches have been drained. A
+batch the Store rejects every time, as a Store configured with lower limits can,
+holds back the rows behind it. Take it with `prepare_upload` and drop it to
+discard its rows and upload the rest.
 
 To commit SQL rows atomically with other Store writes, prepare them with
 `prepare_upload` and add them to an SDK `StoreWriteBatch` with the SDK's
@@ -218,8 +227,12 @@ successful commit, or `mark_upload_failed` to retain the batch for retry.
 
 SQL `INSERT` writes through the same schema, with each statement committed as one
 atomic batch. It materializes Arrow batches first, so `BatchWriter` avoids that
-work for application ingest. The Store's request-size limit bounds each batch,
-and an oversized statement or flush returns the ingest error.
+work for application ingest. A statement must fit in one Store write. Once its
+entries pass the Store's entry or byte limit, `INSERT` stops reading its input
+and fails without writing. Too many entries return a `PutTooLarge` error and too
+many bytes `ResourcesExhausted`. A value over the Store's value limit fails the
+same way with a planning error. `BatchWriter::insert` returns the same errors for
+the same limits.
 
 ## Adding indexes to existing tables
 
@@ -268,8 +281,12 @@ snapshot, so reads within one statement can observe different sequences at or
 above that minimum.
 
 `SqlContext::new` starts a monotonic session with no minimum and shares it across
-the context's statements and clones. To read your own writes, start the session
-at the sequence returned by `flush`, as in [Getting started](#getting-started).
+the context's statements and clones. An `INSERT` records its commit sequence in
+the session of the context that runs it, as a read records the sequence it
+observes. A monotonic session then reads at or above the commit, and a fixed
+session reports it through `evaluated_sequence` and keeps its minimum. Writes
+through a `BatchWriter` are not recorded. To read them, start the session at the
+sequence returned by `flush`, as in [Getting started](#getting-started).
 You can also raise the minimum for a single query by deriving a context that
 shares the catalog and observations:
 
@@ -309,8 +326,10 @@ let app = axum::Router::new().fallback_service(sql_stack(server));
 `Query` runs one SQL statement and returns an Arrow IPC stream that Rust clients
 can decode with Arrow's `StreamReader`. Its Store reads share a new monotonic
 session starting at the request's optional minimum sequence. The response also
-reports the highest Store sequence observed, omitting it when the statement read
-nothing from the Store. A result whose encoded stream exceeds 256 MiB fails with
+reports the highest Store sequence the statement observed, including the commit
+of an `INSERT`. A later request can pass that sequence as its minimum to read
+the new rows. It is absent when the statement neither read from nor wrote to
+the Store. A result whose encoded stream exceeds 256 MiB fails with
 `RESOURCE_EXHAUSTED`.
 
 `Query` accepts queries, `EXPLAIN`, `INSERT INTO` registered tables, and

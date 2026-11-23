@@ -101,6 +101,11 @@ without a floor.
 responses arrive. A replica may already be ahead of the floor, so either
 policy can return a later sequence. Neither pins a historical snapshot.
 
+To make an existing session depend on a write, record the write's sequence with
+`observeWrite(sequence)`. It counts as an observation, so a monotonic session
+requires it for later queries and a fixed session reports it through
+`evaluatedSequence()` but keeps its floor.
+
 Clones share observations, and each query uses the floor known when it starts.
 To require a higher minimum for one reader, use
 `withMinSequenceNumber(sequence)`. The derived reader shares observations
