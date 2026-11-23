@@ -116,5 +116,5 @@ sequence. A fixed session sets a minimum, not a historical snapshot.
 
 [`SimplexSubscriptions`](./src/subscriptions.ts) streams Store updates.
 `subscribeCertificates` takes a verifier and applies it as certificate reads do.
-`subscribeCertificatesRaw`, `subscribeHeaders` and `subscribeBlocks` return
-unverified artifacts.
+`subscribeCertificatesRaw`, `subscribeHeadersRaw` and `subscribeBlocksRaw`
+return unverified artifacts.
