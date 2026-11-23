@@ -23,7 +23,7 @@ use exoware_sdk::kv_codec::decode_stored_row;
 use exoware_sdk::{
     keys::Key,
     kv_codec::{StoredRow, StoredValue},
-    PrefixedStoreClient, StoreBatchUpload, StoreWriteBatch,
+    PrefixedStoreClient, StoreWriteBatch, StoreWriteBatchUpload,
 };
 use futures::{future::BoxFuture, TryStreamExt};
 use std::{
@@ -259,12 +259,12 @@ impl BatchWriter {
     }
 }
 
-impl StoreBatchUpload for BatchWriter {
+impl StoreWriteBatchUpload for BatchWriter {
     type Prepared = PreparedBatch;
     type Receipt = BatchReceipt;
     type Error = DataFusionError;
 
-    fn store_client(&self) -> &PrefixedStoreClient {
+    fn store(&self) -> &PrefixedStoreClient {
         &self.client
     }
 
@@ -961,19 +961,17 @@ mod tests {
     fn oversized_index_keys_preserve_writer_and_backfill_errors() {
         // The 251-byte primary key fits in the base key, but the index key that appends it to
         // the tag exceeds the Store key limit.
-        let schema = crate::KvSchema::new(PrefixedStoreClient::empty(StoreClient::new(
-            "http://127.0.0.1:1",
-        )))
-        .table(
-            "orders",
-            vec![
-                TableColumnConfig::new("id", DataType::Utf8, false),
-                TableColumnConfig::new("tag", DataType::Utf8, false),
-            ],
-            vec!["id".into()],
-            vec![IndexSpec::new("tag_idx", vec!["tag".into()]).unwrap()],
-        )
-        .unwrap();
+        let schema = crate::KvSchema::new(StoreClient::new("http://127.0.0.1:1").unprefixed())
+            .table(
+                "orders",
+                vec![
+                    TableColumnConfig::new("id", DataType::Utf8, false),
+                    TableColumnConfig::new("tag", DataType::Utf8, false),
+                ],
+                vec!["id".into()],
+                vec![IndexSpec::new("tag_idx", vec!["tag".into()]).unwrap()],
+            )
+            .unwrap();
         let row = KvRow {
             values: vec![
                 CellValue::Utf8("i".repeat(251)),
@@ -1266,10 +1264,7 @@ mod tests {
 
     #[test]
     fn store_batch_upload_stage_preserves_rows_for_failed_retry() {
-        let writer = BatchWriter::new(
-            PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:1")),
-            &[],
-        );
+        let writer = BatchWriter::new(StoreClient::new("http://127.0.0.1:1").unprefixed(), &[]);
         let mut prepared = PreparedBatch {
             request_id: 7,
             entries: vec![
@@ -1280,7 +1275,8 @@ mod tests {
         let entries = prepared.entries.clone();
         let mut batch = StoreWriteBatch::new();
 
-        StoreBatchUpload::stage_upload(&writer, &mut prepared, &mut batch).expect("stage flush");
+        StoreWriteBatchUpload::stage_upload(&writer, &mut prepared, &mut batch)
+            .expect("stage flush");
 
         assert_eq!(batch.len(), 2);
         assert_eq!(prepared.entry_count(), 2);
@@ -1291,7 +1287,8 @@ mod tests {
         assert_eq!(retry.entry_count(), 2);
 
         let mut retry_batch = StoreWriteBatch::new();
-        StoreBatchUpload::stage_upload(&writer, &mut retry, &mut retry_batch).expect("stage retry");
+        StoreWriteBatchUpload::stage_upload(&writer, &mut retry, &mut retry_batch)
+            .expect("stage retry");
         assert_eq!(retry_batch.len(), 2);
         assert_eq!(retry.entries, entries);
     }

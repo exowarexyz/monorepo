@@ -118,7 +118,7 @@ of the admission details also remains non-retryable under this policy.
 The Rust SDK exposes the limits under `exoware_sdk::limits`. Its
 `StoreWriteBatch` reports the exact encoded request length through
 `encoded_len()` and can split ownership into batches with
-`split(max_rows, max_encoded_bytes)`. Both limits must be positive. An empty
+`split(max_entries, max_encoded_bytes)`. Both limits must be positive. An empty
 batch produces no chunks. An entry that cannot fit alone returns an error.
 Splitting preserves staged entries without copying or re-prefixing payloads.
 
@@ -128,10 +128,10 @@ admission policy above, concurrency, and publication barriers across chunks.
 
 The TypeScript SDK exports the same limits and validates store writes before
 sending each batch as one atomic Put. For a `StoreWriteBatch`, `encodedLen()`
-returns the protobuf request size, and `validate(store.putOptions)` checks the
+returns the protobuf request size, and `validate(client.putLimits)` checks the
 batch against the client's configured limits. To send smaller writes, call
-`split(store.putOptions)` and commit each returned batch separately.
+`split(client.putLimits)` and commit each returned batch separately.
 
 TypeScript requests default to protobuf, and Put always requires it. Set
-`ClientOptions.useBinaryFormat` to `false` to use Connect JSON for other
+`StoreClientOptions.useBinaryFormat` to `false` to use Connect JSON for other
 services.

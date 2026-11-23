@@ -109,7 +109,7 @@ pub fn build_client(config: &ClientConfig) -> anyhow::Result<PrefixedStoreClient
     // Workload keys already embed a run namespace after a leading entropy byte so they remain
     // spread across physical shards. The identity prefix exposes the public logical API without
     // adding a fixed prefix that would defeat that distribution.
-    Ok(PrefixedStoreClient::empty(client))
+    Ok(client.unprefixed())
 }
 
 /// Ingest error codes that can self-resolve, so retrying the same batch is worthwhile.
