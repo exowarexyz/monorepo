@@ -482,6 +482,15 @@ async fn miss_proof(
     assert_eq!(proof.requested_key, key);
     assert!(proof.verify::<Sha256>());
 
+    let direct = ordered
+        .get_many(tip.latest_location, std::slice::from_ref(&key), None)
+        .await
+        .expect("get_many");
+    assert!(matches!(
+        direct.as_slice(),
+        [VerifiedKeyLookup::Miss { root, key: missed }] if root == &tip.root && missed == &key
+    ));
+
     let verified = connect
         .get_many(
             tip.latest_location,
@@ -493,7 +502,7 @@ async fn miss_proof(
         .expect("connect get_many");
     assert!(matches!(
         verified.as_slice(),
-        [VerifiedKeyLookup::Miss { key: missed }] if missed == &key
+        [VerifiedKeyLookup::Miss { root, key: missed }] if root == &tip.root && missed == &key
     ));
     proof
 }
@@ -530,6 +539,7 @@ async fn range_page(
         .get_range_proof(tip.latest_location, start.clone(), end.clone(), limit, None)
         .await
         .expect("get_range_proof");
+    assert_eq!(proof.root, tip.root);
     for entry in &proof.entries {
         assert_eq!(entry.root, tip.root);
         assert!(entry.verify::<Sha256>());
@@ -545,10 +555,17 @@ async fn range_page(
         .map(|entry| text(entry.operation.key().expect("entry key")))
         .collect::<Vec<_>>();
 
+    let direct = ordered
+        .get_range(tip.latest_location, start.clone(), end.clone(), limit, None)
+        .await
+        .expect("get_range");
+    assert_eq!(direct.root, tip.root);
+
     let verified = connect
         .get_range(tip.latest_location, start, end, limit, None, &tip.root)
         .await
         .expect("connect get_range");
+    assert_eq!(verified.root, tip.root);
     let verified_keys = verified
         .entries
         .iter()
@@ -852,7 +869,7 @@ async fn test_ordered_connect_get_many_returns_miss_proofs_and_rejects_duplicate
     let aardvark = b"aardvark".to_vec();
     assert!(matches!(
         &proof[1],
-        VerifiedKeyLookup::Miss { key } if key == &aardvark
+        VerifiedKeyLookup::Miss { root, key } if root == &source.root && key == &aardvark
     ));
 
     let err = connect_client
@@ -922,6 +939,7 @@ async fn test_ordered_connect_get_range_verifies_complete_empty_and_partial_page
         )
         .await
         .expect("empty get_range");
+    assert_eq!(empty.root, source.root);
     assert!(empty.next_start_key.is_none());
     assert!(empty.entries.is_empty());
 }

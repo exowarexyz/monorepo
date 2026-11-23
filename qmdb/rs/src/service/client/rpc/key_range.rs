@@ -265,6 +265,7 @@ where
     .cloned();
 
     Ok(VerifiedKeyRange {
+        root: *root,
         entries,
         next_start_key,
     })
