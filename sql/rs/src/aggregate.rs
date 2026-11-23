@@ -223,7 +223,7 @@ pub(crate) struct CombinedAggregateJob {
 #[derive(Debug, Clone)]
 pub(crate) struct AggregatePushdownSpec {
     /// Store client for the table's key prefix.
-    pub(crate) client: PrefixedStoreClient,
+    pub(crate) store: PrefixedStoreClient,
     /// Number of `GROUP BY` expressions. They are the leading fields of `schema` and of the
     /// state schema. Zero for a scalar aggregate.
     pub(crate) group_count: usize,
@@ -657,7 +657,7 @@ impl ExecutionPlan for KvAggregateExec {
             )));
         }
 
-        let session = read_session(context.session_config(), &self.spec.client)?;
+        let session = read_session(context.session_config(), &self.spec.store)?;
         let source = Arc::new(self.clone());
         let concurrency = context.session_config().target_partitions().max(1);
         let jobs = self
@@ -1048,7 +1048,7 @@ pub(crate) fn try_build_aggregate_pushdown_spec(
         .map(|job| aggregate_diagnostics[job.expr_plans[0].0].clone())
         .collect();
     Ok(Some(AggregatePushdownSpec {
-        client: table.client.clone(),
+        store: table.store.clone(),
         group_count: compiled_group_exprs.len(),
         seed_job: seed_job.as_ref().map(|(job, _)| job.clone()),
         aggregate_jobs,
@@ -1186,10 +1186,8 @@ pub(crate) fn choose_aggregate_access_path(
     // Reading the primary-key family supplies all required values when no
     // covering index is selected.
     Ok((
-        predicate.primary_key_ranges(
-            &table.model,
-            table.client.key_prefix().max_logical_key_len(),
-        )?,
+        predicate
+            .primary_key_ranges(&table.model, table.store.key_prefix().max_logical_key_len())?,
         AggregateAccessPath::PrimaryKey,
         None,
     ))
@@ -1326,7 +1324,7 @@ pub(crate) fn compile_kv_predicate_constraint(
     match constraint {
         PredicateConstraint::StringEq(value) => KvPredicateConstraint::StringEq(value.clone()),
         PredicateConstraint::BoolEq(value) => KvPredicateConstraint::BoolEq(*value),
-        PredicateConstraint::FixedBinaryEq(value) => {
+        PredicateConstraint::FixedSizeBinaryEq(value) => {
             KvPredicateConstraint::FixedSizeBinaryEq(value.clone().into())
         }
         PredicateConstraint::IntRange { min, max } => KvPredicateConstraint::IntRange {
@@ -1352,7 +1350,7 @@ pub(crate) fn compile_kv_predicate_constraint(
         PredicateConstraint::StringIn(values) => KvPredicateConstraint::StringIn(values.clone()),
         PredicateConstraint::IntIn(values) => KvPredicateConstraint::IntIn(values.clone()),
         PredicateConstraint::UInt64In(values) => KvPredicateConstraint::UInt64In(values.clone()),
-        PredicateConstraint::FixedBinaryIn(values) => KvPredicateConstraint::FixedSizeBinaryIn(
+        PredicateConstraint::FixedSizeBinaryIn(values) => KvPredicateConstraint::FixedSizeBinaryIn(
             values.iter().cloned().map(Into::into).collect(),
         ),
         PredicateConstraint::Decimal256Range { min, max } => {
@@ -2091,9 +2089,9 @@ mod tests {
     type FloatRangeRow = (i64, i64, Option<i64>, i64, Option<f64>);
 
     struct Fixture {
-        store: crate::SqlContext,
+        context: crate::SqlContext,
         native: DataFusionSessionContext,
-        client: PrefixedStoreClient,
+        store: PrefixedStoreClient,
         rows: Arc<Rows>,
         server: tokio::task::JoinHandle<()>,
     }
@@ -2146,9 +2144,9 @@ mod tests {
                 .tap_io(set_tcp_nodelay);
             let url = format!("http://{}", listener.local_addr().unwrap());
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-            let client = StoreClient::new(&url).unprefixed();
-            let store = crate::SqlContext::new(client.clone());
-            let schema = crate::KvSchema::new(client.clone())
+            let store = StoreClient::new(&url).unprefixed();
+            let context = crate::SqlContext::new(store.clone());
+            let schema = crate::KvSchema::new(store.clone())
                 .table(
                     "orders",
                     vec![
@@ -2161,8 +2159,8 @@ mod tests {
                     vec![],
                 )
                 .unwrap();
-            store.register_schema(schema).unwrap();
-            let provider = store.table_provider("orders").await.unwrap();
+            context.register_schema(schema).unwrap();
+            let provider = context.table_provider("orders").await.unwrap();
             let model = &provider.downcast_ref::<KvTable>().unwrap().model;
             let regions = [Some("east"), Some("east"), Some("west"), None];
             let statuses = ["open", "closed", "closed", "open"];
@@ -2201,9 +2199,9 @@ mod tests {
                 )
                 .unwrap();
             Self {
-                store,
+                context,
                 native,
-                client,
+                store,
                 rows,
                 server,
             }
@@ -2218,9 +2216,9 @@ mod tests {
             rows: Vec<KvRow>,
             arrays: Vec<ArrayRef>,
         ) {
-            let provider = self.store.table_provider("orders").await.unwrap();
-            let client = provider.downcast_ref::<KvTable>().unwrap().client.clone();
-            let schema = crate::KvSchema::new(client)
+            let provider = self.context.table_provider("orders").await.unwrap();
+            let store = provider.downcast_ref::<KvTable>().unwrap().store.clone();
+            let schema = crate::KvSchema::new(store)
                 .table(
                     name,
                     columns,
@@ -2228,8 +2226,8 @@ mod tests {
                     indexes,
                 )
                 .unwrap();
-            self.store.register_schema(schema).unwrap();
-            let provider = self.store.table_provider(name).await.unwrap();
+            self.context.register_schema(schema).unwrap();
+            let provider = self.context.table_provider(name).await.unwrap();
             let table = provider.downcast_ref::<KvTable>().unwrap();
             let mut stored = self.rows.values.lock().unwrap();
             stored.clear();
@@ -2263,9 +2261,9 @@ mod tests {
             values: Vec<CellValue>,
             array: ArrayRef,
         ) {
-            let provider = self.store.table_provider("orders").await.unwrap();
-            let client = provider.downcast_ref::<KvTable>().unwrap().client.clone();
-            let schema = crate::KvSchema::new(client)
+            let provider = self.context.table_provider("orders").await.unwrap();
+            let store = provider.downcast_ref::<KvTable>().unwrap().store.clone();
+            let schema = crate::KvSchema::new(store)
                 .table(
                     "numbers",
                     vec![
@@ -2276,8 +2274,8 @@ mod tests {
                     vec![],
                 )
                 .unwrap();
-            self.store.register_schema(schema).unwrap();
-            let provider = self.store.table_provider("numbers").await.unwrap();
+            self.context.register_schema(schema).unwrap();
+            let provider = self.context.table_provider("numbers").await.unwrap();
             let model = &provider.downcast_ref::<KvTable>().unwrap().model;
             let mut stored = self.rows.values.lock().unwrap();
             stored.clear();
@@ -2383,9 +2381,9 @@ mod tests {
             self.rows.paths.lock().unwrap().clear();
             self.rows.reductions.lock().unwrap().clear();
             self.rows.scanned_rows.store(0, AtomicOrdering::Relaxed);
-            let session = self.store.read_session();
+            let session = self.context.read_session();
             let initial_floor = session.min_sequence_number();
-            let actual = values(self.store.datafusion(), sql).await.unwrap();
+            let actual = values(self.context.datafusion(), sql).await.unwrap();
             assert_eq!(actual.as_slice(), expected, "{sql}");
             let requests = self.rows.reductions.lock().unwrap();
             let observed_floor = initial_floor.max(Some(7));
@@ -2454,7 +2452,7 @@ mod tests {
         use datafusion::physical_plan::aggregates::AggregateExec;
 
         let fixture = Fixture::new().await;
-        for ctx in [&fixture.native, fixture.store.datafusion()] {
+        for ctx in [&fixture.native, fixture.context.datafusion()] {
             values(ctx, "SET datafusion.execution.target_partitions = 1")
                 .await
                 .unwrap();
@@ -2477,13 +2475,13 @@ mod tests {
                     .and_then(AggregateExec::limit_options)
                     .is_some_and(|options| options.limit() == 1)))
                 .unwrap());
-            let frame = fixture.store.sql(sql).await.unwrap();
+            let frame = fixture.context.sql(sql).await.unwrap();
             let logical = frame.clone().into_optimized_plan().unwrap();
             let physical = frame.create_physical_plan().await.unwrap();
             let expected = values(&fixture.native, sql).await.unwrap();
             fixture.rows.paths.lock().unwrap().clear();
             fixture.rows.reductions.lock().unwrap().clear();
-            let actual = values(fixture.store.datafusion(), sql).await.unwrap();
+            let actual = values(fixture.context.datafusion(), sql).await.unwrap();
             let paths = fixture.rows.paths.lock().unwrap().clone();
             assert_eq!(
                 paths
@@ -2545,7 +2543,7 @@ mod tests {
                CROSS JOIN (SELECT id FROM orders LIMIT 1) l ORDER BY r.region";
         let expected = values(&fixture.native, sql).await.unwrap();
         fixture.rows.paths.lock().unwrap().clear();
-        let actual = values(fixture.store.datafusion(), sql).await.unwrap();
+        let actual = values(fixture.context.datafusion(), sql).await.unwrap();
         assert_eq!(actual, expected, "{sql}");
         let paths = fixture.rows.paths.lock().unwrap().clone();
         assert_eq!(
@@ -2660,7 +2658,7 @@ mod tests {
         let fixture = Fixture::new().await;
         let sql = "SELECT COUNT(*), SUM(amount + 9223372036854775807) FROM orders";
         fixture.check(sql, 1).await;
-        for ctx in [&fixture.native, fixture.store.datafusion()] {
+        for ctx in [&fixture.native, fixture.context.datafusion()] {
             values(ctx, "SET datafusion.execution.enable_ansi_mode = true")
                 .await
                 .unwrap();
@@ -2851,7 +2849,7 @@ mod tests {
             );
             fixture.rows.paths.lock().unwrap().clear();
             fixture.rows.reductions.lock().unwrap().clear();
-            let store_error = values(fixture.store.datafusion(), sql).await.unwrap_err();
+            let store_error = values(fixture.context.datafusion(), sql).await.unwrap_err();
             assert!(
                 store_error
                     .to_string()
@@ -2880,7 +2878,7 @@ mod tests {
             "SELECT SUM(v) FILTER (WHERE id > 1) FROM (SELECT id, id / (id - 1) AS v FROM orders) q",
             "SELECT SUM(CASE WHEN id > 1 THEN v END) FROM (SELECT id, id / (id - 1) AS v FROM orders) q",
         ] {
-            for context in [&fixture.native, fixture.store.datafusion()] {
+            for context in [&fixture.native, fixture.context.datafusion()] {
                 let error = values(context, sql).await.unwrap_err();
                 assert!(
                     error.to_string().contains("Divide by zero"),
@@ -3010,7 +3008,7 @@ mod tests {
                 let sql =
                     format!("SELECT {expr}, COUNT(*) FROM numbers GROUP BY {expr} ORDER BY 1");
                 let expected = values(&fixture.native, &sql).await.unwrap();
-                let actual = values(fixture.store.datafusion(), &sql).await.unwrap();
+                let actual = values(fixture.context.datafusion(), &sql).await.unwrap();
                 assert_eq!(actual, expected, "{sql}");
                 assert!(fixture.rows.reductions.lock().unwrap().is_empty(), "{sql}");
             }
@@ -3028,12 +3026,12 @@ mod tests {
             "SELECT SUM(amount) FROM (SELECT amount FROM orders LIMIT 2) q",
         ] {
             let expected = values(&fixture.native, sql).await.unwrap();
-            let actual = values(fixture.store.datafusion(), sql).await.unwrap();
+            let actual = values(fixture.context.datafusion(), sql).await.unwrap();
             assert_eq!(actual, expected, "{sql}");
         }
         let sql = "SELECT SUM(CAST(amount AS TINYINT)) FROM orders";
         assert!(values(&fixture.native, sql).await.is_err());
-        assert!(values(fixture.store.datafusion(), sql).await.is_err());
+        assert!(values(fixture.context.datafusion(), sql).await.is_err());
     }
 
     #[tokio::test]
@@ -3439,7 +3437,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fixed_binary_value_widths_preserve_aggregate_results() {
+    async fn fixed_size_binary_value_widths_preserve_aggregate_results() {
         let mut failures = Vec::new();
         for width in [0, 255, 256, 300] {
             let fixture = Fixture::new().await;
@@ -3449,7 +3447,7 @@ mod tests {
                 if let Some(byte) = byte {
                     let value = vec![byte; width as usize];
                     array.append_value(&value).unwrap();
-                    cells.push(CellValue::FixedBinary(value));
+                    cells.push(CellValue::FixedSizeBinary(value));
                 } else {
                     array.append_null();
                     cells.push(CellValue::Null);
@@ -3473,7 +3471,7 @@ mod tests {
                 }
                 let expected = values(&fixture.native, sql).await.unwrap();
                 fixture.rows.paths.lock().unwrap().clear();
-                match values(fixture.store.datafusion(), sql).await {
+                match values(fixture.context.datafusion(), sql).await {
                     Ok(actual) => {
                         assert_eq!(actual, expected, "width {width}: {sql}");
                         let paths = fixture.rows.paths.lock().unwrap();
@@ -3502,7 +3500,7 @@ mod tests {
     async fn count_output_rejects_out_of_range_values() {
         let fixture = Fixture::new().await;
         let plan = fixture
-            .store
+            .context
             .sql("SELECT region, COUNT(*) FROM orders GROUP BY region")
             .await
             .unwrap()
@@ -3654,7 +3652,7 @@ mod tests {
             "SELECT SUM(CAST(value AS DECIMAL(10, 1))) FROM numbers",
         ] {
             assert_eq!(
-                values(fixture.store.datafusion(), sql).await.unwrap(),
+                values(fixture.context.datafusion(), sql).await.unwrap(),
                 values(&fixture.native, sql).await.unwrap(),
                 "{sql}"
             );
@@ -3671,9 +3669,9 @@ mod tests {
     #[tokio::test]
     async fn variable_text_keys_support_stored_fields_and_row_decoding() {
         let fixture = Fixture::new().await;
-        let provider = fixture.store.table_provider("orders").await.unwrap();
-        let client = provider.downcast_ref::<KvTable>().unwrap().client.clone();
-        let schema = crate::KvSchema::new(client)
+        let provider = fixture.context.table_provider("orders").await.unwrap();
+        let store = provider.downcast_ref::<KvTable>().unwrap().store.clone();
+        let schema = crate::KvSchema::new(store)
             .table(
                 "texts",
                 vec![
@@ -3688,8 +3686,8 @@ mod tests {
                     .with_cover_columns(vec!["measure".to_string()])],
             )
             .unwrap();
-        fixture.store.register_schema(schema).unwrap();
-        let provider = fixture.store.table_provider("texts").await.unwrap();
+        fixture.context.register_schema(schema).unwrap();
+        let provider = fixture.context.table_provider("texts").await.unwrap();
         let table = provider.downcast_ref::<KvTable>().unwrap();
         let ids = [
             "short",
@@ -3749,7 +3747,7 @@ mod tests {
             "SELECT SUM(suffix) FROM texts",
         ] {
             assert_eq!(
-                values(fixture.store.datafusion(), sql).await.unwrap(),
+                values(fixture.context.datafusion(), sql).await.unwrap(),
                 values(&fixture.native, sql).await.unwrap(),
                 "{sql}"
             );
@@ -3820,18 +3818,19 @@ mod tests {
             .build_arc()
             .unwrap();
         let config = fixture
-            .store
+            .context
             .datafusion()
             .copied_config()
             .with_create_default_catalog_and_schema(false)
             .with_batch_size(128)
             .with_target_partitions(target_partitions);
-        let context = crate::SqlContext::builder(fixture.client.clone())
-            .with_read_session(fixture.store.read_session().as_ref().clone())
+        let context = crate::SqlContext::builder(fixture.store.clone())
+            .with_read_session(fixture.context.read_session().as_ref().clone())
             .with_config(config)
             .with_runtime_env(runtime)
             .configure_datafusion(|builder| {
-                builder.with_catalog_list(fixture.store.datafusion().state().catalog_list().clone())
+                builder
+                    .with_catalog_list(fixture.context.datafusion().state().catalog_list().clone())
             })
             .build();
         (context, pool)
@@ -4011,9 +4010,9 @@ mod tests {
                 vec![],
             )
             .unwrap();
-        fixture.store.register_schema(schema).unwrap();
+        fixture.context.register_schema(schema).unwrap();
         let provider = fixture
-            .store
+            .context
             .table_provider("pending_ranges")
             .await
             .unwrap();
@@ -4233,11 +4232,11 @@ mod tests {
     #[tokio::test]
     async fn deterministic_reduce_errors_are_not_retried_by_the_sdk() {
         let fixture = Fixture::new().await;
-        let provider = fixture.store.table_provider("orders").await.unwrap();
+        let provider = fixture.context.table_provider("orders").await.unwrap();
         let session = provider
             .downcast_ref::<KvTable>()
             .unwrap()
-            .client
+            .store
             .create_session();
         let start = Bytes::from_static(&[0]);
         let end = Bytes::from_static(&[1]);
@@ -4296,9 +4295,9 @@ mod tests {
     #[tokio::test]
     async fn overlapping_secondary_ranges_do_not_double_count_rows() {
         let fixture = Fixture::new().await;
-        let provider = fixture.store.table_provider("orders").await.unwrap();
-        let client = provider.downcast_ref::<KvTable>().unwrap().client.clone();
-        let schema = crate::KvSchema::new(client)
+        let provider = fixture.context.table_provider("orders").await.unwrap();
+        let store = provider.downcast_ref::<KvTable>().unwrap().store.clone();
+        let schema = crate::KvSchema::new(store)
             .table(
                 "points",
                 vec![
@@ -4313,8 +4312,8 @@ mod tests {
                     .with_cover_columns(vec!["measure".to_string()])],
             )
             .unwrap();
-        fixture.store.register_schema(schema).unwrap();
-        let provider = fixture.store.table_provider("points").await.unwrap();
+        fixture.context.register_schema(schema).unwrap();
+        let provider = fixture.context.table_provider("points").await.unwrap();
         let table = provider.downcast_ref::<KvTable>().unwrap();
         {
             let mut stored = fixture.rows.values.lock().unwrap();
@@ -4394,7 +4393,7 @@ mod tests {
                     } else {
                         let expected = values(&fixture.native, &sql).await.unwrap();
                         fixture.rows.reductions.lock().unwrap().clear();
-                        let actual = values(fixture.store.datafusion(), &sql).await.unwrap();
+                        let actual = values(fixture.context.datafusion(), &sql).await.unwrap();
                         assert_eq!(actual, expected, "{sql}");
                         assert!(fixture.rows.reductions.lock().unwrap().is_empty(), "{sql}");
                     }
@@ -4429,7 +4428,7 @@ mod tests {
             };
             let mut results = Vec::new();
             fixture.rows.reductions.lock().unwrap().clear();
-            for ctx in [&fixture.native, fixture.store.datafusion()] {
+            for ctx in [&fixture.native, fixture.context.datafusion()] {
                 results.push(
                     ctx.table("numbers")
                         .await
@@ -4482,7 +4481,7 @@ mod tests {
                     native_error.to_string().contains("out of range"),
                     "{native_error}"
                 );
-                let store_error = values(fixture.store.datafusion(), sql).await.unwrap_err();
+                let store_error = values(fixture.context.datafusion(), sql).await.unwrap_err();
                 assert!(
                     store_error.to_string().contains("out of range"),
                     "{store_error}"
@@ -4563,7 +4562,7 @@ mod tests {
             .await;
         let sql = "SELECT COUNT(*) FROM tenants WHERE status = 'open' AND id = 2";
         assert_eq!(
-            values(fixture.store.datafusion(), sql).await.unwrap(),
+            values(fixture.context.datafusion(), sql).await.unwrap(),
             values(&fixture.native, sql).await.unwrap()
         );
         assert!(fixture.rows.reductions.lock().unwrap().is_empty());

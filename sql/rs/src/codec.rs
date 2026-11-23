@@ -221,7 +221,7 @@ pub(crate) fn append_ordered_key_bytes(
         (ColumnKind::Decimal256, CellValue::Decimal256(v)) => {
             out.extend_from_slice(&encode_i256_ordered(*v))
         }
-        (ColumnKind::FixedSizeBinary(n), CellValue::FixedBinary(v)) => {
+        (ColumnKind::FixedSizeBinary(n), CellValue::FixedSizeBinary(v)) => {
             if v.len() != n {
                 return Err(format!(
                     "FixedSizeBinary({n}) key column requires exactly {n} bytes, got {}",
@@ -282,7 +282,7 @@ pub(crate) fn decode_cell_from_ordered_key_bytes(
             if bytes.len() != n {
                 return None;
             }
-            CellValue::FixedBinary(bytes.to_vec())
+            CellValue::FixedSizeBinary(bytes.to_vec())
         }
         ColumnKind::Binary | ColumnKind::List(_) => return None,
     })
@@ -621,7 +621,7 @@ pub(crate) fn cell_value_from_archived_non_pk(
                     v.as_slice().len()
                 )));
             }
-            CellValue::FixedBinary(v.as_slice().to_vec())
+            CellValue::FixedSizeBinary(v.as_slice().to_vec())
         }
         (ColumnKind::List(elem), StoredValue::List(items)) => {
             let mut cells = Vec::with_capacity(items.len());

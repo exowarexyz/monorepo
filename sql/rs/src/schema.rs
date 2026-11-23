@@ -1,7 +1,7 @@
 use crate::{codec::*, scan::*, types::*, writer::*, SqlContext};
 use async_trait::async_trait;
 use datafusion::{
-    arrow::datatypes::{DataType, SchemaRef},
+    arrow::datatypes::SchemaRef,
     catalog::Session,
     common::{tree_node::TreeNode, DataFusionError, Result as DataFusionResult, SchemaExt},
     datasource::{sink::DataSinkExec, TableProvider},
@@ -14,20 +14,20 @@ use std::sync::Arc;
 /// Named tables sharing one storage namespace. Table insertion order assigns family
 /// identifiers in persisted keys and must remain stable when reopening data.
 pub struct KvSchema {
-    /// Namespace-scoped client shared by every table built through this schema.
-    client: PrefixedStoreClient,
+    /// Namespace-scoped Store client shared by every table built through this schema.
+    store: PrefixedStoreClient,
     /// Unique table names and shared providers in table-prefix order, with at most
     /// `MAX_TABLES` entries.
     tables: Vec<(String, Arc<KvTable>)>,
 }
 
 impl KvSchema {
-    /// Build a schema over `client`'s namespace prefix. When the Store is
+    /// Build a schema over `store`'s namespace prefix. When the Store is
     /// co-tenanted, the caller must pick a prefix disjoint from every co-tenant
     /// so SQL's prefix-bounded scans can't observe another's keys.
-    pub const fn new(client: PrefixedStoreClient) -> Self {
+    pub const fn new(store: PrefixedStoreClient) -> Self {
         Self {
-            client,
+            store,
             tables: Vec::new(),
         }
     }
@@ -38,73 +38,65 @@ impl KvSchema {
         columns: Vec<TableColumnConfig>,
         primary_key_columns: Vec<String>,
         index_specs: Vec<IndexSpec>,
-    ) -> Result<Self, String> {
+    ) -> DataFusionResult<Self> {
         let name = name.into();
         if self.tables.iter().any(|(existing, _)| existing == &name) {
-            return Err(format!("duplicate table name '{name}'"));
+            return Err(DataFusionError::Plan(format!(
+                "duplicate table name '{name}'"
+            )));
         }
         if self.tables.len() >= MAX_TABLES {
-            return Err(format!("too many tables for key layout (max {MAX_TABLES})"));
+            return Err(DataFusionError::Plan(format!(
+                "too many tables for key layout (max {MAX_TABLES})"
+            )));
         }
         // Tables are only ever appended, so the next free prefix is the count.
         let prefix = self.tables.len() as u8;
-        let config = KvTableConfig::new(prefix, columns, primary_key_columns, index_specs)?;
-        let table = Arc::new(KvTable::new(self.client.clone(), config)?);
+        let config = KvTableConfig::new(prefix, columns, primary_key_columns, index_specs)
+            .map_err(DataFusionError::Plan)?;
+        let table =
+            Arc::new(KvTable::new(self.store.clone(), config).map_err(DataFusionError::Plan)?);
         self.tables.push((name, table));
         Ok(self)
     }
 
-    pub fn orders_table(
-        self,
-        table_name: impl Into<String>,
-        index_specs: Vec<IndexSpec>,
-    ) -> Result<Self, String> {
-        self.table(
-            table_name,
-            vec![
-                TableColumnConfig::new("region", DataType::Utf8, false),
-                TableColumnConfig::new("customer_id", DataType::Int64, false),
-                TableColumnConfig::new("order_id", DataType::Int64, false),
-                TableColumnConfig::new("amount_cents", DataType::Int64, false),
-                TableColumnConfig::new("status", DataType::Utf8, false),
-            ],
-            vec!["order_id".to_string()],
-            index_specs,
-        )
-    }
-
     /// Create a table with a versioned composite primary key.
     ///
-    /// The entity column and version column (UInt64) together form the
-    /// composite primary key. The entity can be any supported primary-key
-    /// type, including variable-length logical keys encoded through the
-    /// crate's ordered variable-length `Utf8` mapping.
+    /// The entity column and version column together form the composite
+    /// primary key. The version column must be `UInt64` and distinct from the
+    /// entity column. The entity can be any supported primary-key type,
+    /// including variable-length logical keys encoded through the crate's
+    /// ordered variable-length `Utf8` mapping.
     ///
-    /// Versions sort
-    /// numerically via big-endian encoding, so a reverse range scan
-    /// from `(entity, V)` downward with LIMIT 1 yields the latest
-    /// version <= V. See `examples/versioned_kv.rs` for the basic
-    /// query pattern plus an immutable-friendly companion watermark
-    /// table pattern for out-of-order batch uploads.
-    pub fn table_versioned(
+    /// Versions sort numerically via big-endian encoding, so a reverse range
+    /// scan from `(entity, V)` downward with LIMIT 1 yields the latest version
+    /// <= V. See `examples/versioned_kv.rs` for the query pattern.
+    pub fn versioned_table(
         self,
         name: impl Into<String>,
         columns: Vec<TableColumnConfig>,
         entity_column: impl Into<String>,
         version_column: impl Into<String>,
         index_specs: Vec<IndexSpec>,
-    ) -> Result<Self, String> {
-        let entity = entity_column.into();
-        let version = version_column.into();
-        self.table(name, columns, vec![entity, version], index_specs)
+    ) -> DataFusionResult<Self> {
+        let name = name.into();
+        let schema = self.table(
+            name.clone(),
+            columns,
+            vec![entity_column.into(), version_column.into()],
+            index_specs,
+        )?;
+        let (_, table) = schema.tables.last().expect("table was just added");
+        table.model.versioned_entity_kind(&name)?;
+        Ok(schema)
     }
 
     pub const fn table_count(&self) -> usize {
         self.tables.len()
     }
 
-    pub(crate) const fn client(&self) -> &PrefixedStoreClient {
-        &self.client
+    pub(crate) const fn store(&self) -> &PrefixedStoreClient {
+        &self.store
     }
 
     pub(crate) fn tables(&self) -> &[(String, Arc<KvTable>)] {
@@ -112,7 +104,7 @@ impl KvSchema {
     }
 
     /// Registers the tables in a SQL context.
-    pub fn register_all(self, ctx: &SqlContext) -> DataFusionResult<()> {
+    pub(crate) fn register_all(self, ctx: &SqlContext) -> DataFusionResult<()> {
         for (name, table) in self.tables {
             ctx.register_table(name, table)?;
         }
@@ -120,7 +112,7 @@ impl KvSchema {
     }
 
     pub fn batch_writer(&self) -> BatchWriter {
-        BatchWriter::new(self.client.clone(), &self.tables)
+        BatchWriter::new(self.store.clone(), &self.tables)
     }
 
     /// Backfill secondary index entries after adding new index specs.
@@ -130,12 +122,15 @@ impl KvSchema {
     /// extension of that list (same order/layout for existing indexes, with new
     /// indexes only added at the tail).
     ///
-    /// Disable primary-row retention policies before adding indexes. Store
+    /// Disable base-row retention policies before adding indexes. Store
     /// pruning does not remove the corresponding secondary index entries.
     ///
     /// Operational ordering requirement: start writing new rows with the new
     /// index specs before backfilling historical rows, or rows written during
     /// the backfill window may be missing from the new index.
+    ///
+    /// Invalid arguments fail with `DataFusionError::Plan`, and Store and scan
+    /// failures with `External` or `Execution`.
     pub async fn backfill_added_indexes(
         &self,
         table_name: &str,
@@ -157,18 +152,13 @@ impl KvSchema {
         previous_index_specs: &[IndexSpec],
         options: IndexBackfillOptions,
     ) -> DataFusionResult<IndexBackfillReport> {
-        self.backfill_added_indexes_with_options_and_progress(
-            table_name,
-            previous_index_specs,
-            options,
-            None,
-        )
-        .await
+        self.backfill_added_indexes_inner(table_name, previous_index_specs, options, None)
+            .await
     }
 
     /// Backfill secondary index entries after adding new index specs, with
-    /// configurable response batch size for the streaming scan and an optional
-    /// progress event channel.
+    /// configurable response batch size for the streaming scan, reporting
+    /// progress events on `progress_tx`.
     ///
     /// Progress events are emitted only after buffered ingest writes for the
     /// reported cursor are flushed, so `Progress.next_cursor` can be persisted
@@ -178,10 +168,26 @@ impl KvSchema {
         table_name: &str,
         previous_index_specs: &[IndexSpec],
         options: IndexBackfillOptions,
+        progress_tx: &tokio::sync::mpsc::UnboundedSender<IndexBackfillEvent>,
+    ) -> DataFusionResult<IndexBackfillReport> {
+        self.backfill_added_indexes_inner(
+            table_name,
+            previous_index_specs,
+            options,
+            Some(progress_tx),
+        )
+        .await
+    }
+
+    async fn backfill_added_indexes_inner(
+        &self,
+        table_name: &str,
+        previous_index_specs: &[IndexSpec],
+        options: IndexBackfillOptions,
         progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<IndexBackfillEvent>>,
     ) -> DataFusionResult<IndexBackfillReport> {
         if options.row_batch_size == 0 {
-            return Err(DataFusionError::Execution(
+            return Err(DataFusionError::Plan(
                 "index backfill row_batch_size must be > 0".to_string(),
             ));
         }
@@ -192,21 +198,17 @@ impl KvSchema {
             .find(|(name, _)| name == table_name)
             .map(|(_, table)| table)
             .ok_or_else(|| {
-                DataFusionError::Execution(format!(
-                    "unknown table '{table_name}' for index backfill"
-                ))
+                DataFusionError::Plan(format!("unknown table '{table_name}' for index backfill"))
             })?;
 
         let model = &table.model;
         let current_specs = &table.index_specs;
         let previous_specs = model
             .resolve_index_specs(previous_index_specs)
-            .map_err(|e| {
-                DataFusionError::Execution(format!("invalid previous index specs: {e}"))
-            })?;
+            .map_err(|e| DataFusionError::Plan(format!("invalid previous index specs: {e}")))?;
 
         if previous_specs.len() > current_specs.len() {
-            return Err(DataFusionError::Execution(format!(
+            return Err(DataFusionError::Plan(format!(
                 "table '{table_name}' previous index count ({}) exceeds current index count ({})",
                 previous_specs.len(),
                 current_specs.len()
@@ -215,7 +217,7 @@ impl KvSchema {
         for (idx, previous) in previous_specs.iter().enumerate() {
             let current = &current_specs[idx];
             if previous != current {
-                return Err(DataFusionError::Execution(format!(
+                return Err(DataFusionError::Plan(format!(
                     "table '{table_name}' index evolution must be append-only; index at position {} changed",
                     idx + 1
                 )));
@@ -224,17 +226,16 @@ impl KvSchema {
 
         let full_range = primary_key_prefix_range(model.table_prefix);
         let cursor = options
-            .start_from_primary_key
+            .start_cursor
             .unwrap_or_else(|| full_range.start.clone());
         if !model.primary_key_prefix.matches(&cursor) {
-            return Err(DataFusionError::Execution(
-                "index backfill start_from_primary_key must use this table's primary-key prefix"
-                    .to_string(),
+            return Err(DataFusionError::Plan(
+                "index backfill start_cursor must use this table's primary-key prefix".to_string(),
             ));
         }
         if cursor < full_range.start || cursor > full_range.end {
-            return Err(DataFusionError::Execution(
-                "index backfill start_from_primary_key is outside table key range".to_string(),
+            return Err(DataFusionError::Plan(
+                "index backfill start_cursor is outside table key range".to_string(),
             ));
         }
 
@@ -260,7 +261,7 @@ impl KvSchema {
             index_entries_written: 0,
         };
         let mut pending_entries = Vec::new();
-        let session = self.client.create_session();
+        let session = self.store.create_session();
         let decode_pk_mask = vec![true; model.primary_key_kinds.len()];
 
         let mut stream = session
@@ -316,16 +317,16 @@ impl KvSchema {
                 }
 
                 if pending_entries.len() >= INDEX_BACKFILL_FLUSH_ENTRIES {
-                    flush_ingest_batch(&self.client, &mut pending_entries).await?;
+                    flush_ingest_batch(&self.store, &mut pending_entries).await?;
                 }
             }
             let next_cursor = self
-                .client
+                .store
                 .key_prefix()
                 .next_key(last_key)
                 .map_err(|e| DataFusionError::External(Box::new(e)))?
                 .filter(|key| key <= &full_range.end);
-            flush_ingest_batch(&self.client, &mut pending_entries).await?;
+            flush_ingest_batch(&self.store, &mut pending_entries).await?;
             send_backfill_event(
                 progress_tx,
                 IndexBackfillEvent::Progress {

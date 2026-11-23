@@ -100,9 +100,8 @@ export type Column = Message<"sql.v1.Column"> & {
   name: string;
 
   /**
-   * Arrow DataType rendered as its stable debug string (e.g., `Int64`,
-   * `Utf8`, `Timestamp(Microsecond, None)`, `Decimal128(38, 10)`). Clients
-   * that need typed handling should match against these exact strings.
+   * Arrow DataType rendered by its `Display` implementation (e.g., `Int64`,
+   * `Utf8`, `Decimal128(38, 10)`, `List(Int64)`).
    *
    * @generated from field: string data_type = 2;
    */
