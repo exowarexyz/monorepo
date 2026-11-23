@@ -1,4 +1,6 @@
-use crate::{aggregate::AggregateAccessPath, codec::*, filter::*, predicate::*, types::*};
+use crate::{
+    aggregate::AggregateAccessPath, codec::*, filter::*, predicate::*, scan::ScanFilter, types::*,
+};
 use datafusion::common::Result as DataFusionResult;
 
 /// Explain output describing the ranges and predicate coverage of one access path.
@@ -9,8 +11,12 @@ pub(crate) struct AccessPathDiagnostics {
     pub(crate) mode: String,
     /// Human-readable description of the supported column constraints.
     pub(crate) predicate: String,
-    /// Whether the access path enforces every filter, so rows need no recheck.
+    /// Whether the keys the access path reads enforce every filter.
     pub(crate) exact: bool,
+    /// Whether rows read through the access path are checked against a filter. An index scan
+    /// that looks up base rows checks them even when `exact` holds. An access path with no
+    /// range or key reads no rows, so it checks none.
+    pub(crate) row_recheck: bool,
     /// Whether the ranges comprise a single scan of the entire primary-key family.
     pub(crate) full_scan_like: bool,
     /// Number of key ranges selected for this access path, or of keys for point reads.
@@ -76,7 +82,7 @@ pub(crate) fn access_path_fields(diag: &AccessPathDiagnostics) -> Vec<(&'static 
         ("mode", diag.mode.clone()),
         ("predicate", diag.predicate.clone()),
         ("exact", diag.exact.to_string()),
-        ("row_recheck", (!diag.exact).to_string()),
+        ("row_recheck", diag.row_recheck.to_string()),
         ("ranges", diag.range_count.to_string()),
         ("full_scan_like", diag.full_scan_like.to_string()),
     ];
@@ -94,6 +100,8 @@ pub(crate) fn format_access_path_diagnostics(diag: &AccessPathDiagnostics) -> St
         .join(", ")
 }
 
+/// Describes the access path of a row scan. `row_filter` is the filter the scan evaluates on the
+/// rows it reads, if it evaluates one.
 pub(crate) fn build_scan_access_path_diagnostics(
     model: &TableModel,
     max_logical_key_len: usize,
@@ -101,14 +109,18 @@ pub(crate) fn build_scan_access_path_diagnostics(
     predicate: &QueryPredicate,
     access_plan: &ScanAccessPlan,
     index_plan: Option<&IndexPlan>,
-    complete_ranges: bool,
+    row_filter: Option<&ScanFilter>,
 ) -> DataFusionResult<AccessPathDiagnostics> {
-    // A contradiction proves the result is empty, so no ranges or row checks are needed.
+    let complete_ranges = row_filter.is_none_or(|filter| filter.complete_ranges);
+    let row_recheck = row_filter.is_some();
+
+    // A contradiction proves the result is empty, so the scan reads no ranges and checks no rows.
     if predicate.contradiction {
         return Ok(AccessPathDiagnostics {
             mode: "empty".to_string(),
             predicate: "FALSE".to_string(),
             exact: true,
+            row_recheck: false,
             full_scan_like: false,
             range_count: 0,
             constrained_prefix_len: None,
@@ -124,6 +136,7 @@ pub(crate) fn build_scan_access_path_diagnostics(
             mode: "primary_key_points".to_string(),
             predicate: predicate.describe(model),
             exact,
+            row_recheck: row_recheck && !keys.is_empty(),
             full_scan_like: false,
             range_count: keys.len(),
             constrained_prefix_len: None,
@@ -141,6 +154,7 @@ pub(crate) fn build_scan_access_path_diagnostics(
             mode: secondary_index_mode(spec),
             predicate: predicate.describe(model),
             exact,
+            row_recheck: row_recheck && !index_plan.ranges.is_empty(),
             full_scan_like: false,
             range_count: index_plan.ranges.len(),
             constrained_prefix_len: Some(index_plan.constrained_prefix_len),
@@ -155,12 +169,15 @@ pub(crate) fn build_scan_access_path_diagnostics(
         mode: "primary_key".to_string(),
         predicate: predicate.describe(model),
         exact,
+        row_recheck: row_recheck && !ranges.is_empty(),
         full_scan_like: is_primary_key_full_scan_like(model, &ranges),
         range_count: ranges.len(),
         constrained_prefix_len: None,
     })
 }
 
+/// Describes the access path of a Reduce job. The job carries a worker filter exactly when
+/// `exact` is false, and the worker applies it to the rows of each range the job reads.
 pub(crate) fn build_aggregate_access_path_diagnostics(
     model: &TableModel,
     index_specs: &[ResolvedIndexSpec],
@@ -179,6 +196,7 @@ pub(crate) fn build_aggregate_access_path_diagnostics(
         },
         predicate: predicate.describe(model),
         exact,
+        row_recheck: !exact && !ranges.is_empty(),
         full_scan_like: matches!(access_path, AggregateAccessPath::PrimaryKey)
             && is_primary_key_full_scan_like(model, ranges),
         range_count: ranges.len(),

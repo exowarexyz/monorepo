@@ -57,7 +57,7 @@ pub(crate) struct ScanFilter {
     access: ScanAccessPlan,
     /// Whether constraint extraction supports every source filter. Raw scan limits
     /// also require the chosen key to enforce those constraints.
-    complete_ranges: bool,
+    pub(crate) complete_ranges: bool,
 }
 
 impl fmt::Debug for ScanFilter {
@@ -253,10 +253,20 @@ impl KvScanExec {
         let index_plan = self
             .predicate
             .choose_index_plan(&self.model, &self.index_specs, &access);
+        let complete_ranges = filters
+            .iter()
+            .all(|filter| QueryPredicate::supports_filter(filter, &self.model));
         let mut cover_filter = None;
+        let mut row_filter = true;
         if let Some(plan) = &index_plan {
             let spec = &self.index_specs[plan.spec_idx];
-            if !access.index_covers_required_non_pk(spec) {
+            if access.index_covers_required_non_pk(spec) {
+                // The entries of a covering index hold every value the scan needs. When its
+                // range bounds also enforce every filter, each entry they admit is a result
+                // row, so the scan needs no row filter.
+                row_filter = !(complete_ranges
+                    && access.predicate_fully_enforced_by_index_key(&self.model, spec));
+            } else {
                 // Evaluate available conjuncts before fetching missing base-table values.
                 let available = filters
                     .iter()
@@ -277,9 +287,7 @@ impl KvScanExec {
                     ScanFilter::access_plan(&self.model, &available),
                 )?;
             }
-        } else if filters
-            .iter()
-            .all(|filter| QueryPredicate::supports_filter(filter, &self.model))
+        } else if complete_ranges
             && (access.predicate_fully_enforced_by_primary_key(&self.model)
                 || (access.predicate_fully_enforced_by_primary_key_points()
                     && self.predicate.primary_key_points(&self.model)?.is_some()))
@@ -291,9 +299,11 @@ impl KvScanExec {
             return Ok(());
         }
 
-        // Keep the complete row filter even when some conjuncts can run on the index.
-        // Cache the plan with all columns that filter requires.
-        self.filter = ScanFilter::compile(state, &self.model, filters, filter_access)?;
+        // A scan that checks rows keeps the complete row filter even when some conjuncts can
+        // run on the index. Cache the plan with all columns that filter requires.
+        if row_filter {
+            self.filter = ScanFilter::compile(state, &self.model, filters, filter_access)?;
+        }
         self.cover_filter = cover_filter;
         self.plan = Arc::new(ScanPlan {
             access,
@@ -497,9 +507,7 @@ impl KvScanExec {
             &self.predicate,
             &self.plan.access,
             self.plan.index.as_ref(),
-            self.filter
-                .as_ref()
-                .is_none_or(|filter| filter.complete_ranges),
+            self.filter.as_ref(),
         )
     }
 }
@@ -2942,6 +2950,26 @@ mod tests {
             ))
             .await;
         }
+
+        // A scan with no key range or point to read checks no rows, even though it holds a
+        // filter the keys cannot enforce.
+        for (keys, mode) in [
+            (format!("tenant = '{too_long}'"), "primary_key"),
+            (
+                format!("tenant = '{too_long}' AND version = 1"),
+                "primary_key_points",
+            ),
+        ] {
+            let sql = format!("SELECT tenant FROM orders WHERE {keys} AND version % 2 = 1");
+            fixture.check(&sql).await;
+            let (scan, rendered) = fixture.scan(&sql).await;
+            assert!(
+                scan.filter.is_some()
+                    && rendered.contains(&format!("mode={mode}, "))
+                    && rendered.contains("exact=false, row_recheck=false, ranges=0, "),
+                "a scan that reads nothing must report no row check\n{rendered}"
+            );
+        }
     }
 
     /// Cached column requirements and index ranges agree with the optimized scan inputs.
@@ -2973,13 +3001,14 @@ mod tests {
         )
         .await;
 
-        // Exercise both key paths with residual filters, ordering, and limits.
+        // Exercise both key paths with residual filters, ordering, and limits. A covering index
+        // whose range bounds enforce the predicate needs no row filter.
         for (sql, uses_index, filtered) in [
             ("SELECT * FROM orders", false, false),
             (
                 "SELECT id, amount FROM orders WHERE status IN ('a', 'b') AND amount > 2 ORDER BY id",
                 true,
-                true,
+                false,
             ),
             (
                 "SELECT payload FROM orders WHERE status IN ('a', 'c') AND amount % 2 = 1 ORDER BY id",
@@ -2994,7 +3023,7 @@ mod tests {
             (
                 "SELECT id, amount FROM orders WHERE status = 'a' ORDER BY amount DESC LIMIT 2",
                 true,
-                true,
+                false,
             ),
             ("SELECT payload FROM orders WHERE id >= 2 AND id < 6", false, false),
             (
@@ -3351,10 +3380,14 @@ mod tests {
                     "{sql} must look up the rows of one range request, got {requests:?}"
                 );
                 let (scan, rendered) = fixture.scan(&sql).await;
+                let row_recheck = !exact || lookup;
                 assert!(
                     scan.plan.index.is_some()
-                        && rendered.contains(&format!("exact={exact}, row_recheck={}, ", !exact)),
-                    "{sql} must plan an index scan with exact={exact}\n{rendered}"
+                        && scan.filter.is_some() == row_recheck
+                        && rendered
+                            .contains(&format!("exact={exact}, row_recheck={row_recheck}, ")),
+                    "{sql} must plan an index scan with exact={exact} that checks rows unless \
+                     it is exact and covering\n{rendered}"
                 );
             }
         }
@@ -3563,6 +3596,259 @@ mod tests {
             assert!(
                 batches.iter().all(|batch| batch.num_rows() == 0),
                 "{filter} must read no rows"
+            );
+        }
+    }
+
+    /// `row_recheck` reports whether the scan checks the rows it reads against a filter. A scan
+    /// whose keys enforce the whole predicate checks no rows, except that an index scan still
+    /// checks the base rows it looks up.
+    #[tokio::test]
+    async fn explain_reports_whether_the_scan_checks_its_rows() {
+        let rows = 20;
+        let fixture = Fixture::new(
+            vec![
+                column("a", DataType::Int64, false),
+                column("b", DataType::Int64, false),
+                column("tag", DataType::Int64, false),
+                column("payload", DataType::Int64, false),
+            ],
+            &["a", "b"],
+            vec![index("tag", &["tag"], &[])],
+            vec![
+                Arc::new(Int64Array::from_iter_values((0..rows).map(|row| row / 2))),
+                Arc::new(Int64Array::from_iter_values(0..rows)),
+                Arc::new(Int64Array::from_iter_values((0..rows).map(|row| row % 3))),
+                Arc::new(Int64Array::from_iter_values(0..rows)),
+            ],
+        )
+        .await;
+        let by_tag = "secondary_index(tag, lexicographic)";
+        for (sql, mode, exact, row_recheck) in [
+            ("SELECT a, b FROM orders", "primary_key", true, false),
+            (
+                "SELECT a, b FROM orders WHERE a = 3",
+                "primary_key",
+                true,
+                false,
+            ),
+            (
+                "SELECT a, b FROM orders WHERE a = 3 AND payload >= 7",
+                "primary_key",
+                false,
+                true,
+            ),
+            (
+                "SELECT a, b FROM orders WHERE a = 3 AND b = 7",
+                "primary_key_points",
+                true,
+                false,
+            ),
+            (
+                "SELECT a, b FROM orders WHERE a = 3 AND b = 7 AND payload >= 7",
+                "primary_key_points",
+                false,
+                true,
+            ),
+            // The index covers the first projection and needs base rows for the second.
+            (
+                "SELECT a, b, tag FROM orders WHERE tag = 2",
+                by_tag,
+                true,
+                false,
+            ),
+            ("SELECT * FROM orders WHERE tag = 2", by_tag, true, true),
+            (
+                "SELECT a, b, tag FROM orders WHERE tag = 2 AND b >= 15",
+                by_tag,
+                false,
+                true,
+            ),
+        ] {
+            fixture.check(sql).await;
+            let (scan, rendered) = fixture.scan(sql).await;
+            assert!(
+                rendered.contains(&format!("mode={mode}, "))
+                    && rendered.contains(&format!("exact={exact}, row_recheck={row_recheck}, ")),
+                "{sql} must report mode={mode}, exact={exact}, row_recheck={row_recheck}\n{rendered}"
+            );
+            assert_eq!(
+                scan.filter.is_some(),
+                row_recheck,
+                "{sql} must report the row filter it runs"
+            );
+        }
+    }
+
+    /// A covering index scan whose range bounds enforce the predicate returns the entries it
+    /// reads without a row filter, for every kind of index key column. A bound the ranges
+    /// cannot enforce keeps the filter.
+    #[tokio::test]
+    async fn exact_covering_index_scans_match_datafusion_without_a_row_filter() {
+        use datafusion::arrow::{
+            array::{
+                BooleanArray, Date32Array, Decimal128Array, FixedSizeBinaryArray, Float64Array,
+                TimestampMicrosecondArray, UInt64Array,
+            },
+            datatypes::TimeUnit,
+        };
+
+        // Every column but id leads one index, and each index covers its column and the key.
+        let keys = [
+            "tag", "name", "score", "flag", "day", "at", "price", "code", "n",
+        ];
+        let rows = 12;
+        let scores = [
+            f64::NAN,
+            -0.0,
+            0.0,
+            1.5,
+            -1.5,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            2.5,
+            0.0,
+            1.5,
+            -0.0,
+            f64::NAN,
+        ];
+        let fixture = Fixture::new(
+            vec![
+                column("id", DataType::Int64, false),
+                column("tag", DataType::Int64, false),
+                column("name", DataType::Utf8, false),
+                column("score", DataType::Float64, false),
+                column("flag", DataType::Boolean, false),
+                column("day", DataType::Date32, false),
+                column(
+                    "at",
+                    DataType::Timestamp(TimeUnit::Microsecond, None),
+                    false,
+                ),
+                column("price", DataType::Decimal128(10, 2), false),
+                column("code", DataType::FixedSizeBinary(2), false),
+                column("n", DataType::UInt64, false),
+            ],
+            &["id"],
+            keys.iter().map(|key| index(key, &[key], &[])).collect(),
+            vec![
+                Arc::new(Int64Array::from_iter_values(0..rows)),
+                Arc::new(Int64Array::from_iter_values((0..rows).map(|row| row % 4))),
+                Arc::new(StringArray::from_iter_values(
+                    (0..rows).map(|row| ["", "a", "b", "b\0", "c"][row as usize % 5]),
+                )),
+                Arc::new(Float64Array::from(scores.to_vec())),
+                Arc::new(BooleanArray::from_iter(
+                    (0..rows).map(|row| Some(row % 3 == 0)),
+                )),
+                Arc::new(Date32Array::from_iter_values(
+                    (0..rows).map(|row| 19_723 + (row as i32 % 4)),
+                )),
+                Arc::new(TimestampMicrosecondArray::from_iter_values(
+                    (0..rows).map(|row| 1_704_067_200_000_000 + (row % 4) * 1_000_000),
+                )),
+                Arc::new(
+                    Decimal128Array::from_iter_values(
+                        (0..rows).map(|row| 1_000 + i128::from(row % 4) * 125),
+                    )
+                    .with_precision_and_scale(10, 2)
+                    .unwrap(),
+                ),
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter((0..rows).map(|row| [1, row as u8 % 3]))
+                        .unwrap(),
+                ),
+                Arc::new(UInt64Array::from_iter_values(
+                    (0..rows).map(|row| [0, 5, u64::MAX][row as usize % 3]),
+                )),
+            ],
+        )
+        .await;
+
+        // An index with a text key column checks no key bytes while it reads, so its range
+        // bounds alone select the rows of the name cases.
+        for (key, predicate, exact) in [
+            ("tag", "tag = 3", true),
+            ("tag", "tag >= 2", true),
+            ("tag", "tag > 0 AND tag < 3", true),
+            ("tag", "tag IN (1, 3)", true),
+            ("tag", "tag = 3 AND id >= 5", true),
+            ("tag", "tag >= 2 AND id >= 5", false),
+            ("name", "name = 'b'", true),
+            ("name", "name = ''", true),
+            ("name", "name IN ('a', 'c')", true),
+            ("name", "name = 'b' AND id >= 5", true),
+            ("name", "name = 'b' AND id > 2 AND id < 9", true),
+            ("name", "name IN ('a', 'c') AND id >= 5", true),
+            ("name", "name = 'b' AND id % 2 = 1", false),
+            ("score", "score = 1.5", true),
+            ("score", "score = 0.0", true),
+            ("score", "score >= 0.0", true),
+            ("score", "score <= 1.5", true),
+            ("score", "score >= 1.5 AND score <= 2.5", true),
+            ("score", "score > 0.0", false),
+            ("score", "score < 1.5", false),
+            ("flag", "flag", true),
+            ("flag", "NOT flag", true),
+            ("flag", "flag = false", true),
+            ("day", "day = DATE '2024-01-02'", true),
+            ("day", "day >= DATE '2024-01-02'", true),
+            ("day", "day < DATE '2024-01-03'", true),
+            ("at", "at = TIMESTAMP '2024-01-01T00:00:01'", true),
+            ("at", "at > TIMESTAMP '2024-01-01T00:00:01'", true),
+            ("price", "price = 11.25", true),
+            ("price", "price >= 11.25", true),
+            ("price", "price < 12.5", true),
+            ("code", "code = X'0101'", true),
+            ("n", "n = 5", true),
+            ("n", "n >= 5", true),
+            ("n", "n IN (0, 18446744073709551615)", true),
+        ] {
+            let sql = format!("SELECT id, {key} FROM orders WHERE {predicate} ORDER BY id");
+            fixture.check(&sql).await;
+            let (scan, rendered) = fixture.scan(&sql).await;
+            assert!(
+                scan.plan.index.is_some()
+                    && scan.filter.is_none() == exact
+                    && rendered.contains(&format!("exact={exact}, row_recheck={}, ", !exact)),
+                "{sql} must scan a covering index and check rows only when exact={exact} is \
+                 false\n{rendered}"
+            );
+        }
+
+        // With a two-column primary key, the bounds of a name range reach b only once a is
+        // fixed. No key bytes are checked, so the row filter alone enforces b otherwise.
+        let pairs = 12;
+        let fixture = Fixture::new(
+            vec![
+                column("a", DataType::Int64, false),
+                column("b", DataType::Int64, false),
+                column("name", DataType::Utf8, false),
+            ],
+            &["a", "b"],
+            vec![index("name", &["name"], &[])],
+            vec![
+                Arc::new(Int64Array::from_iter_values((0..pairs).map(|row| row / 4))),
+                Arc::new(Int64Array::from_iter_values((0..pairs).map(|row| row % 4))),
+                Arc::new(StringArray::from_iter_values(
+                    (0..pairs).map(|row| ["x", "y"][row as usize % 2]),
+                )),
+            ],
+        )
+        .await;
+        for (predicate, exact) in [
+            ("name = 'x' AND a >= 1", true),
+            ("name = 'x' AND a = 1 AND b >= 2", true),
+            ("name = 'x' AND b >= 2", false),
+            ("name = 'x' AND a >= 1 AND b >= 2", false),
+        ] {
+            let sql = format!("SELECT a, b, name FROM orders WHERE {predicate} ORDER BY a, b");
+            fixture.check(&sql).await;
+            let (scan, rendered) = fixture.scan(&sql).await;
+            assert!(
+                scan.plan.index.is_some() && scan.filter.is_none() == exact,
+                "{sql} must scan the name index and check rows only when exact={exact} is \
+                 false\n{rendered}"
             );
         }
     }

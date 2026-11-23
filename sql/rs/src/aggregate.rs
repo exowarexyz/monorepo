@@ -6164,6 +6164,23 @@ mod tests {
             )
             .await;
 
+        // No key holds the unstorable region, so its job has no range to read. It keeps the
+        // check on v and sends it nowhere, so no row is checked.
+        let explain = values(
+            fixture.context.datafusion(),
+            &format!("EXPLAIN SELECT COUNT(*), SUM(v) FROM c WHERE {unstorable}"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            explain.iter().any(|row| {
+                let plan = row[1].to_string();
+                plan.contains("KvAggregateExec")
+                    && plan.contains("exact=false, row_recheck=false, ranges=0, ")
+            }),
+            "a job that reads nothing must report no row check: {explain:?}"
+        );
+
         // CASE arms that divide by the same zero share one argument, so the aggregate is
         // reduced with a check on v alone.
         fixture

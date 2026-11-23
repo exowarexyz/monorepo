@@ -899,6 +899,8 @@ mod tests {
                 float(Some((1.0, true)), Some((1.0, true))),
                 float(Some((1.0, true)), None),
                 float(Some((1.0, false)), None),
+                float(Some((-0.0, true)), Some((0.0, true))),
+                float(None, Some((0.0, true))),
             ],
             ColumnKind::Date32 => vec![
                 int_range(Some(5), Some(5)),
@@ -910,6 +912,35 @@ mod tests {
                 FixedSizeBinaryIn(vec![vec![0, 0], vec![1, 3]]),
                 FixedSizeBinaryIn(vec![vec![1], vec![1, 3]]),
             ],
+            ColumnKind::Boolean => vec![
+                PredicateConstraint::BoolEq(true),
+                PredicateConstraint::BoolEq(false),
+            ],
+            ColumnKind::Date64 | ColumnKind::Timestamp => vec![
+                int_range(Some(5), Some(5)),
+                int_range(None, Some(5)),
+                int_range(Some(5), None),
+            ],
+            ColumnKind::Decimal128 => vec![
+                PredicateConstraint::Decimal128Range {
+                    min: Some(5),
+                    max: Some(5),
+                },
+                PredicateConstraint::Decimal128Range {
+                    min: Some(5),
+                    max: None,
+                },
+            ],
+            ColumnKind::Decimal256 => vec![
+                PredicateConstraint::Decimal256Range {
+                    min: Some(datafusion::arrow::datatypes::i256::from_i128(5)),
+                    max: Some(datafusion::arrow::datatypes::i256::from_i128(5)),
+                },
+                PredicateConstraint::Decimal256Range {
+                    min: None,
+                    max: Some(datafusion::arrow::datatypes::i256::from_i128(5)),
+                },
+            ],
             _ => unreachable!("the tables must use only these column kinds"),
         }
     }
@@ -920,10 +951,19 @@ mod tests {
             ColumnKind::Int64 => [4, 5, 6].map(CellValue::Int64).to_vec(),
             ColumnKind::UInt64 => [1, 2, 3].map(CellValue::UInt64).to_vec(),
             ColumnKind::Utf8 => ["", "n", "o"].map(|v| CellValue::Utf8(v.into())).to_vec(),
-            ColumnKind::Float64 => [0.5, 1.0, 2.0].map(CellValue::Float64).to_vec(),
+            ColumnKind::Float64 => [-0.0, 0.0, 0.5, 1.0, 2.0, f64::NAN]
+                .map(CellValue::Float64)
+                .to_vec(),
             ColumnKind::Date32 => [0, 5, i32::MAX].map(CellValue::Date32).to_vec(),
             ColumnKind::FixedSizeBinary(2) => [[0, 0], [1, 0], [1, 2], [1, 3]]
                 .map(|v| CellValue::FixedSizeBinary(v.to_vec()))
+                .to_vec(),
+            ColumnKind::Boolean => [false, true].map(CellValue::Boolean).to_vec(),
+            ColumnKind::Date64 => [0, 5, i64::MAX].map(CellValue::Date64).to_vec(),
+            ColumnKind::Timestamp => [i64::MIN, 5, 6].map(CellValue::Timestamp).to_vec(),
+            ColumnKind::Decimal128 => [4, 5, 6].map(CellValue::Decimal128).to_vec(),
+            ColumnKind::Decimal256 => [4, 5, 6]
+                .map(|v| CellValue::Decimal256(datafusion::arrow::datatypes::i256::from_i128(v)))
                 .to_vec(),
             _ => unreachable!("the tables must use only these column kinds"),
         }
@@ -1087,6 +1127,47 @@ mod tests {
                 ],
                 &["name", "id"],
                 &[&["score"], &["day"], &["day", "score"], &["score", "name"]],
+            ),
+            indexed_table(
+                &[
+                    ("id", DataType::Int64),
+                    ("flag", DataType::Boolean),
+                    ("at", DataType::Date64),
+                    ("price", DataType::Decimal128(10, 2)),
+                ],
+                &["id"],
+                &[
+                    &["flag"],
+                    &["flag", "at"],
+                    &["at"],
+                    &["price"],
+                    &["price", "flag"],
+                    &["at", "price"],
+                    &["flag", "id"],
+                ],
+            ),
+            indexed_table(
+                &[
+                    ("id", DataType::Int64),
+                    (
+                        "ts",
+                        DataType::Timestamp(
+                            datafusion::arrow::datatypes::TimeUnit::Microsecond,
+                            None,
+                        ),
+                    ),
+                    ("big", DataType::Decimal256(40, 0)),
+                    ("code", DataType::FixedSizeBinary(2)),
+                ],
+                &["id"],
+                &[
+                    &["ts"],
+                    &["big"],
+                    &["code"],
+                    &["code", "ts"],
+                    &["big", "code"],
+                    &["ts", "id"],
+                ],
             ),
             indexed_table(
                 &[

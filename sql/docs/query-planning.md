@@ -21,7 +21,8 @@ estimate to DataFusion. When the estimate is below DataFusion's row threshold fo
 collected build side (`hash_join_single_partition_threshold_rows`), a hash join can
 collect that scan and skip hash repartitioning of its inputs.
 
-A covering index returns rows without touching base rows. A non-covering index first
+A covering index returns rows without touching base rows, and without filtering the
+decoded rows when its key ranges enforce the whole predicate. A non-covering index first
 applies the predicates it can check from the index entry, then fetches the surviving
 base rows in bounded batches and checks the complete predicate against each one. When
 the index key ranges enforce the whole predicate, a `LIMIT` sizes each request for index
@@ -70,8 +71,11 @@ A secondary index key continues with the primary-key columns, so the same rule r
 through both. In that suffix only an `Int64` or `UInt64` range narrows the key range.
 `EXPLAIN` reports `exact=true` for an index scan only when the planner can show that
 the range bounds enforce the whole predicate. It does not attempt this for a z-order
-index. With `exact=false` the scan checks each entry itself and applies a `LIMIT` after
-those checks, without passing it to the Store.
+index. An exact scan passes a `LIMIT` to the Store. Over a covering index it skips the
+filter on decoded rows. Over a non-covering index it keeps both of its checks, on index
+entries before the lookup and on base rows after it. With `exact=false` the scan checks
+each entry itself and applies a `LIMIT` after those checks, without passing it to the
+Store.
 
 ## Aggregate pushdown
 
@@ -193,7 +197,7 @@ inside one read is not counted.
 | `mode=secondary_index(<name>, <layout>)` | Scans the named index with a `lexicographic` or `z_order` layout. |
 | `predicate=...` | The predicate pushed to the scan, or `<none>`. |
 | `exact=true` | The key ranges or points enforce the whole pushed predicate. |
-| `row_recheck=true` | Candidate rows are decoded and checked against the residual predicate. |
+| `row_recheck=true` | The rows the scan reads pass through a row filter. A scan filters decoded rows with the pushed predicate, and a Reduce job filters with the part its key ranges do not enforce. The field describes the plan, so it holds even when execution ends before reading a row, as under `LIMIT 0`. With `exact=true` this is the lookup scan of a non-covering index, which checks index entries before the lookup and base rows after it. With `ranges=0` it is `false` because nothing is read. |
 | `ranges=<N>` | The number of key ranges read, or of keys looked up. |
 | `full_scan_like=true` | The primary-key ranges are broad enough to resemble a full table scan. |
 | `constrained_prefix=<N>` | The number of leading key columns the predicate constrains. |
