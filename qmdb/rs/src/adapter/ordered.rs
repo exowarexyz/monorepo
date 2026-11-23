@@ -22,7 +22,7 @@ use crate::{
 use commonware_codec::{Codec, Copying, Decode, Encode};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
-    merkle::{Graftable, Location},
+    merkle::{Family, Graftable, Location},
     qmdb::{
         any::ordered,
         current::ordered::proof::constant::ExclusionProof,
@@ -52,10 +52,10 @@ const UPDATE_WALK_MAX_PAGE_ROWS: usize = 4096;
 /// index navigates keys by their bytes, and this reader scans its key-ordered
 /// update index the same way.
 pub struct Ordered<
-    F: Graftable,
+    F: Family,
     H: Hasher,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V,
     const N: usize,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > where
@@ -69,14 +69,8 @@ pub struct Ordered<
     _marker: PhantomData<(F, H, K, E)>,
 }
 
-impl<
-        F: Graftable,
-        H: Hasher,
-        K: QmdbKey + Codec,
-        V: Codec + Clone + Send + Sync,
-        const N: usize,
-        E: ValueEncoding<Value = V>,
-    > Clone for Ordered<F, H, K, V, N, E>
+impl<F: Family, H: Hasher, K: QmdbKey, V, const N: usize, E: ValueEncoding<Value = V>> Clone
+    for Ordered<F, H, K, V, N, E>
 where
     ordered::Operation<F, K, E>: commonware_codec::Read,
 {
@@ -92,14 +86,8 @@ where
     }
 }
 
-impl<
-        F: Graftable,
-        H: Hasher,
-        K: QmdbKey + Codec,
-        V: Codec + Clone + Send + Sync,
-        const N: usize,
-        E: ValueEncoding<Value = V>,
-    > std::fmt::Debug for Ordered<F, H, K, V, N, E>
+impl<F: Family, H: Hasher, K: QmdbKey, V, const N: usize, E: ValueEncoding<Value = V>>
+    std::fmt::Debug for Ordered<F, H, K, V, N, E>
 where
     ordered::Operation<F, K, E>: commonware_codec::Read,
 {
@@ -113,7 +101,7 @@ impl<F, H, K, V, const N: usize, E> crate::adapter::core::LatestValueResolver<F,
 where
     F: Graftable,
     H: Hasher,
-    K: QmdbKey + Codec,
+    K: QmdbKey,
     V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
     ordered::Operation<F, K, E>: Encode + Decode,
@@ -150,8 +138,7 @@ impl<F, H, K, V, const N: usize, E> Ordered<F, H, K, V, N, E>
 where
     F: Graftable,
     H: Hasher,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
+    K: QmdbKey,
     E: ValueEncoding<Value = V>,
     ordered::Operation<F, K, E>: commonware_codec::Read,
 {
@@ -176,7 +163,7 @@ impl<F, H, K, V, const N: usize, E> Ordered<F, H, K, V, N, E>
 where
     F: Graftable,
     H: Hasher,
-    K: QmdbKey + Codec,
+    K: QmdbKey,
     V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
     ordered::Operation<F, K, E>: Encode + Decode,
@@ -1119,14 +1106,14 @@ where
 }
 
 /// The operation an ordered exclusion proof proves.
-enum ExclusionTarget<F: Graftable> {
+enum ExclusionTarget<F: Family> {
     /// The active key whose span covers the excluded key.
     Covering { key: Vec<u8>, location: Location<F> },
     /// The tip's commit, when no key is active.
     Commit(Location<F>),
 }
 
-impl<F: Graftable> ExclusionTarget<F> {
+impl<F: Family> ExclusionTarget<F> {
     const fn location(&self) -> Location<F> {
         match self {
             Self::Covering { location, .. } => *location,

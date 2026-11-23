@@ -10,7 +10,6 @@ use crate::{
     },
     QmdbError,
 };
-use bytes::Bytes;
 use commonware_codec::{Copying, Decode, DecodeExt, Encode, Read};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
@@ -24,19 +23,31 @@ use std::{fmt::Display, marker::PhantomData, sync::Arc};
 
 /// Client for `qmdb.v1.CurrentOperationService`, parameterized on the Merkle
 /// family and current-state operation type.
-#[derive(Clone)]
-pub struct CurrentOperationClient<T, F: Graftable, H: Hasher, Op: Encode + Read, const N: usize> {
+pub struct CurrentOperationClient<T, F, H, Op: Read, const N: usize> {
     rpc: CurrentOperationServiceClient<T>,
     op_cfg: Arc<Op::Cfg>,
     _marker: PhantomData<(F, H, Op)>,
+}
+
+impl<T, F, H, Op, const N: usize> Clone for CurrentOperationClient<T, F, H, Op, N>
+where
+    Op: Read,
+    CurrentOperationServiceClient<T>: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            rpc: self.rpc.clone(),
+            op_cfg: Arc::clone(&self.op_cfg),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<F, H, Op, const N: usize> CurrentOperationClient<PreferZstdHttpClient, F, H, Op, N>
 where
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
-    Op: Decode + Encode + Read,
+    Op: Encode + Read,
 {
     pub fn plaintext(base: &str, op_cfg: Op::Cfg) -> Self {
         Self::new(
@@ -50,12 +61,10 @@ where
 impl<T, F, H, Op, const N: usize> CurrentOperationClient<T, F, H, Op, N>
 where
     T: ClientTransport,
-    T::ResponseBody: Body<Data = Bytes> + Unpin,
     <T::ResponseBody as Body>::Error: Display,
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
-    Op: Decode + Encode + Read,
+    Op: Encode + Read,
 {
     pub fn new(transport: T, config: ClientConfig, op_cfg: Op::Cfg) -> Self {
         Self::from_service_client(
@@ -117,8 +126,7 @@ fn verify_current_operation_range_from_proto<F, H, Op, const N: usize>(
 where
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
-    Op: Decode + Encode + Read,
+    Op: Encode + Read,
 {
     if proto.encoded_operations.is_empty() {
         return Err(QmdbError::CorruptData(

@@ -71,7 +71,7 @@ use std::{borrow::Borrow, collections::BTreeSet, ops::Range, sync::Arc};
 /// An operation range and prefix frontier for authentication against a trusted root.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[must_use]
-pub struct AuthenticatedOperationRange<'a, D: Digest, F: Family> {
+pub struct AuthenticatedOperationRange<'a, D, F: Family> {
     /// Inclusive operation location where the range starts.
     pub start_location: Location<F>,
     /// Exclusive operation location committed by the expected root.
@@ -130,14 +130,14 @@ where
 /// [`prepare_publication`].
 #[derive(Debug, PartialEq)]
 #[must_use]
-pub struct PreparedAuthenticatedRange<D: Digest, F: Family> {
+pub struct PreparedAuthenticatedRange<D, F: Family> {
     rows: Vec<(Key, Vec<u8>)>,
     pinned_nodes: Vec<(Position<F>, D)>,
     start_location: Location<F>,
     latest_location: Location<F>,
 }
 
-impl<D: Digest, F: Family> PreparedAuthenticatedRange<D, F> {
+impl<D, F: Family> PreparedAuthenticatedRange<D, F> {
     /// Exclude supplied pins at these positions from staging, without omitting reconstructed nodes.
     /// Omitted pins must be durable before the watermark covers them and retained for proofs, as
     /// described under [pin omission].

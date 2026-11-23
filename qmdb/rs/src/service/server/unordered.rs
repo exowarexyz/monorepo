@@ -27,13 +27,13 @@ use connectrpc::{Chain, ConnectRpcService};
 use exoware_sdk::PrefixedStoreClient;
 use std::{future::Future, sync::Arc};
 
-impl<F, H, K, V, const N: usize, E> OperationLogReader for Unordered<F, H, K, V, N, E>
+impl<F, H, K, const N: usize, E> OperationLogReader for Unordered<F, H, K, E::Value, N, E>
 where
     F: Graftable,
-    H: Hasher + Send + Sync + 'static,
-    K: QmdbKey + commonware_codec::Codec + Send + Sync + 'static,
-    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    E: ValueEncoding<Value = V> + Send + Sync + 'static,
+    H: Hasher,
+    K: QmdbKey,
+    E: ValueEncoding,
+    E::Value: AsRef<[u8]>,
     unordered::Operation<F, K, E>: Encode + Decode,
 {
     type Family = F;
@@ -79,13 +79,12 @@ where
     }
 }
 
-impl<F, H, K, V, const N: usize, E> CurrentOperationReader<N> for Unordered<F, H, K, V, N, E>
+impl<F, H, K, const N: usize, E> CurrentOperationReader<N> for Unordered<F, H, K, E::Value, N, E>
 where
     F: Graftable,
-    H: Hasher + Send + Sync + 'static,
-    K: QmdbKey + commonware_codec::Codec + Send + Sync + 'static,
-    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    E: ValueEncoding<Value = V> + Send + Sync + 'static,
+    H: Hasher,
+    K: QmdbKey,
+    E: ValueEncoding,
     unordered::Operation<F, K, E>: Encode + Decode,
 {
     type Family = F;
@@ -114,13 +113,12 @@ where
     }
 }
 
-impl<F, H, K, V, const N: usize, E> KeyLookupReader<N> for Unordered<F, H, K, V, N, E>
+impl<F, H, K, const N: usize, E> KeyLookupReader<N> for Unordered<F, H, K, E::Value, N, E>
 where
     F: Graftable,
-    H: Hasher + Send + Sync + 'static,
-    K: QmdbKey + commonware_codec::Codec + Send + Sync + 'static,
-    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    E: ValueEncoding<Value = V> + Send + Sync + 'static,
+    H: Hasher,
+    K: QmdbKey,
+    E: ValueEncoding,
     unordered::Operation<F, K, E>: Encode + Decode,
 {
     type Family = F;
@@ -153,11 +151,11 @@ where
 /// only), current operation ranges, and the operation log.
 pub fn unordered_stack<
     F: Graftable,
-    H: Hasher + Send + Sync + 'static,
-    K: QmdbKey + commonware_codec::Codec + Send + Sync + 'static,
-    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
+    H: Hasher,
+    K: QmdbKey,
+    V: AsRef<[u8]> + 'static,
     const N: usize,
-    E: ValueEncoding<Value = V> + Send + Sync + 'static,
+    E: ValueEncoding<Value = V>,
 >(
     raw_store: PrefixedStoreClient,
     op_cfg: <unordered::Operation<F, K, E> as Read>::Cfg,
@@ -182,11 +180,11 @@ where
 /// Mount only the unordered-QMDB operation log.
 pub fn unordered_operation_log_stack<
     F: Graftable,
-    H: Hasher + Send + Sync + 'static,
-    K: QmdbKey + commonware_codec::Codec + Send + Sync + 'static,
-    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
+    H: Hasher,
+    K: QmdbKey,
+    V: AsRef<[u8]> + 'static,
     const N: usize,
-    E: ValueEncoding<Value = V> + Send + Sync + 'static,
+    E: ValueEncoding<Value = V>,
 >(
     raw_store: PrefixedStoreClient,
     op_cfg: <unordered::Operation<F, K, E> as Read>::Cfg,
