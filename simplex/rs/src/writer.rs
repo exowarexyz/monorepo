@@ -30,7 +30,7 @@ impl PreparedUpload {
         Self::default()
     }
 
-    pub const fn len(&self) -> usize {
+    pub const fn entry_count(&self) -> usize {
         self.entries.len()
     }
 
@@ -51,7 +51,7 @@ impl PreparedUpload {
         self.summary.blocks += other.summary.blocks;
         self.summary.notarizations += other.summary.notarizations;
         self.summary.finalizations += other.summary.finalizations;
-        self.summary.finalized_height_indexes += other.summary.finalized_height_indexes;
+        self.summary.finalization_height_indexes += other.summary.finalization_height_indexes;
         self.entries.extend(other.entries);
     }
 
@@ -66,17 +66,17 @@ impl PreparedUpload {
 /// and finalizations by round, and it also stores finalizations by block height.
 #[derive(Clone, Debug)]
 pub struct SimplexWriter {
-    client: PrefixedStoreClient,
+    store: PrefixedStoreClient,
 }
 
 impl SimplexWriter {
-    /// Build a writer over `client`'s namespace prefix.
-    pub const fn new(client: PrefixedStoreClient) -> Self {
-        Self { client }
+    /// Build a writer over `store`'s namespace prefix.
+    pub const fn new(store: PrefixedStoreClient) -> Self {
+        Self { store }
     }
 
-    pub fn into_store_client(self) -> PrefixedStoreClient {
-        self.client
+    pub fn into_store(self) -> PrefixedStoreClient {
+        self.store
     }
 
     pub fn prepare_header<B>(&self, header: &B) -> PreparedUpload
@@ -119,15 +119,15 @@ impl SimplexWriter {
         S: certificate::Scheme,
         D: Digest,
     {
-        if notarized.proof.proposal.payload != notarized.header.digest() {
-            return Err(SimplexError::ProofBlockMismatch);
+        if notarized.notarization.proposal.payload != notarized.header.digest() {
+            return Err(SimplexError::CertificateHeaderMismatch);
         }
 
         let mut prepared = self.prepare_header(&notarized.header);
         let encoded = notarized.encode();
         prepared.summary.notarizations = 1;
         prepared.push(
-            keys::notarization_by_round(notarized.proof.round()),
+            keys::notarization_by_round(notarized.notarization.round()),
             encoded,
         );
         Ok(prepared)
@@ -142,20 +142,20 @@ impl SimplexWriter {
         S: certificate::Scheme,
         D: Digest,
     {
-        if finalized.proof.proposal.payload != finalized.header.digest() {
-            return Err(SimplexError::ProofBlockMismatch);
+        if finalized.finalization.proposal.payload != finalized.header.digest() {
+            return Err(SimplexError::CertificateHeaderMismatch);
         }
 
         let mut prepared = self.prepare_header(&finalized.header);
         let encoded = finalized.encode();
         prepared.summary.finalizations = 1;
-        prepared.summary.finalized_height_indexes = 1;
+        prepared.summary.finalization_height_indexes = 1;
         prepared.push(
-            keys::finalization_by_round(finalized.proof.round()),
+            keys::finalization_by_round(finalized.finalization.round()),
             encoded.clone(),
         );
         prepared.push(
-            keys::finalized_by_height(finalized.header.height()),
+            keys::finalization_by_height(finalized.header.height()),
             encoded,
         );
         Ok(prepared)
@@ -214,7 +214,7 @@ impl StoreWriteBatchUpload for SimplexWriter {
     type Error = SimplexError;
 
     fn store(&self) -> &PrefixedStoreClient {
-        &self.client
+        &self.store
     }
 
     fn stage_upload(
@@ -226,7 +226,7 @@ impl StoreWriteBatchUpload for SimplexWriter {
             return Err(SimplexError::EmptyUpload);
         }
         for entry in prepared.entries() {
-            batch.push(&self.client, &entry.key, entry.value.clone())?;
+            batch.push(&self.store, &entry.key, entry.value.clone())?;
         }
         Ok(())
     }

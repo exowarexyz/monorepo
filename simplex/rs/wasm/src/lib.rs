@@ -92,48 +92,50 @@ where
     V::Public::decode(Copying(bytes))
 }
 
-fn verify_notarized<S, D>(scheme: S, bytes: &[u8]) -> Result<VerifiedCertificate, String>
+fn verify_notarized_artifact<S, D>(scheme: S, bytes: &[u8]) -> Result<VerifiedCertificate, String>
 where
     S: commonware_consensus::simplex::scheme::Scheme<D>,
     D: Digest,
     <S::Certificate as Read>::Cfg: Clone,
 {
     let mut reader = Copying(bytes);
-    let proof = Notarization::<S, D>::read_cfg(&mut reader, &scheme.certificate_codec_config())
-        .map_err(|err| format!("failed to decode notarized artifact: {err}"))?;
-    if !proof.verify(&mut sys_rng(), &scheme, &Sequential) {
+    let notarization =
+        Notarization::<S, D>::read_cfg(&mut reader, &scheme.certificate_codec_config())
+            .map_err(|err| format!("failed to decode notarized artifact: {err}"))?;
+    if !notarization.verify(&mut sys_rng(), &scheme, &Sequential) {
         return Err("notarization certificate verification failed".to_string());
     }
     let header = read_header(reader.0, "notarized artifact")?;
     Ok(VerifiedCertificate {
-        epoch: proof.round().epoch().get(),
-        view: proof.view().get(),
-        parent: proof.proposal.parent.get(),
-        payload: proof.proposal.payload.as_ref().to_vec(),
-        certificate: proof.certificate.encode().to_vec(),
+        epoch: notarization.round().epoch().get(),
+        view: notarization.view().get(),
+        parent: notarization.proposal.parent.get(),
+        payload: notarization.proposal.payload.as_ref().to_vec(),
+        certificate: notarization.certificate.encode().to_vec(),
         header,
     })
 }
 
-fn verify_finalized<S, D>(scheme: S, bytes: &[u8]) -> Result<VerifiedCertificate, String>
+fn verify_finalized_artifact<S, D>(scheme: S, bytes: &[u8]) -> Result<VerifiedCertificate, String>
 where
     S: commonware_consensus::simplex::scheme::Scheme<D>,
     D: Digest,
     <S::Certificate as Read>::Cfg: Clone,
 {
     let mut reader = Copying(bytes);
-    let proof = Finalization::<S, D>::read_cfg(&mut reader, &scheme.certificate_codec_config())
-        .map_err(|err| format!("failed to decode finalized artifact: {err}"))?;
-    if !proof.verify(&mut sys_rng(), &scheme, &Sequential) {
+    let finalization =
+        Finalization::<S, D>::read_cfg(&mut reader, &scheme.certificate_codec_config())
+            .map_err(|err| format!("failed to decode finalized artifact: {err}"))?;
+    if !finalization.verify(&mut sys_rng(), &scheme, &Sequential) {
         return Err("finalization certificate verification failed".to_string());
     }
     let header = read_header(reader.0, "finalized artifact")?;
     Ok(VerifiedCertificate {
-        epoch: proof.round().epoch().get(),
-        view: proof.view().get(),
-        parent: proof.proposal.parent.get(),
-        payload: proof.proposal.payload.as_ref().to_vec(),
-        certificate: proof.certificate.encode().to_vec(),
+        epoch: finalization.round().epoch().get(),
+        view: finalization.view().get(),
+        parent: finalization.proposal.parent.get(),
+        payload: finalization.proposal.payload.as_ref().to_vec(),
+        certificate: finalization.certificate.encode().to_vec(),
         header,
     })
 }
@@ -155,8 +157,8 @@ where
     <S::Certificate as Read>::Cfg: Clone,
 {
     match artifact {
-        ArtifactKind::Notarized => verify_notarized(scheme, bytes),
-        ArtifactKind::Finalized => verify_finalized(scheme, bytes),
+        ArtifactKind::Notarized => verify_notarized_artifact(scheme, bytes),
+        ArtifactKind::Finalized => verify_finalized_artifact(scheme, bytes),
     }
 }
 
@@ -282,8 +284,8 @@ fn verify_for_scheme<D: Digest>(
     }
 }
 
-fn verify_for_payload(
-    payload_name: &str,
+fn verify_for_payload_kind(
+    payload_kind: &str,
     identity_name: &str,
     scheme_name: &str,
     namespace: &[u8],
@@ -291,7 +293,7 @@ fn verify_for_payload(
     bytes: &[u8],
     artifact: ArtifactKind,
 ) -> Result<VerifiedCertificate, String> {
-    match payload_name {
+    match payload_kind {
         "sha256" => verify_for_scheme::<sha256::Digest>(
             identity_name,
             scheme_name,
@@ -324,13 +326,13 @@ fn verify_for_payload(
             bytes,
             artifact,
         ),
-        other => Err(format!("unsupported Simplex payload: {other}")),
+        other => Err(format!("unsupported Simplex payload kind: {other}")),
     }
 }
 
-/// Verify an opaque `{ notarization proof, header }` artifact.
+/// Verify an opaque `{ notarization, header }` artifact.
 ///
-/// `payload` selects the digest or commitment carried by the certificate
+/// `payload_kind` selects the digest or commitment carried by the certificate
 /// proposal. Supported values are `sha256`, `blake3`, `transcript-summary`,
 /// and `coding-commitment`.
 ///
@@ -342,16 +344,16 @@ fn verify_for_payload(
 /// identity-to-signing-key map for Secp256r1 and BLS multisig, and an encoded
 /// threshold identity for threshold schemes.
 #[wasm_bindgen]
-pub fn verify_notarized_payload(
-    payload: String,
+pub fn verify_notarized(
+    payload_kind: String,
     identity: String,
     scheme: String,
     namespace: Vec<u8>,
     verification_material: Vec<u8>,
     bytes: Vec<u8>,
 ) -> Result<JsValue, JsValue> {
-    verify_for_payload(
-        &payload,
+    verify_for_payload_kind(
+        &payload_kind,
         &identity,
         &scheme,
         &namespace,
@@ -363,18 +365,18 @@ pub fn verify_notarized_payload(
     .and_then(to_value)
 }
 
-/// Verify an opaque `{ finalization proof, header }` artifact.
+/// Verify an opaque `{ finalization, header }` artifact.
 #[wasm_bindgen]
-pub fn verify_finalized_payload(
-    payload: String,
+pub fn verify_finalized(
+    payload_kind: String,
     identity: String,
     scheme: String,
     namespace: Vec<u8>,
     verification_material: Vec<u8>,
     bytes: Vec<u8>,
 ) -> Result<JsValue, JsValue> {
-    verify_for_payload(
-        &payload,
+    verify_for_payload_kind(
+        &payload_kind,
         &identity,
         &scheme,
         &namespace,
@@ -452,7 +454,7 @@ mod tests {
         scheme_name: &str,
         schemes: &[S],
         verification_material: Vec<u8>,
-        payload_name: &str,
+        payload_kind: &str,
         payload: impl Fn(&[u8]) -> D,
     ) where
         S: Scheme<D>,
@@ -472,8 +474,8 @@ mod tests {
         let mut artifact = notarization.encode().to_vec();
         artifact.extend_from_slice(notarized_header);
 
-        let verified = verify_for_payload(
-            payload_name,
+        let verified = verify_for_payload_kind(
+            payload_kind,
             identity_name,
             scheme_name,
             DEMO_NAMESPACE,
@@ -501,8 +503,8 @@ mod tests {
         let mut artifact = finalization.encode().to_vec();
         artifact.extend_from_slice(finalized_header);
 
-        let verified = verify_for_payload(
-            payload_name,
+        let verified = verify_for_payload_kind(
+            payload_kind,
             identity_name,
             scheme_name,
             DEMO_NAMESPACE,
@@ -761,8 +763,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_payload() {
-        let result = verify_for_payload(
+    fn rejects_unknown_payload_kind() {
+        let result = verify_for_payload_kind(
             "unknown",
             "ed25519",
             "ed25519",
@@ -772,15 +774,15 @@ mod tests {
             ArtifactKind::Notarized,
         );
         let err = match result {
-            Ok(_) => panic!("unknown payload should fail"),
+            Ok(_) => panic!("unknown payload kind should fail"),
             Err(err) => err,
         };
-        assert_eq!(err, "unsupported Simplex payload: unknown");
+        assert_eq!(err, "unsupported Simplex payload kind: unknown");
     }
 
     #[test]
     fn rejects_unknown_identity() {
-        let result = verify_for_payload(
+        let result = verify_for_payload_kind(
             "sha256",
             "unknown",
             "secp256r1",
