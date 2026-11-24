@@ -4,9 +4,8 @@
 //! left, and it needs a process whose environment holds the variable. Setting one in-process
 //! would be read by every other test building a client, so each case runs in a child instead.
 
-use std::process::{Command, Output};
-
 use exoware_sdk::{ClientBuildError, StoreClient, API_KEY_ENV};
+use std::process::{Command, Output};
 
 /// Re-runs this binary for a single `#[ignore]`d case, with `EXOWARE_API_KEY` set to `key`.
 fn run_in_child(case: &str, key: Option<&str>) -> Output {

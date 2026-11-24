@@ -1,25 +1,24 @@
 //! Proof checks shared by the key lookup and key range clients.
 
+use super::proof_digest_cap;
+use crate::{
+    proof::VerifiedKeyValue,
+    service::proto::qmdb::v1::{
+        CurrentKeyExclusionProof as ProtoCurrentKeyExclusionProof,
+        CurrentKeyValueProof as ProtoCurrentKeyValueProof,
+    },
+    QmdbError,
+};
 use commonware_codec::{Copying, Decode, DecodeExt, Encode, Read};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::Graftable,
     qmdb::{
         any::{ordered, value::ValueEncoding},
-        current::ordered::proof::constant::ExclusionProof,
-        current::proof::constant::OperationProof,
+        current::{ordered::proof::constant::ExclusionProof, proof::constant::OperationProof},
         operation::{Key as QmdbKey, Operation},
     },
 };
-
-use crate::proof::{verify_ordered_exclusion_proof, VerifiedKeyValue};
-use crate::service::proto::qmdb::v1::{
-    CurrentKeyExclusionProof as ProtoCurrentKeyExclusionProof,
-    CurrentKeyValueProof as ProtoCurrentKeyValueProof,
-};
-use crate::QmdbError;
-
-use super::proof_digest_cap;
 
 pub(crate) fn verify_key_value_from_proto<F, H, Op, const N: usize>(
     proto: &ProtoCurrentKeyValueProof,
@@ -96,7 +95,7 @@ where
     let requested_key = K::decode_cfg(Copying(requested_key), key_cfg).map_err(|err| {
         QmdbError::CorruptData(format!("failed to decode requested exclusion key: {err}"))
     })?;
-    if !verify_ordered_exclusion_proof::<F, H, K, E, N>(&requested_key, &proof, root) {
+    if !proof.verify::<H>(&requested_key, root) {
         return Err(QmdbError::ProofVerification {
             kind: crate::ProofKind::CurrentKeyExclusion,
         });

@@ -5,24 +5,26 @@
 
 mod common;
 
-use std::num::NonZeroU64;
-
 use commonware_cryptography::Sha256;
-use commonware_runtime::tokio as cw_tokio;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner as _, Supervisor as _};
-use commonware_storage::merkle::{mmr, Location};
-use commonware_storage::qmdb::{
-    any::unordered::variable::Db as LocalUnorderedDb,
-    current::ordered::variable::Db as LocalOrderedDb,
-    immutable::variable::{Db as Immutable, Operation as ImmutableOperation},
-    keyless::variable::{Db as Keyless, Operation as KeylessOperation},
+use commonware_runtime::{
+    buffer::paged::CacheRef, deterministic, tokio as cw_tokio, Runner as _, Supervisor as _,
 };
-use commonware_storage::translator::TwoCap;
+use commonware_storage::{
+    merkle::{mmr, Location},
+    qmdb::{
+        any::unordered::variable::Db as LocalUnorderedDb,
+        current::ordered::variable::Db as LocalOrderedDb,
+        immutable::variable::{Db as Immutable, Operation as ImmutableOperation},
+        keyless::variable::{Db as Keyless, Operation as KeylessOperation},
+    },
+    translator::TwoCap,
+};
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
     adapter::upload::recover_boundary_state, CurrentBoundaryState, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::PrefixedStoreClient;
+use std::num::NonZeroU64;
 
 type Digest = commonware_cryptography::sha256::Digest;
 
@@ -87,7 +89,7 @@ async fn build_keyless_source(
 ) {
     tokio::task::spawn_blocking(move || {
         deterministic::Runner::default().start(|context| async move {
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::keyless_variable_config(
                 "keyless_variable_full_mmr_mirror_source",
                 page_cache,
@@ -117,7 +119,7 @@ async fn build_keyless_source(
                         .await
                         .expect("merkleize")
                 };
-                (db, _) = db.apply_batch(finalized).await.expect("apply");
+                db = db.apply_batch(finalized).await.expect("apply");
             }
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -208,7 +210,7 @@ async fn build_any_unordered_source(
 ) -> (Vec<UnorderedOp>, Location<mmr::Family>, Digest) {
     tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::any_variable_config(
                 "any_unordered_variable_mmr_mirror_source",
                 page_cache,
@@ -247,7 +249,7 @@ async fn build_any_unordered_source(
                     .await
                     .expect("merkleize")
                 };
-                (db, _) = db.apply_batch(finalized).await.expect("apply");
+                db = db.apply_batch(finalized).await.expect("apply");
             }
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -327,7 +329,7 @@ async fn build_immutable_source(
 ) {
     tokio::task::spawn_blocking(move || {
         deterministic::Runner::default().start(|context| async move {
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::immutable_variable_config(
                 "immutable_variable_full_mmr_mirror_source",
                 page_cache,
@@ -359,7 +361,7 @@ async fn build_immutable_source(
                         .await
                         .expect("merkleize")
                 };
-                (db, _) = db.apply_batch(finalized).await.expect("apply");
+                db = db.apply_batch(finalized).await.expect("apply");
             }
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -493,7 +495,7 @@ async fn build_current_ordered_source(
 ) {
     tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::current_variable_config(
                 "current_ordered_variable_mmr_mirror_source",
                 page_cache,
@@ -533,7 +535,7 @@ async fn build_current_ordered_source(
                     .await
                     .expect("merkleize")
                 };
-                (db, _) = db.apply_batch(finalized).await.expect("apply");
+                db = db.apply_batch(finalized).await.expect("apply");
             }
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();

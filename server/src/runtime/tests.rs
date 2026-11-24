@@ -1,11 +1,8 @@
-use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    time::Duration,
+use super::{simulated, testing::SimulatedRuntime, Deadline, Executor, Runtime, TaskSet, Timer};
+use crate::{
+    ingest::{transport::serve, DecodeBuffers, PutConfig},
+    Ingest, IngestState, PutError, PutInput,
 };
-
 use axum::serve::Listener;
 use buffa::Message as _;
 use bytes::Bytes;
@@ -13,11 +10,12 @@ use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
 use http_body_util::{BodyExt, Full};
 use hyper::rt::Timer as _;
 use hyper_util::rt::TokioIo;
-
-use super::{simulated, testing::SimulatedRuntime, Deadline, Executor, Runtime, TaskSet, Timer};
-use crate::{
-    ingest::{transport::serve, DecodeBuffers, PutConfig},
-    Ingest, IngestState, PutError, PutInput,
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
 };
 
 struct Accept;

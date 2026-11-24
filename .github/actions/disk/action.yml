@@ -1,13 +1,34 @@
-name: Free Disk Space
+name: Disk and Swap
+description: Report free disk space, clear preinstalled software only when space is low, and give Linux runners 8GB of swap.
+inputs:
+  min-free-gb:
+    description: "Clear preinstalled software if / has less than this many GB free."
+    required: false
+    # Runners have started with ~86GB free since at least July 2026, and the heaviest job (Rust
+    # Tests) uses ~34GB, so the cleanup normally never runs. GitHub only documents 14GB for these
+    # runners, though, so this keeps CI working if that ever shrinks.
+    default: "50"
 runs:
   using: composite
   steps:
-    - name: Show disk free (before)
-      shell: bash
-      run: df -h || true
-
-    - name: Maximize build space (Linux)
+    - name: Check free disk space (Linux)
+      id: space
       if: runner.os == 'Linux'
+      shell: bash
+      env:
+        MIN_FREE_GB: ${{ inputs.min-free-gb }}
+      run: |
+        df -h /
+        free_gb="$(df --output=avail -BG / | tail -1 | tr -dc '0-9')"
+        if [ "$free_gb" -lt "$MIN_FREE_GB" ]; then
+          echo "::warning::Only ${free_gb}GB free on /, below ${MIN_FREE_GB}GB. Clearing preinstalled software."
+          echo "low=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "${free_gb}GB free on /, at least ${MIN_FREE_GB}GB. Skipping cleanup."
+        fi
+
+    - name: Clear disk space (Linux)
+      if: runner.os == 'Linux' && steps.space.outputs.low == 'true'
       uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
       with:
         android: true
@@ -17,43 +38,10 @@ runs:
         docker-images: true
         swap-storage: true
 
-    - name: Cleanup (macOS)
-      if: runner.os == 'macOS'
+    - name: Show disk free after cleanup (Linux)
+      if: runner.os == 'Linux' && steps.space.outputs.low == 'true'
       shell: bash
-      run: |
-        set -euxo pipefail
-        docker system prune -af || true
-        brew cleanup -s || true
-        rm -rf "$(brew --cache)" || true
-        sudo rm -rf /usr/local/lib/android || true
-        sudo rm -rf /usr/share/dotnet || true
-        sudo rm -rf /usr/local/.ghcup || true
-        sudo rm -rf ~/Library/Android/sdk || true
-        sudo rm -rf ~/Library/Caches || true
-
-    - name: Cleanup (Windows)
-      if: runner.os == 'Windows'
-      shell: pwsh
-      run: |
-        if (Get-Command docker -ErrorAction SilentlyContinue) {
-          Write-Host "docker available; running docker cleanup."
-          docker system prune -af
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "docker system prune failed with exit code $LASTEXITCODE; continuing."
-            $global:LASTEXITCODE = 0
-          } else {
-            Write-Host "docker cleanup completed successfully."
-          }
-        } else {
-          Write-Host "docker not available; skipping docker cleanup."
-        }
-        Remove-Item -Recurse -Force "$env:TEMP\*" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Android" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "$env:ProgramFiles\dotnet" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "$env:USERPROFILE\.ghcup" -ErrorAction SilentlyContinue
-        echo "TEMP=D:\Temp" >> $env:GITHUB_ENV
-        echo "TMP=D:\Temp" >> $env:GITHUB_ENV
-        New-Item -ItemType Directory -Path "D:\Temp" -Force | Out-Null
+      run: df -h /
 
     - name: Configure swap (Linux)
       if: runner.os == 'Linux'
@@ -65,26 +53,3 @@ runs:
         sudo mkswap /swapfile
         sudo swapon /swapfile
         sudo swapon --show
-
-    - name: Configure swap (macOS)
-      if: runner.os == 'macOS'
-      shell: bash
-      run: |
-        set -euxo pipefail
-        sudo mkdir -p /private/var/vm
-        if ! pgrep -x dynamic_pager >/dev/null; then
-          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.dynamic_pager.plist || true
-        fi
-        sysctl vm.swapusage || true
-
-    - name: Log pagefile (Windows)
-      if: runner.os == 'Windows'
-      shell: pwsh
-      run: |
-        $ErrorActionPreference = 'Continue'
-        Get-CimInstance -ClassName Win32_PageFileUsage   | Format-List Name, AllocatedBaseSize, CurrentUsage, PeakUsage
-        Get-CimInstance -ClassName Win32_PageFileSetting | Format-List Name, InitialSize, MaximumSize
-
-    - name: Show disk free (after)
-      shell: bash
-      run: df -h || true

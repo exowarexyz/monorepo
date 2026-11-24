@@ -1,3 +1,17 @@
+use super::{
+    decode::{DecodeOutput, DecodeState, DecodeStep, WireBatch},
+    Admission, ByteLease, DecodeBuffers, IngestEvent, IngestObserver, PutChunk, PutError,
+    RequestLease,
+};
+use crate::{
+    runtime::{Clock, Deadline, Expiry},
+    validate::IngestLimits,
+};
+use bytes::Bytes;
+use connectrpc::ConnectError;
+use futures::{future::Either, FutureExt};
+use http_body::Body;
+use http_body_util::BodyExt;
 use std::{
     fmt::Display,
     pin::Pin,
@@ -6,24 +20,9 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use bytes::Bytes;
-use connectrpc::ConnectError;
-use futures::{future::Either, FutureExt};
-use http_body::Body;
-use http_body_util::BodyExt;
-
-use crate::runtime::{Clock, Deadline, Expiry};
-
 pub(crate) fn deadline_error() -> ConnectError {
     ConnectError::deadline_exceeded("ingest deadline exceeded")
 }
-use super::decode::{DecodeOutput, DecodeState, DecodeStep, WireBatch};
-use super::{
-    Admission, ByteLease, DecodeBuffers, IngestEvent, IngestObserver, PutChunk, PutError,
-    RequestLease,
-};
-use crate::validate::IngestLimits;
-
 pub(super) const FRAME_WORK_BUDGET: usize = 64;
 const DRAIN_BYTE_BUDGET: usize = 64 * 1024;
 
@@ -146,14 +145,14 @@ enum Reception {
 }
 
 impl Reception {
-    fn ended(&self) -> bool {
+    const fn ended(&self) -> bool {
         matches!(
             self,
             Self::Ended | Self::Decoded | Self::Validated | Self::LengthMismatch
         )
     }
 
-    fn decoded(&self) -> bool {
+    const fn decoded(&self) -> bool {
         matches!(self, Self::Decoded | Self::Validated)
     }
 
@@ -276,7 +275,7 @@ impl PutInput {
     pub(super) fn idle_timed_out(&self) -> bool {
         self.idle.as_ref().is_some_and(|idle| idle.expired)
     }
-    pub fn parts(&self) -> Option<&http::request::Parts> {
+    pub const fn parts(&self) -> Option<&http::request::Parts> {
         self.parts.as_ref()
     }
     pub fn with_observer(mut self, observer: Arc<dyn IngestObserver>) -> Self {
@@ -297,10 +296,10 @@ impl PutInput {
     pub fn notifier(&self) -> Option<Arc<dyn crate::stream::StreamNotifier>> {
         self.notifier.clone()
     }
-    pub fn metadata(&self) -> &PutMetadata {
+    pub const fn metadata(&self) -> &PutMetadata {
         &self.metadata
     }
-    pub fn limits(&self) -> PutLimits {
+    pub const fn limits(&self) -> PutLimits {
         self.limits
     }
 
@@ -336,16 +335,16 @@ impl PutInput {
             }
         }
     }
-    pub fn deadline(&self) -> &Deadline {
+    pub const fn deadline(&self) -> &Deadline {
         &self.deadline
     }
     fn clock(&self) -> &dyn Clock {
         self.deadline.clock()
     }
-    pub fn wire_bytes(&self) -> usize {
+    pub const fn wire_bytes(&self) -> usize {
         self.wire_bytes
     }
-    pub fn is_finished(&self) -> bool {
+    pub const fn is_finished(&self) -> bool {
         matches!(self.reception, Reception::Validated)
     }
     pub(super) fn is_end_stream(&self) -> bool {
@@ -694,6 +693,14 @@ impl PutInput {
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        super::{testing::tokio_deadline, BudgetConfig, IngestBudget},
+        *,
+    };
+    use commonware_parallel::{mocks::Explorer, Rayon, Strategy};
+    use futures::StreamExt;
+    use http_body::Frame;
+    use http_body_util::{Full, StreamBody};
     use std::{
         convert::Infallible,
         num::NonZeroUsize,
@@ -703,17 +710,7 @@ mod tests {
         },
         time::Duration,
     };
-
-    use commonware_parallel::{Rayon, Strategy};
-    use futures::StreamExt;
-    use http_body::Frame;
-    use http_body_util::{Full, StreamBody};
-
     use tokio::time::{timeout_at, Instant};
-
-    use super::super::testing::tokio_deadline;
-    use super::super::{BudgetConfig, IngestBudget};
-    use super::*;
 
     fn entry(key: &[u8], value: &[u8]) -> Vec<u8> {
         fn field(tag: u8, bytes: &[u8]) -> Vec<u8> {
@@ -1992,7 +1989,7 @@ mod tests {
                 None
             };
             let dropped = self.dropped.clone();
-            let future = self.pool.manual().spawn(1, move |_| {
+            let future = Explorer::parallel(&self.pool).spawn(1, move |_| {
                 let output = state.run(buffers);
                 if let Some(started) = started {
                     started.send(()).unwrap();

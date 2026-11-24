@@ -3,122 +3,121 @@
 [![Crates.io](https://img.shields.io/crates/v/exoware-validation.svg)](https://crates.io/crates/exoware-validation)
 [![Docs.rs](https://docs.rs/exoware-validation/badge.svg)](https://docs.rs/exoware-validation)
 
-Validate an Exoware deployment.
+Check an Exoware deployment for correctness and measure it with reproducible
+workloads.
+
+## Run a correctness check
+
+The CLI writes deterministic records and checks that an Exoware-compatible
+Store returns them correctly. Run it from the repository root against a
+development deployment. To check a local Store, start the
+[simulator](../examples/simulator) in one terminal:
+
+```bash
+cargo run -p exoware-simulator --bin simulator -- server run --port 8080
+```
+
+In another terminal, write a small fixture and check its visibility, point reads,
+missing keys, and sampled forward and reverse ranges:
+
+```bash
+cargo run -p exoware-validation -- validate --url http://localhost:8080 \
+  --keys 100 --lookup-samples 25 --missing-samples 10 --range-samples 10
+```
+
+All commands default to `http://localhost:8080`. Use `--url` to select another
+deployment. Requests use zstd compression by default. Pass
+`--request-compression none` to disable it.
+
+## Prepare and measure a workload
+
+`load` writes a deterministic keyspace. `bench` measures a mix of point reads,
+batched writes, and range scans. Load the fixture before benchmarking reads:
+
+```bash
+cargo run --release -p exoware-validation -- load --namespace 42 \
+  --keys 10000 --value-size 256 --batch-size 100 --concurrency 4
+
+cargo run --release -p exoware-validation -- bench --namespace 42 \
+  --keys 10000 --value-size 256 --batch-size 100 --concurrency 8 \
+  --ops 50000 --scenario balanced --output bench-report.json
+```
+
+The shared `--namespace 42` lets these commands use the same fixture. Commands
+choose separate run-specific namespaces by default, so an unconfigured `bench`
+will not read keys from an earlier `load`. When sharing a fixture, match
+`--namespace`, `--keys`, and `--key-len` across both commands. Match
+`--value-size` as well so benchmark writes have the same size as loaded
+values. Key length and value size have matching defaults. Choose a fresh
+namespace for each independent fixture.
+
+`--ops` counts benchmark operations, and `--batch-size` controls the number of
+key/value pairs in each write. Use `bench --help` to select a workload scenario, key
+distribution, or custom read/write/scan ratios.
+
+## Interpret results
+
+The commands use different success criteria:
+
+- `validate` exits nonzero on a correctness failure or tool error. It waits for
+  writes to become queryable within the configured visibility budget.
+- `load` exits nonzero if it cannot complete the fixture. Transient ingest errors
+  are retried with `--ingest-retry-attempts` and `--ingest-retry-backoff-ms`.
+  Retries are logged, and the final summary includes the retry count.
+- `bench` exits nonzero on tool errors such as invalid configuration or a failed
+  report write. Backend operation failures increment `errors`, and successful
+  reads with absent values increment `read_misses`. Both can occur with a zero
+  exit status. Inspect them before accepting a result.
+
+[Benchmark reports](src/report.rs) contain the normalized configuration,
+seed, operation counters, and separate read/write/scan latency histograms.
+Latencies include failed calls and use fixed microsecond buckets. The text
+summary reports p50, p95, p99, and maximum latency.
+
+Interpret scan results in the context of the fixture. Load and benchmark keys
+spread across the physical key range, and benchmark scans start at a sampled
+key and stay within its leading-byte range. A scan returns at most
+`--scan-length` rows, but may return fewer at the end of the range or include
+rows from other namespaces. Because `scan_rows` counts all returned physical
+rows, compare scan latency and row counts against the same controlled fixture.
+Standard validation uses a separate, contiguous key layout to bound its
+checks.
+
+## Replay a benchmark
+
+A saved benchmark report can supply the configuration and seed for another run:
+
+```bash
+cargo run --release -p exoware-validation -- bench \
+  --manifest bench-report.json --output replay-report.json
+```
+
+Replay uses the report's endpoint, namespace, compression, and workload settings.
+Workload flags cannot override a manifest. The CLI rejects incompatible key,
+value, or workload-generator versions. Keep generated reports with the binary
+revision used to produce them.
+
+With the same manifest and acknowledged write outcomes, each worker repeats
+its logical operations and appended-key allocation independently of task
+scheduling. Replay operates on the Store's existing state, so start from the
+same snapshot and control other traffic when comparing results. Server state,
+write visibility, hardware, and load affect observed latency and outcomes.
+
+## Extended validation
+
+For larger correctness fixtures, `validate --full-range-verify` replaces
+sampled checks with a paginated verification of every inserted record.
+
+For restart or outage tests, use `overlap-ledger-write` and
+`overlap-ledger-verify` to split writing and checking across processes. Select
+each mode with `validate --mode` and supply `--ledger-path`. The writer also
+requires `--namespace` to select its records. It records acknowledged writes
+and continues appending until interrupted, retrying transient append failures.
+Stop the writer to save its final checkpoint, then run the verifier. The
+[ledger verification](src/validate.rs) checks visibility, forward and reverse
+ranges, and a reduction count against the recorded writes.
 
 ## Status
 
-`exoware-validation` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
-
-## Overview
-
-`exoware-validation` provides small CLI workloads for exercising Exoware-compatible stores. It is meant to support local development, deployment validation, and reproducible benchmark runs.
-
-The tool has three modes:
-
-- `load`: write a deterministic keyspace.
-- `bench`: run a mixed read/write/scan workload and print a benchmark report.
-- `validate`: write and query deterministic records to check correctness.
-
-## Setup
-
-Start a local simulator:
-
-```bash
-cargo run -p exoware-simulator --bin simulator -- server run --port 10000
-```
-
-Run validation commands from another terminal. The examples below use the default endpoint, `http://localhost:10000`.
-
-## Examples
-
-Load deterministic records:
-
-```bash
-cargo run -p exoware-validation -- load --namespace 2026052901 --keys 10000 --value-size 256 --batch-size 100 --concurrency 4
-```
-
-Run a benchmark:
-
-```bash
-cargo run -p exoware-validation -- bench --namespace 2026052901 --keys 10000 --value-size 256 --ops 50000 --batch-size 100 --concurrency 8 --scenario balanced --output bench-report.json
-```
-
-Replay a benchmark from a previous JSON report:
-
-```bash
-cargo run -p exoware-validation -- bench --manifest bench-report.json --output replay-report.json
-```
-
-Validate correctness:
-
-```bash
-cargo run -p exoware-validation -- validate --keys 100 --lookup-samples 25 --missing-samples 10 --range-samples 10
-```
-
-## Exit Semantics
-
-Exit codes follow each command's purpose:
-
-- `bench` is a measurement tool. It exits non-zero only when the tool itself fails (invalid configuration, a failed manifest read, or a failed JSON report write). Backend operation failures and absent reads are recorded as `errors` and `read_misses` in the report, not treated as failures; inspect both and apply your own policy.
-- `load` prepares a complete keyspace for later benchmarking. It retries transient ingest failures (`--ingest-retry-attempts`, `--ingest-retry-backoff-ms`) so a complete fixture is far more likely, while still surfacing them: every retry is logged, the total retried count is reported in the final summary, and a persistent failure or any non-transient error still makes `load` exit non-zero rather than hand back an incomplete keyspace.
-- `validate` is a correctness check. It exits non-zero when the tool fails or when any correctness check fails.
-
-## Benchmark Reports
-
-Benchmark JSON reports include the normalized config, seed, counters, and per-operation latency histograms for reads, writes, and scans. Histograms use fixed microsecond buckets; stdout and GitHub summaries show p50/p95/p99/max latency lines for readability.
-
-`load` and `bench` use run-specific namespaces by default so independent runs do not reuse the same physical keys on persistent stores. Pass the same `--namespace` and `--keys` value to both commands when a benchmark should read from a keyspace written by `load`.
-
-`bench --batch-size` controls the number of key/value pairs in each generated write operation. It defaults to 100, matching `load`; `--ops` still counts benchmark operations (requests), not individual keys in those write batches.
-
-Generated load and benchmark keys open with a byte derived from the logical index, so a run's keys spread across the entire physical key range instead of sharing a fixed prefix. Standard validation instead uses its own contiguous key layout, keeping its whole-keyspace range checks bounded to the rows it owns.
-
-`bench` scans seek forward from one sampled key within the ordered range that shares its leading byte. `--scan-length` caps returned rows. A scan can return fewer rows when it reaches the end of that prefix range. This keeps the requested key range narrow even though generated keys spread across the full keyspace. `scan_rows` counts every physical row returned, including rows from other namespaces after the seek point. Compare scan latency and row counts only between runs against the same controlled fixture. The action's simulator reports are functionality artifacts rather than cross-environment performance evidence.
-
-`load`, `bench`, and `validate` accept `--value-size` (bytes, default 160) to control generated value size. Pass the same `--value-size` to `load` and a reading `bench` so writes appended during the benchmark match the loaded data.
-
-All three commands accept `--request-compression zstd|none`. Zstd is the default.
-Saved manifests with `config.request_compression` set to `"gzip"` must be changed
-to `"zstd"` or `"none"` before replay.
-
-## Benchmark Manifests
-
-`validation bench --manifest <path>` accepts the normalized `config` and `seed` fields from a benchmark JSON report, so a run can be replayed without reconstructing CLI flags. The config includes request compression because it materially affects measured throughput. For a fixed manifest and the same acknowledged write outcomes, each worker repeats its logical operation stream and its appended-key allocation independent of task scheduling. A manifest whose key, value, or workload-generator version differs from the current binary is rejected rather than silently replayed with different data. A minimal manifest has this shape:
-
-```json
-{
-  "schema_version": 1,
-  "config": {
-    "endpoint": "http://localhost:10000",
-    "namespace": 2026052901,
-    "key_space": 10000,
-    "total_ops": 50000,
-    "concurrency": 8,
-    "scenario": "balanced",
-    "workload": {
-      "mix": { "read_ratio": 0.6, "write_ratio": 0.3, "scan_ratio": 0.1 },
-      "scan_length": 25,
-      "key_dist": "uniform",
-      "latest_window": 5000,
-      "latest_prob": 0.9,
-      "zipf_theta": 0.99
-    },
-    "key_len": 48,
-    "value_size": 256,
-    "batch_size": 100,
-    "keyspace_layout_version": 2,
-    "value_generator_version": 1,
-    "workload_generator_version": 7,
-    "read_retry_attempts": 3,
-    "request_compression": "zstd"
-  },
-  "seed": 1592639710
-}
-```
-
-Use `--help` on the top-level command or any subcommand for all options:
-
-```bash
-cargo run -p exoware-validation -- --help
-cargo run -p exoware-validation -- bench --help
-```
+`exoware-validation` is **ALPHA** software and is not yet recommended for production use.
+Developers should expect breaking changes and occasional instability.

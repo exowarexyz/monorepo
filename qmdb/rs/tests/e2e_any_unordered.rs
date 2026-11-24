@@ -3,23 +3,24 @@
 
 mod common;
 
-use std::num::NonZeroU64;
-
 use commonware_cryptography::Sha256;
-use commonware_runtime::tokio as cw_tokio;
-use commonware_runtime::Runner as _;
-use commonware_storage::journal::contiguous::fixed::Config as FixedJournalConfig;
-use commonware_storage::merkle::{mmr, Location, Proof};
-use commonware_storage::qmdb::any::unordered::fixed::{
-    Db as LocalFixedUnorderedDb, Operation as FixedUnorderedOperation,
+use commonware_runtime::{tokio as cw_tokio, Runner as _};
+use commonware_storage::{
+    journal::contiguous::fixed::Config as FixedJournalConfig,
+    merkle::{mmr, Location, Proof},
+    qmdb::any::{
+        unordered::{
+            fixed::{Db as LocalFixedUnorderedDb, Operation as FixedUnorderedOperation},
+            variable::{Db as LocalUnorderedDb, Operation as UnorderedQmdbOperation},
+        },
+        value::FixedEncoding,
+    },
+    translator::TwoCap,
 };
-use commonware_storage::qmdb::any::unordered::variable::Db as LocalUnorderedDb;
-use commonware_storage::qmdb::any::unordered::variable::Operation as UnorderedQmdbOperation;
-use commonware_storage::qmdb::any::value::FixedEncoding;
-use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::MAX_OPERATION_SIZE;
 use exoware_sdk::PrefixedStoreClient;
+use std::num::NonZeroU64;
 
 type Digest = commonware_cryptography::sha256::Digest;
 type BatchProof = Proof<mmr::Family, Digest>;
@@ -72,7 +73,7 @@ async fn build_variable_source() -> VariableSource {
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::any_variable_config(
                 "any_unordered_variable_mmr_source",
                 page_cache,
@@ -104,7 +105,7 @@ async fn build_variable_source() -> VariableSource {
                     .await
                     .expect("merkleize")
             };
-            (db, _) = db.apply_batch(finalized).await.expect("apply");
+            db = db.apply_batch(finalized).await.expect("apply");
 
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -141,7 +142,7 @@ async fn build_fixed_source() -> FixedSource {
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = commonware_storage::qmdb::any::Config {
                 merkle_config: common::merkle_config(
                     "any_unordered_fixed_mmr_source",
@@ -182,7 +183,7 @@ async fn build_fixed_source() -> FixedSource {
                     .await
                     .expect("merkleize fixed")
             };
-            (db, _) = db.apply_batch(finalized).await.expect("apply fixed");
+            db = db.apply_batch(finalized).await.expect("apply fixed");
 
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();

@@ -1,5 +1,6 @@
 //! Bounded byte streams for running the real HTTP stack in a simulation.
 
+use futures::{channel::mpsc, task::AtomicWaker, StreamExt};
 use std::{
     collections::BTreeMap,
     io,
@@ -11,8 +12,6 @@ use std::{
     },
     task::{Context, Poll},
 };
-
-use futures::{channel::mpsc, task::AtomicWaker, StreamExt};
 use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf};
 
 #[derive(Default)]
@@ -42,7 +41,7 @@ struct Controls {
     read: Gate,
     write: Gate,
     reset: Arc<AtomicBool>,
-    peer: Mutex<Weak<Controls>>,
+    peer: Mutex<Weak<Self>>,
     read_limit: AtomicUsize,
     write_limit: AtomicUsize,
 }
@@ -194,6 +193,10 @@ impl SimulatedNetwork {
             incoming,
         })
     }
+    #[expect(
+        clippy::unused_async,
+        reason = "match the asynchronous socket connect API"
+    )]
     pub async fn connect(&self, address: SocketAddr) -> io::Result<SimulatedIo> {
         let (client, server) = tokio::io::duplex(self.0.capacity);
         let reset = Arc::new(AtomicBool::new(false));

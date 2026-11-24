@@ -1,11 +1,11 @@
+use crate::{
+    google::rpc::{BadRequest, ErrorInfo, RetryInfo},
+    query::Detail,
+};
 use base64::Engine;
 use buffa::Message;
 use buffa_types::google::protobuf::Any;
-use connectrpc::error::ErrorDetail;
-use connectrpc::{ConnectError, ErrorCode};
-
-use crate::google::rpc::{BadRequest, ErrorInfo, RetryInfo};
-use crate::query::Detail;
+use connectrpc::{error::ErrorDetail, ConnectError, ErrorCode};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecodedConnectError {
@@ -107,8 +107,10 @@ fn decode_detail(detail: &ErrorDetail) -> Result<Any, buffa::DecodeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::google::rpc::{bad_request::FieldViolation, ErrorInfo};
-    use crate::query::Detail;
+    use crate::{
+        google::rpc::{bad_request::FieldViolation, ErrorInfo},
+        query::Detail,
+    };
 
     #[test]
     fn decodes_connect_type_names_and_any_type_urls() {

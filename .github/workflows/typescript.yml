@@ -16,10 +16,12 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Clear disk space
+      - name: Check disk space and configure swap
         uses: ./.github/actions/disk
       - name: Run setup
         uses: ./.github/actions/setup
+        with:
+          rust: "false"
       - name: Install sdk/ts dependencies
         run: cd sdk/ts && npm ci
       - name: Lint sdk/ts
@@ -36,7 +38,7 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Clear disk space
+      - name: Check disk space and configure swap
         uses: ./.github/actions/disk
       - name: Run setup
         uses: ./.github/actions/setup
@@ -52,10 +54,12 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Clear disk space
+      - name: Check disk space and configure swap
         uses: ./.github/actions/disk
       - name: Run setup
         uses: ./.github/actions/setup
+        with:
+          rust: "false"
       - name: Install sdk/ts dependencies
         run: cd sdk/ts && npm ci
       - name: Build sdk/ts
@@ -70,10 +74,15 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Clear disk space
+      - name: Check disk space and configure swap
         uses: ./.github/actions/disk
+      # The three Web jobs compile the same two wasm crates (through the sandbox's prebuild),
+      # so they share one cache. SQL Web builds the most and is the only one that saves it.
       - name: Run setup
         uses: ./.github/actions/setup
+        with:
+          shared-cache-key: web
+          save-cache: "false"
       - name: Install wasm32 target
         run: rustup target add wasm32-unknown-unknown
       - name: Install wasm-pack + wasm-bindgen-cli
@@ -108,10 +117,15 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Clear disk space
+      - name: Check disk space and configure swap
         uses: ./.github/actions/disk
+      # The three Web jobs compile the same two wasm crates (through the sandbox's prebuild),
+      # so they share one cache. SQL Web builds the most and is the only one that saves it.
       - name: Run setup
         uses: ./.github/actions/setup
+        with:
+          shared-cache-key: web
+          save-cache: "false"
       - name: Install wasm32 target
         run: rustup target add wasm32-unknown-unknown
       - name: Install wasm-pack + wasm-bindgen-cli
@@ -150,10 +164,14 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Clear disk space
+      - name: Check disk space and configure swap
         uses: ./.github/actions/disk
+      # The three Web jobs compile the same two wasm crates (through the sandbox's prebuild),
+      # so they share one cache. SQL Web builds the most and is the only one that saves it.
       - name: Run setup
         uses: ./.github/actions/setup
+        with:
+          shared-cache-key: web
       - name: Install wasm32 target
         run: rustup target add wasm32-unknown-unknown
       - name: Install wasm-pack + wasm-bindgen-cli

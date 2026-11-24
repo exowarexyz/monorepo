@@ -44,6 +44,8 @@ enum Command {
     Seed {
         #[arg(long)]
         store_url: String,
+        #[arg(long, default_value = "")]
+        store_prefix: String,
         #[arg(long, default_value_t = 2)]
         interval_secs: u64,
         #[arg(long)]
@@ -253,13 +255,15 @@ async fn upload_certificates(
 
 async fn seed(
     store_url: &str,
+    store_prefix: String,
     interval_secs: u64,
     start_height: Option<u64>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!(store_url, interval_secs, "starting simplex seed");
 
-    let client =
-        SimplexWriter::new(StoreClient::new(store_url).prefixed(StoreKeyPrefix::identity()));
+    let client = SimplexWriter::new(
+        StoreClient::new(store_url).prefixed(StoreKeyPrefix::new(store_prefix)?),
+    );
     let schemes = demo_schemes();
     let verification_material = schemes[0].identity().encode().to_vec();
     let leader = schemes
@@ -292,10 +296,13 @@ async fn seed(
     let mut parent_view = View::new(height.saturating_sub(1));
     let mut parent_digest = Sha256Digest::EMPTY;
 
+    // Keep the signal listener registered while each batch is written and uploaded.
+    let shutdown = tokio::signal::ctrl_c();
+    tokio::pin!(shutdown);
     loop {
         tokio::select! {
             biased;
-            _ = tokio::signal::ctrl_c() => {
+            _ = &mut shutdown => {
                 info!("ctrl-c received, shutting down");
                 break;
             }
@@ -347,9 +354,10 @@ async fn main() -> std::process::ExitCode {
     let result = match cli.command {
         Command::Seed {
             store_url,
+            store_prefix,
             interval_secs,
             start_height,
-        } => seed(&store_url, interval_secs, start_height).await,
+        } => seed(&store_url, store_prefix, interval_secs, start_height).await,
     };
 
     match result {

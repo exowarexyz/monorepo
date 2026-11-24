@@ -3,35 +3,38 @@
 
 mod common;
 
-use std::num::NonZeroU64;
-use std::time::Duration;
-
+use bytes::Bytes;
 use commonware_cryptography::Sha256;
-use commonware_runtime::tokio as cw_tokio;
-use commonware_runtime::Runner as _;
-use commonware_storage::merkle::{mmb, mmr, Location, Proof};
-use commonware_storage::qmdb::any::unordered::variable::Db as LocalUnorderedDb;
-use commonware_storage::qmdb::any::unordered::variable::Operation as UnorderedQmdbOperation;
-use commonware_storage::qmdb::current::unordered::variable::Db as LocalCurrentUnorderedDb;
-use commonware_storage::translator::TwoCap;
-use commonware_utils::{NZUsize, NZU16, NZU64};
-use connectrpc::client::ClientConfig;
-use connectrpc::ErrorCode;
-use exoware_qmdb::service::proto::qmdb::v1::{
-    GetCurrentOperationRangeRequest as ProtoGetCurrentOperationRangeRequest,
-    GetManyRequest as ProtoGetManyRequest,
-    GetOperationRangeRequest as ProtoGetOperationRangeRequest,
-    GetOperationsRequest as ProtoGetOperationsRequest, GetRangeRequest as ProtoGetRangeRequest,
-    GetRequest as ProtoGetRequest, KeyLookupServiceClient, OrderedKeyRangeServiceClient,
-    SubscribeRequest as ProtoSubscribeRequest,
+use commonware_macros::boxed;
+use commonware_runtime::{tokio as cw_tokio, Runner as _};
+use commonware_storage::{
+    merkle::{mmb, mmr, Location, Proof},
+    qmdb::{
+        any::unordered::variable::{Db as LocalUnorderedDb, Operation as UnorderedQmdbOperation},
+        current::unordered::variable::Db as LocalCurrentUnorderedDb,
+    },
+    translator::TwoCap,
 };
+use commonware_utils::{NZUsize, NZU16, NZU64};
+use connectrpc::{client::ClientConfig, ErrorCode};
 use exoware_qmdb::{
-    adapter::upload::recover_boundary_state, service::client::rpc::CurrentOperationClient,
-    service::client::rpc::OperationLogClient, service::client::rpc::OperationLogSubscribeProof,
+    adapter::upload::recover_boundary_state,
+    service::{
+        client::rpc::{CurrentOperationClient, OperationLogClient, OperationLogSubscribeProof},
+        proto::qmdb::v1::{
+            GetCurrentOperationRangeRequest as ProtoGetCurrentOperationRangeRequest,
+            GetManyRequest as ProtoGetManyRequest,
+            GetOperationRangeRequest as ProtoGetOperationRangeRequest,
+            GetOperationsRequest as ProtoGetOperationsRequest,
+            GetRangeRequest as ProtoGetRangeRequest, GetRequest as ProtoGetRequest,
+            KeyLookupServiceClient, OrderedKeyRangeServiceClient,
+            SubscribeRequest as ProtoSubscribeRequest,
+        },
+    },
     CurrentBoundaryState, QmdbError, MAX_OPERATION_SIZE,
 };
-use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::{PrefixedStoreClient, StoreClient};
+use exoware_sdk::{proto::PreferZstdHttpClient, PrefixedStoreClient, StoreClient};
+use std::{num::NonZeroU64, time::Duration};
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
@@ -233,7 +236,7 @@ async fn build_any_source_batch() -> AnySourceBatch {
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::any_variable_config(
                 "any_unordered_variable_mmr_connect_source",
                 page_cache,
@@ -271,7 +274,7 @@ async fn build_any_source_batch() -> AnySourceBatch {
                         .await
                         .expect("merkleize")
                 };
-                (db, _) = db.apply_batch(finalized).await.expect("apply");
+                db = db.apply_batch(finalized).await.expect("apply");
 
                 let latest = db.bounds().end - 1;
                 let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -320,7 +323,7 @@ async fn build_mmb_any_source_batch() -> MmbAnySourceBatch {
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::any_variable_config(
                 "any_unordered_variable_mmb_connect_source",
                 page_cache,
@@ -358,7 +361,7 @@ async fn build_mmb_any_source_batch() -> MmbAnySourceBatch {
                         .await
                         .expect("merkleize")
                 };
-                (db, _) = db.apply_batch(finalized).await.expect("apply");
+                db = db.apply_batch(finalized).await.expect("apply");
 
                 let latest = db.bounds().end - 1;
                 let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -407,7 +410,7 @@ async fn build_current_source_batch() -> CurrentSourceBatch {
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::current_variable_config(
                 "current_unordered_variable_mmr_connect_source",
                 page_cache,
@@ -438,7 +441,7 @@ async fn build_current_source_batch() -> CurrentSourceBatch {
                     .await
                     .expect("merkleize")
             };
-            (db, _) = db.apply_batch(finalized).await.expect("apply");
+            db = db.apply_batch(finalized).await.expect("apply");
 
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -524,7 +527,7 @@ async fn test_unordered_range_stack_does_not_expose_key_lookup_or_ordered_range_
 
     let err = key_lookup_rpc_client(&qmdb_url)
         .get_many(ProtoGetManyRequest {
-            keys: vec![b"alpha".to_vec()],
+            keys: vec![Bytes::from_static(b"alpha")],
             tip: 0,
             ..Default::default()
         })
@@ -534,7 +537,7 @@ async fn test_unordered_range_stack_does_not_expose_key_lookup_or_ordered_range_
 
     let err = ordered_range_rpc_client(&qmdb_url)
         .get_range(ProtoGetRangeRequest {
-            start_key: b"a".to_vec(),
+            start_key: Bytes::from_static(b"a"),
             limit: 1,
             tip: 0,
             ..Default::default()
@@ -756,7 +759,7 @@ async fn test_unordered_current_endpoints_enforce_optional_sequence_minimum() {
 
     let cold_get = lookup
         .get(ProtoGetRequest {
-            key: source.alpha.as_ref().to_vec(),
+            key: Bytes::copy_from_slice(source.alpha.as_ref()),
             tip: source.latest_location.as_u64() + 1,
             min_sequence_number: Some(u64::MAX),
             ..Default::default()
@@ -765,7 +768,10 @@ async fn test_unordered_current_endpoints_enforce_optional_sequence_minimum() {
         .expect_err("cold unordered get must enforce the sequence minimum");
     let cold_many = lookup
         .get_many(ProtoGetManyRequest {
-            keys: vec![source.alpha.as_ref().to_vec(), missing.as_ref().to_vec()],
+            keys: vec![
+                Bytes::copy_from_slice(source.alpha.as_ref()),
+                Bytes::copy_from_slice(missing.as_ref()),
+            ],
             tip: source.latest_location.as_u64() + 1,
             min_sequence_number: Some(u64::MAX),
             ..Default::default()
@@ -794,7 +800,7 @@ async fn test_unordered_current_endpoints_enforce_optional_sequence_minimum() {
     for min_sequence_number in [None, Some(0)] {
         lookup
             .get(ProtoGetRequest {
-                key: source.alpha.as_ref().to_vec(),
+                key: Bytes::copy_from_slice(source.alpha.as_ref()),
                 tip: source.latest_location.as_u64(),
                 min_sequence_number,
                 ..Default::default()
@@ -803,7 +809,10 @@ async fn test_unordered_current_endpoints_enforce_optional_sequence_minimum() {
             .expect("unordered get at available sequence");
         lookup
             .get_many(ProtoGetManyRequest {
-                keys: vec![source.alpha.as_ref().to_vec(), missing.as_ref().to_vec()],
+                keys: vec![
+                    Bytes::copy_from_slice(source.alpha.as_ref()),
+                    Bytes::copy_from_slice(missing.as_ref()),
+                ],
                 tip: source.latest_location.as_u64(),
                 min_sequence_number,
                 ..Default::default()
@@ -827,7 +836,7 @@ async fn test_unordered_current_endpoints_enforce_optional_sequence_minimum() {
 
     lookup
         .get(ProtoGetRequest {
-            key: source.alpha.as_ref().to_vec(),
+            key: Bytes::copy_from_slice(source.alpha.as_ref()),
             tip: source.latest_location.as_u64(),
             min_sequence_number: Some(u64::MAX),
             ..Default::default()
@@ -836,7 +845,10 @@ async fn test_unordered_current_endpoints_enforce_optional_sequence_minimum() {
         .expect("cached unordered get uses the publication floor");
     lookup
         .get_many(ProtoGetManyRequest {
-            keys: vec![source.alpha.as_ref().to_vec(), missing.as_ref().to_vec()],
+            keys: vec![
+                Bytes::copy_from_slice(source.alpha.as_ref()),
+                Bytes::copy_from_slice(missing.as_ref()),
+            ],
             tip: source.latest_location.as_u64(),
             min_sequence_number: Some(u64::MAX),
             ..Default::default()
@@ -882,7 +894,7 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
     let snapshots = tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::current_variable_config(
                 case_name,
                 cache,
@@ -910,7 +922,7 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
                     )
                     .await
                     .expect("source merkleize");
-                (db, _) = db.apply_batch(batch).await.expect("source apply");
+                db = db.apply_batch(batch).await.expect("source apply");
                 assert_eq!(*db.bounds().end, if round == 0 { 512 } else { 514 });
                 let (_, operations): (_, Vec<Operation<F>>) = db
                     .ops_historical_proof(
@@ -1040,7 +1052,7 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
     let snapshots = tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::current_variable_config(
                 case_name,
                 cache,
@@ -1067,7 +1079,7 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
                     .merkleize(&db, None::<Vec<u8>>, &mut commonware_storage::qmdb::floor::Proportional)
                     .await
                     .expect("source merkleize");
-                (db, _) = db.apply_batch(batch).await.expect("source apply");
+                db = db.apply_batch(batch).await.expect("source apply");
                 if round < empty_batches {
                     continue;
                 }
@@ -1287,8 +1299,8 @@ async fn test_unordered_connect_omits_missing_and_rejects_duplicate_range_and_st
     let err = key_lookup_rpc_client(&qmdb_url)
         .get_many(ProtoGetManyRequest {
             keys: vec![
-                source.alpha.as_ref().to_vec(),
-                source.alpha.as_ref().to_vec(),
+                Bytes::copy_from_slice(source.alpha.as_ref()),
+                Bytes::copy_from_slice(source.alpha.as_ref()),
             ],
             tip: source.latest_location.as_u64(),
             ..Default::default()
@@ -1299,7 +1311,7 @@ async fn test_unordered_connect_omits_missing_and_rejects_duplicate_range_and_st
 
     let err = ordered_range_rpc_client(&qmdb_url)
         .get_range(ProtoGetRangeRequest {
-            start_key: source.alpha.as_ref().to_vec(),
+            start_key: Bytes::copy_from_slice(source.alpha.as_ref()),
             limit: 1,
             tip: source.latest_location.as_u64(),
             ..Default::default()
@@ -1356,8 +1368,8 @@ async fn test_current_unordered_variable_fixed_keys_variable_values_mmr_get_many
     let (server, url) = spawn_qmdb_full_server(PrefixedStoreClient::empty(store)).await;
     let request = ProtoGetManyRequest {
         keys: vec![
-            source.alpha.as_ref().to_vec(),
-            source.beta.as_ref().to_vec(),
+            Bytes::copy_from_slice(source.alpha.as_ref()),
+            Bytes::copy_from_slice(source.beta.as_ref()),
         ],
         tip: *source.latest_location,
         ..Default::default()
@@ -1555,6 +1567,7 @@ async fn test_unordered_connect_client_rejects_invalid_streamed_proof() {
 }
 
 /// Store requests `operation` makes.
+#[boxed]
 async fn store_calls<T>(
     query: &common::CountingQuery,
     operation: impl std::future::Future<Output = Result<T, QmdbError>>,

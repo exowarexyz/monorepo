@@ -1,15 +1,15 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { create, fromBinary, fromJsonString, toBinary, toJsonString } from '@bufbuild/protobuf';
+import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
 import { GetRequestSchema, GetResponseSchema, GetManyRequestSchema, GetManyResponseSchema } from '../dist/generated/proto/qmdb/v1/key_lookup_pb.js';
 import { GetRangeRequestSchema, GetRangeResponseSchema } from '../dist/generated/proto/qmdb/v1/key_range_pb.js';
 import { GetCurrentOperationRangeRequestSchema, GetCurrentOperationRangeResponseSchema } from '../dist/generated/proto/qmdb/v1/current_operation_pb.js';
 import { SubscribeRequestSchema, SubscribeResponseSchema } from '../dist/generated/proto/qmdb/v1/operation_log_pb.js';
-import { CurrentKeyValueProofSchema, CurrentOperationRangeProofSchema, HistoricalMultiProofSchema } from '../dist/generated/proto/qmdb/v1/proof_pb.js';
-import { OrderedQmdbClient } from '../dist/client.js';
+import { CurrentKeyValueProofSchema, CurrentOperationRangeProofSchema, OperationMultiProofSchema } from '../dist/generated/proto/qmdb/v1/proof_pb.js';
+import { QmdbOrderedClient } from '../dist/client.js';
 import {
-  decode_historical_multi_proof_operations, encode_vec_key, initSync, verify_current_key_value_proof,
+  decode_operation_multi_proof_operations, encode_vec_key, initSync, verify_current_key_value_proof,
   verify_get_many_response, verify_get_range_response,
 } from '../dist/generated/wasm/exoware_qmdb_wasm.js';
 
@@ -56,24 +56,14 @@ function decodeFixtureKey(key) {
   return decoded;
 }
 
-function decodeRequest(schema, body, contentType) {
-  return contentType === 'application/proto'
-    ? fromBinary(schema, body)
-    : fromJsonString(schema, new TextDecoder().decode(body));
-}
-
 async function requestBody(request) {
   return new Uint8Array(await request.arrayBuffer());
 }
 
-function rpcResponse(request, schema, message) {
-  if (request.headers.get('content-type') === 'application/proto') {
-    return new Response(toBinary(schema, message), {
-      headers: { 'content-type': 'application/proto' },
-    });
-  }
-  return new Response(toJsonString(schema, message), {
-    headers: { 'content-type': 'application/json' },
+// The qmdb clients always send binary protobuf, so the mocks only speak it.
+function rpcResponse(schema, message) {
+  return new Response(toBinary(schema, message), {
+    headers: { 'content-type': 'application/proto' },
   });
 }
 
@@ -111,8 +101,8 @@ for (const family of ['mmr', 'mmb']) {
       'sha256', many.chunkSize, [many.request.keys[0], many.request.keys[0], many.request.keys[2]]));
 
     const subscribe = fixture(family, 'subscribe', SubscribeRequestSchema, SubscribeResponseSchema);
-    const decoded = decode_historical_multi_proof_operations(
-      toBinary(HistoricalMultiProofSchema, subscribe.response.proof), family, 'sha256');
+    const decoded = decode_operation_multi_proof_operations(
+      toBinary(OperationMultiProofSchema, subscribe.response.proof), family, 'sha256');
     assert.equal(typeof decoded.tip, 'bigint');
     assert.equal(decoded.tip, BigInt(subscribe.expected[0]));
     assert.deepEqual(Buffer.from(decoded.root), subscribe.root);
@@ -141,8 +131,10 @@ for (const family of ['mmr', 'mmb']) {
     const get = fixture(family, 'get', GetRequestSchema, GetResponseSchema);
     const many = fixture(family, 'get_many', GetManyRequestSchema, GetManyResponseSchema);
     const range = fixture(family, 'range_first', GetRangeRequestSchema, GetRangeResponseSchema);
+    // An empty proof would encode to zero bytes, which the client reads as
+    // missing, so give it a start location to reach wasm.
     const currentOperationResponse = create(GetCurrentOperationRangeResponseSchema, {
-      proof: create(CurrentOperationRangeProofSchema, {}),
+      proof: create(CurrentOperationRangeProofSchema, { startLocation: 1n }),
     });
     const large = (1n << 53n) + 100n;
     let abortFetch = false;
@@ -169,7 +161,8 @@ for (const family of ['mmr', 'mmb']) {
       } else {
         throw new Error(`unexpected QMDB RPC path ${path}`);
       }
-      const decoded = decodeRequest(cases[0], body, request.headers.get('content-type'));
+      assert.equal(request.headers.get('content-type'), 'application/proto');
+      const decoded = fromBinary(cases[0], body);
       forwarded.push({
         path,
         minSequenceNumber: decoded.minSequenceNumber,
@@ -183,7 +176,7 @@ for (const family of ['mmr', 'mmb']) {
           init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });
         });
       }
-      return rpcResponse(request, cases[1], cases[2]);
+      return rpcResponse(cases[1], cases[2]);
     });
 
     function assertForwarded(method, minSequenceNumber) {
@@ -194,7 +187,7 @@ for (const family of ['mmr', 'mmb']) {
       assert.ok(request.timeoutMs > 0);
     }
 
-    const client = new OrderedQmdbClient('http://qmdb.test', {
+    const client = new QmdbOrderedClient('http://qmdb.test', {
       merkleFamily: family,
       currentChunkSize: get.chunkSize,
     });
@@ -267,7 +260,7 @@ test('test_current_clients_reject_invalid_read_floors_before_dispatch', async (t
     requests += 1;
     throw new Error('unexpected request');
   });
-  const client = new OrderedQmdbClient('http://qmdb.test');
+  const client = new QmdbOrderedClient('http://qmdb.test');
   for (const minimum of [-1n, 1n << 64n, 1]) {
     await assert.rejects(client.get('', 1n, '', minimum), /64-bit/);
     await assert.rejects(client.getMany([''], 1n, '', minimum), /64-bit/);

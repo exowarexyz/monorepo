@@ -1,3 +1,10 @@
+use super::{Clock, Deadline, Runtime, Task, TaskError};
+use futures::{
+    future::BoxFuture,
+    stream::{FuturesUnordered, StreamExt},
+    task::AtomicWaker,
+    FutureExt,
+};
 use std::{
     future::Future,
     pin::Pin,
@@ -5,15 +12,6 @@ use std::{
     task::{Context, Poll},
     time::{Duration, Instant, SystemTime},
 };
-
-use futures::{
-    future::BoxFuture,
-    stream::{FuturesUnordered, StreamExt},
-    task::AtomicWaker,
-    FutureExt,
-};
-
-use super::{Clock, Deadline, Runtime, Task, TaskError};
 
 struct Tasks {
     pending: Mutex<FuturesUnordered<Task>>,

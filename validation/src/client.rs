@@ -1,11 +1,10 @@
-use std::time::Duration;
-
 use anyhow::{ensure, Context};
 use connectrpc::ErrorCode;
 use exoware_sdk::{
     ClientError, ConnectRequestCompression, PrefixedStoreClient, RetryConfig, StoreClient,
 };
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 const DEFAULT_INITIAL_BACKOFF_MS: u64 = 50;
 const DEFAULT_MAX_BACKOFF_MS: u64 = 1_000;
@@ -35,7 +34,7 @@ impl From<RequestCompression> for ConnectRequestCompression {
 /// Shared SDK client CLI flags for validation commands.
 #[derive(clap::Args, Clone, Debug)]
 pub struct ClientArgs {
-    #[arg(long, default_value = "http://localhost:10000")]
+    #[arg(long, default_value = "http://localhost:8080")]
     pub url: String,
     /// Max client read retry attempts for lookup/range calls.
     #[arg(long, default_value_t = 3)]
@@ -73,7 +72,7 @@ impl ClientConfig {
     }
 
     /// Overrides the request-body compression (see [`RequestCompression`]).
-    pub fn with_request_compression(mut self, compression: RequestCompression) -> Self {
+    pub const fn with_request_compression(mut self, compression: RequestCompression) -> Self {
         self.request_compression = compression;
         self
     }
@@ -84,12 +83,12 @@ impl ClientConfig {
     }
 
     /// Returns the maximum number of attempts for SDK reads.
-    pub fn read_retry_attempts(&self) -> usize {
+    pub const fn read_retry_attempts(&self) -> usize {
         self.read_retry_attempts
     }
 
     /// Returns the request-body compression used by the SDK client.
-    pub fn request_compression(&self) -> RequestCompression {
+    pub const fn request_compression(&self) -> RequestCompression {
         self.request_compression
     }
 }
@@ -118,7 +117,7 @@ pub fn build_client(config: &ClientConfig) -> anyhow::Result<PrefixedStoreClient
 /// Deliberately broader than the query list below: validation writes are
 /// deterministic and idempotent, so replaying a batch whose first attempt may
 /// have landed is safe.
-pub(crate) fn is_transient_ingest_code(code: ErrorCode) -> bool {
+pub(crate) const fn is_transient_ingest_code(code: ErrorCode) -> bool {
     matches!(
         code,
         ErrorCode::ResourceExhausted
@@ -136,7 +135,7 @@ pub(crate) fn is_transient_ingest_error(err: &ClientError) -> bool {
 
 /// Query error codes worth re-polling; anything else fails validation fast so
 /// store bugs are not retried into a timeout.
-pub(crate) fn is_transient_query_code(code: ErrorCode) -> bool {
+pub(crate) const fn is_transient_query_code(code: ErrorCode) -> bool {
     matches!(
         code,
         ErrorCode::Aborted | ErrorCode::ResourceExhausted | ErrorCode::Unavailable
@@ -204,20 +203,20 @@ mod tests {
     #[test]
     fn config_normalizes_endpoint() {
         let config =
-            ClientConfig::new("http://localhost:10000/", 3).expect("client config should parse");
-        assert_eq!(config.endpoint(), "http://localhost:10000");
+            ClientConfig::new("http://localhost:8080/", 3).expect("client config should parse");
+        assert_eq!(config.endpoint(), "http://localhost:8080");
     }
 
     #[test]
     fn config_preserves_endpoint_without_trailing_slash() {
         let config =
-            ClientConfig::new("http://localhost:10000", 3).expect("client config should parse");
-        assert_eq!(config.endpoint(), "http://localhost:10000");
+            ClientConfig::new("http://localhost:8080", 3).expect("client config should parse");
+        assert_eq!(config.endpoint(), "http://localhost:8080");
     }
 
     #[test]
     fn config_rejects_zero_read_retry_attempts() {
-        assert!(ClientConfig::new("http://localhost:10000", 0).is_err());
+        assert!(ClientConfig::new("http://localhost:8080", 0).is_err());
     }
 
     #[test]

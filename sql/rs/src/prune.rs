@@ -1,11 +1,11 @@
-use exoware_sdk::kv_codec::Utf8;
-use exoware_sdk::prune_policy::{
-    validate_policy, GroupBy, KeysScope, OrderBy, OrderEncoding, PrunePolicy, RetainPolicy,
+use crate::{types::ColumnKind, KvSchema};
+use exoware_sdk::{
+    kv_codec::Utf8,
+    prune_policy::{
+        validate_policy, GroupBy, KeysScope, OrderBy, OrderEncoding, PrunePolicy, RetainPolicy,
+    },
+    selector::Selector,
 };
-use exoware_sdk::selector::Selector;
-
-use crate::types::ColumnKind;
-use crate::KvSchema;
 
 const VERSION_WIDTH_BYTES: usize = 8;
 const ORDERED_UTF8_REGEX: &str = r"(?:\x01[\x00-\x02]|[^\x00\x01\xFF])*\x00";
@@ -75,21 +75,20 @@ impl KvSchema {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
     use super::ORDERED_UTF8_REGEX;
-    use crate::codec::{
-        decode_variable_text, encode_primary_key, encode_string_variable, family_byte,
+    use crate::{
+        codec::{decode_variable_text, encode_primary_key, encode_string_variable, family_byte},
+        types::{KvTableConfig, TableColumnConfig, TableModel, PRIMARY_FAMILY_DISCRIMINATOR},
+        CellValue, IndexSpec, KvSchema,
     };
-    use crate::types::{
-        KvTableConfig, TableColumnConfig, TableModel, PRIMARY_FAMILY_DISCRIMINATOR,
-    };
-    use crate::{CellValue, IndexSpec, KvSchema};
     use datafusion::arrow::datatypes::DataType;
-    use exoware_sdk::kv_codec::Utf8;
-    use exoware_sdk::prune_policy::{validate_policy, OrderEncoding, RetainPolicy};
-    use exoware_sdk::selector::compile_payload_regex;
-    use exoware_sdk::{StoreClient, StoreKeyPrefix};
+    use exoware_sdk::{
+        kv_codec::Utf8,
+        prune_policy::{validate_policy, OrderEncoding, RetainPolicy},
+        selector::compile_payload_regex,
+        StoreClient, StoreKeyPrefix,
+    };
+    use std::collections::HashSet;
 
     fn keys_scope(policy: &super::PrunePolicy) -> &super::KeysScope {
         &policy.scope
@@ -110,8 +109,7 @@ mod tests {
     }
 
     fn versioned_schema(entity_type: DataType) -> KvSchema {
-        let client =
-            StoreClient::new("http://localhost:10000").prefixed(StoreKeyPrefix::identity());
+        let client = StoreClient::new("http://localhost:8080").prefixed(StoreKeyPrefix::identity());
         let mut schema = KvSchema::new(client);
         for i in 0..3 {
             schema = schema
@@ -182,8 +180,7 @@ mod tests {
 
     #[test]
     fn keep_latest_versions_rejects_indexed_tables() {
-        let client =
-            StoreClient::new("http://localhost:10000").prefixed(StoreKeyPrefix::identity());
+        let client = StoreClient::new("http://localhost:8080").prefixed(StoreKeyPrefix::identity());
         let schema = KvSchema::new(client)
             .table_versioned(
                 "documents",
@@ -215,7 +212,7 @@ mod tests {
             vec!["version", "version"],
         ] {
             let client =
-                StoreClient::new("http://localhost:10000").prefixed(StoreKeyPrefix::identity());
+                StoreClient::new("http://localhost:8080").prefixed(StoreKeyPrefix::identity());
             let schema = KvSchema::new(client)
                 .table(
                     "documents",

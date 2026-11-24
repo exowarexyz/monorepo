@@ -1,8 +1,12 @@
 mod common;
 
-use datafusion::arrow::array::{Int64Array, StringArray, UInt64Array};
-use datafusion::arrow::datatypes::DataType;
-use datafusion::common::ScalarValue;
+use datafusion::{
+    arrow::{
+        array::{Int64Array, StringArray, UInt64Array},
+        datatypes::DataType,
+    },
+    common::ScalarValue,
+};
 use exoware_sdk::PrefixedStoreClient;
 use exoware_sql::{
     default_orders_index_specs, CellValue, IndexSpec, KvSchema, SqlContext, TableColumnConfig,

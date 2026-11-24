@@ -43,7 +43,7 @@ where
         .has_floor()
         .expect("final commit");
     let inactive = F::inactive_peaks(end, floor);
-    let root = merkle.root(&base, &hasher, inactive).unwrap();
+    let root = merkle.root(&hasher, inactive).unwrap();
     let pinned_nodes = F::nodes_to_pin(start)
         .map(|position| merkle.get_node(position).expect("source pinned node"))
         .collect::<Vec<_>>();

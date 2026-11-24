@@ -1,15 +1,15 @@
-use std::fmt;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
-
+use crate::{
+    client::RequestCompression,
+    workload::{Scenario, WorkloadSpec},
+};
 use anyhow::{ensure, Context};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-
-use crate::client::RequestCompression;
-use crate::workload::{Scenario, WorkloadSpec};
+use std::{
+    fmt, fs,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 const BENCH_MANIFEST_SCHEMA_VERSION: u16 = 1;
 const BENCH_REPORT_SCHEMA_VERSION: u16 = 1;
@@ -24,20 +24,20 @@ const LATENCY_BUCKET_UPPER_BOUNDS_US: [u64; 15] = [
 
 // Reports and manifests written before `value_size` existed omit the field;
 // default it to the generator default so they still parse and replay.
-fn default_value_size() -> usize {
+const fn default_value_size() -> usize {
     crate::value::DEFAULT_VALUE_SIZE
 }
 
 // Older reports used the operation stream before Zipf sampling consumed one
 // random draw per operation. Parse them so replay can reject the mismatch.
-fn default_workload_generator_version() -> u16 {
+const fn default_workload_generator_version() -> u16 {
     1
 }
 
 // Reports from before bench supported batched writes did not record this
 // setting. Parse them with the shared command default; replay still rejects
 // their older generator version before execution.
-fn default_batch_size() -> usize {
+const fn default_batch_size() -> usize {
     crate::ingest::DEFAULT_INGEST_BATCH_SIZE
 }
 
@@ -123,9 +123,9 @@ pub struct LatencyHistogramsRecorder {
 }
 
 struct LatencyHistogramRecorder {
-    counts: Vec<AtomicU64>,
-    min_us: AtomicU64,
-    max_us: AtomicU64,
+    counts: Vec<u64>,
+    min_us: u64,
+    max_us: u64,
 }
 
 // The run metadata lives here; every measured field flattens in from
@@ -151,7 +151,7 @@ impl BenchReport {
 }
 
 impl BenchManifest {
-    pub fn new(config: BenchConfig, seed: u64) -> Self {
+    pub const fn new(config: BenchConfig, seed: u64) -> Self {
         Self {
             schema_version: BENCH_MANIFEST_SCHEMA_VERSION,
             config,
@@ -161,16 +161,22 @@ impl BenchManifest {
 }
 
 impl LatencyHistogramsRecorder {
-    pub fn record_read(&self, duration: Duration) {
+    pub fn record_read(&mut self, duration: Duration) {
         self.read.record(duration);
     }
 
-    pub fn record_write(&self, duration: Duration) {
+    pub fn record_write(&mut self, duration: Duration) {
         self.write.record(duration);
     }
 
-    pub fn record_scan(&self, duration: Duration) {
+    pub fn record_scan(&mut self, duration: Duration) {
         self.scan.record(duration);
+    }
+
+    pub fn merge(&mut self, other: &Self) {
+        self.read.merge(&other.read);
+        self.write.merge(&other.write);
+        self.scan.merge(&other.scan);
     }
 
     pub fn snapshot(&self) -> LatencyHistograms {
@@ -183,28 +189,30 @@ impl LatencyHistogramsRecorder {
 }
 
 impl LatencyHistogramRecorder {
-    fn record(&self, duration: Duration) {
+    fn record(&mut self, duration: Duration) {
         let micros = duration_to_micros(duration);
         let bucket = LATENCY_BUCKET_UPPER_BOUNDS_US
             .iter()
             .position(|bound| micros <= *bound)
             .unwrap_or(LATENCY_BUCKET_UPPER_BOUNDS_US.len());
-        self.counts[bucket].fetch_add(1, Ordering::Relaxed);
-        self.min_us.fetch_min(micros, Ordering::Relaxed);
-        self.max_us.fetch_max(micros, Ordering::Relaxed);
+        self.counts[bucket] += 1;
+        self.min_us = self.min_us.min(micros);
+        self.max_us = self.max_us.max(micros);
+    }
+
+    fn merge(&mut self, other: &Self) {
+        for (count, other) in self.counts.iter_mut().zip(&other.counts) {
+            *count += other;
+        }
+        self.min_us = self.min_us.min(other.min_us);
+        self.max_us = self.max_us.max(other.max_us);
     }
 
     fn snapshot(&self) -> LatencyHistogram {
-        let counts = self
-            .counts
-            .iter()
-            .map(|count| count.load(Ordering::Relaxed))
-            .collect::<Vec<_>>();
+        let counts = &self.counts;
         let count = counts.iter().sum();
-        let max_us = self.max_us.load(Ordering::Relaxed);
-        let min_us = self.min_us.load(Ordering::Relaxed);
-        let max_us = if count == 0 { None } else { Some(max_us) };
-        let min_us = if count == 0 { None } else { Some(min_us) };
+        let max_us = if count == 0 { None } else { Some(self.max_us) };
+        let min_us = if count == 0 { None } else { Some(self.min_us) };
         let buckets = counts
             .iter()
             .enumerate()
@@ -219,9 +227,9 @@ impl LatencyHistogramRecorder {
             count,
             min_us,
             max_us,
-            p50_us: percentile_upper_bound_us(&counts, 0.50, max_us),
-            p95_us: percentile_upper_bound_us(&counts, 0.95, max_us),
-            p99_us: percentile_upper_bound_us(&counts, 0.99, max_us),
+            p50_us: percentile_upper_bound_us(counts, 0.50, max_us),
+            p95_us: percentile_upper_bound_us(counts, 0.95, max_us),
+            p99_us: percentile_upper_bound_us(counts, 0.99, max_us),
             buckets,
         }
     }
@@ -230,11 +238,9 @@ impl LatencyHistogramRecorder {
 impl Default for LatencyHistogramRecorder {
     fn default() -> Self {
         Self {
-            counts: (0..=LATENCY_BUCKET_UPPER_BOUNDS_US.len())
-                .map(|_| AtomicU64::new(0))
-                .collect(),
-            min_us: AtomicU64::new(u64::MAX),
-            max_us: AtomicU64::new(0),
+            counts: vec![0; LATENCY_BUCKET_UPPER_BOUNDS_US.len() + 1],
+            min_us: u64::MAX,
+            max_us: 0,
         }
     }
 }
@@ -458,14 +464,14 @@ mod tests {
     }
 
     fn sample_report() -> BenchReport {
-        let latencies = LatencyHistogramsRecorder::default();
+        let mut latencies = LatencyHistogramsRecorder::default();
         latencies.record_read(Duration::from_micros(100));
         latencies.record_read(Duration::from_micros(2_000));
         latencies.record_write(Duration::from_micros(500));
 
         BenchReport {
             config: BenchConfig {
-                endpoint: "http://localhost:10000".to_string(),
+                endpoint: "http://localhost:8080".to_string(),
                 namespace: 42,
                 key_space: 1_000,
                 total_ops: 10_000,
@@ -547,7 +553,7 @@ mod tests {
 
     #[test]
     fn latency_histogram_uses_fixed_buckets_and_bucket_percentiles() {
-        let latencies = LatencyHistogramsRecorder::default();
+        let mut latencies = LatencyHistogramsRecorder::default();
         latencies.record_read(Duration::from_micros(100));
         latencies.record_read(Duration::from_micros(2_000));
         latencies.record_read(Duration::from_micros(6_000_000));
@@ -562,6 +568,29 @@ mod tests {
         assert_eq!(histogram.buckets[0].count, 1);
         assert_eq!(histogram.buckets.last().unwrap().upper_bound_us, None);
         assert_eq!(histogram.buckets.last().unwrap().count, 1);
+    }
+
+    #[test]
+    fn merged_latency_histograms_match_one_recorder() {
+        let samples = [100, 2_000, 6_000_000, 450, 30];
+        let mut whole = LatencyHistogramsRecorder::default();
+        let mut first = LatencyHistogramsRecorder::default();
+        let mut second = LatencyHistogramsRecorder::default();
+        for (i, micros) in samples.into_iter().enumerate() {
+            let duration = Duration::from_micros(micros);
+            whole.record_read(duration);
+            whole.record_scan(duration);
+            let part = if i < 2 { &mut first } else { &mut second };
+            part.record_read(duration);
+            part.record_scan(duration);
+        }
+
+        let mut merged = LatencyHistogramsRecorder::default();
+        merged.merge(&first);
+        merged.merge(&second);
+        assert_eq!(merged.snapshot(), whole.snapshot());
+        assert_eq!(merged.snapshot().write.count, 0);
+        assert_eq!(merged.snapshot().write.min_us, None);
     }
 
     #[test]

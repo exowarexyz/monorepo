@@ -10,6 +10,9 @@ homepage.workspace = true
 repository = "https://github.com/exowarexyz/monorepo/tree/main/validation"
 documentation = "https://docs.rs/exoware-validation"
 
+[lints]
+workspace = true
+
 [dependencies]
 exoware-sdk = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

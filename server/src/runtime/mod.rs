@@ -4,20 +4,18 @@ mod clock;
 mod hyper;
 pub mod simulated;
 
+#[cfg(test)]
+pub(crate) use clock::testing;
+pub(crate) use clock::Expiry;
+pub use clock::{Clock, Deadline, Elapsed, TokioClock};
+use futures::{channel::oneshot, future::BoxFuture};
+pub use hyper::{Executor, TaskSet, TaskSpawner, Timer};
 use std::{
     future::Future,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
 };
-
-use futures::{channel::oneshot, future::BoxFuture};
-
-#[cfg(test)]
-pub(crate) use clock::testing;
-pub(crate) use clock::Expiry;
-pub use clock::{Clock, Deadline, Elapsed, TokioClock};
-pub use hyper::{Executor, TaskSet, TaskSpawner, Timer};
 
 /// A task failed or was cancelled before producing its result.
 #[derive(Debug, thiserror::Error)]

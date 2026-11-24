@@ -1,22 +1,26 @@
 //! Exoware load generator.
 //!
 //! Usage:
-//!   validation load --url http://localhost:10000 --keys 10000
+//!   validation load --url http://localhost:8080 --keys 10000
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Instant;
-
+use crate::{
+    client::{build_client, ClientArgs, ClientConfig},
+    exec::{join_all_or_abort, spawn_progress_task, stop_progress_task},
+    ingest::{ingest_with_retry, IngestRetryArgs, DEFAULT_INGEST_BATCH_SIZE},
+    keyspace::{default_run_namespace, Keyspace, KeyspaceArgs},
+    record::Record,
+    value::{value_for_index, DEFAULT_VALUE_SIZE},
+    workload::worker_index_range,
+};
 use anyhow::ensure;
+use std::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Instant,
+};
 use tokio::task::JoinSet;
-
-use crate::client::{build_client, ClientArgs, ClientConfig};
-use crate::exec::{join_all_or_abort, spawn_progress_task, stop_progress_task};
-use crate::ingest::{ingest_with_retry, IngestRetryArgs, DEFAULT_INGEST_BATCH_SIZE};
-use crate::keyspace::{default_run_namespace, Keyspace, KeyspaceArgs};
-use crate::record::Record;
-use crate::value::{value_for_index, DEFAULT_VALUE_SIZE};
-use crate::workload::worker_index_range;
 
 /// Load phase: insert keys via ingest API.
 #[derive(clap::Args, Debug)]
@@ -228,16 +232,22 @@ async fn run_load(config: Config) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::Arc;
-
     use super::*;
-    use crate::client::RequestCompression;
-    use crate::keyspace::DEFAULT_KEY_LEN;
-    use axum::Router;
+    use crate::{client::RequestCompression, keyspace::DEFAULT_KEY_LEN};
+    use axum::{
+        serve::{Listener, ListenerExt},
+        Router,
+    };
     use connectrpc::{ConnectError, ConnectRpcService, RequestContext, ServiceRequest};
-    use exoware_sdk::ingest::{
-        PutRequest, PutResponse, Service as IngestService, ServiceServer as IngestServiceServer,
+    use exoware_sdk::{
+        ingest::{
+            PutRequest, PutResponse, Service as IngestService, ServiceServer as IngestServiceServer,
+        },
+        transport::set_tcp_nodelay,
+    };
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
     };
 
     #[derive(Clone, Copy)]
@@ -287,7 +297,8 @@ mod tests {
         let app = Router::new().fallback_service(connect);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("bind test listener");
+            .expect("bind test listener")
+            .tap_io(set_tcp_nodelay);
         let url = format!(
             "http://{}",
             listener.local_addr().expect("listener address")
@@ -301,7 +312,7 @@ mod tests {
     fn sample_args() -> Args {
         Args {
             client: ClientArgs {
-                url: "http://localhost:10000/".to_string(),
+                url: "http://localhost:8080/".to_string(),
                 read_retry_attempts: 3,
                 request_compression: RequestCompression::default(),
             },
@@ -324,7 +335,7 @@ mod tests {
     #[test]
     fn config_normalizes_url() {
         let config = Config::try_from(sample_args()).expect("load args should be valid");
-        assert_eq!(config.client.endpoint(), "http://localhost:10000");
+        assert_eq!(config.client.endpoint(), "http://localhost:8080");
     }
 
     #[test]

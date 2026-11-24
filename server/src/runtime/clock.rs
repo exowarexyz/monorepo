@@ -1,3 +1,4 @@
+use futures::future::{BoxFuture, Either};
 use std::{
     fmt,
     future::Future,
@@ -6,8 +7,6 @@ use std::{
     task::{Context, Poll},
     time::{Duration, SystemTime},
 };
-
-use futures::future::{BoxFuture, Either};
 
 /// A monotonic timeline shared by deadlines and elapsed-time measurements.
 ///
@@ -113,7 +112,7 @@ impl Deadline {
         Expiry::new(self.clock(), self.at).await;
     }
 
-    pub fn at(&self) -> SystemTime {
+    pub const fn at(&self) -> SystemTime {
         self.at
     }
 
@@ -184,7 +183,6 @@ impl Future for Expiry<'_> {
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
-
     use commonware_runtime::{deterministic, Clock as _};
 
     pub(crate) fn tokio_deadline(timeout: Duration) -> Deadline {
@@ -246,10 +244,11 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        testing::{tokio_deadline, SimulatedClock},
+        *,
+    };
     use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
-
-    use super::testing::{tokio_deadline, SimulatedClock};
-    use super::*;
 
     #[test]
     fn deadline_allocates_only_when_waiting_and_cancels_its_sleep() {

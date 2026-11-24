@@ -1,5 +1,3 @@
-use std::{num::NonZeroUsize, time::Duration};
-
 use commonware_codec::{Encode, RangeCfg};
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_parallel::{Rayon, Sequential, Strategy};
@@ -8,9 +6,8 @@ use commonware_storage::{
     qmdb::keyless::variable::Operation,
 };
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use exoware_qmdb::{
-    adapter::upload::prepare_authenticated_range, adapter::upload::AuthenticatedOperationRange,
-};
+use exoware_qmdb::adapter::upload::{prepare_authenticated_range, AuthenticatedOperationRange};
+use std::{num::NonZeroUsize, time::Duration};
 
 type Family = mmr::Family;
 type BatchOperation = Operation<Family, Vec<u8>>;
