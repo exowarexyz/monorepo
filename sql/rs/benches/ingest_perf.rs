@@ -243,15 +243,22 @@ fn sql_insert(c: &mut Criterion) {
         .enable_all()
         .build()
         .unwrap();
-    let app = Router::new().route_service(
-        "/log.ingest.v1.Service/Put",
-        exoware_server::ingest_service(IngestState::new(Arc::new(Discard::default()))),
-    );
-    let listener = runtime
-        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
-        .unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let server = runtime.spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (url, server) = runtime.block_on(async {
+        let state = IngestState::new(
+            exoware_server::runtime::TokioRuntime::current(),
+            Arc::new(Discard::default()),
+        );
+        let app = Router::new().route_service(
+            "/log.ingest.v1.Service/Put",
+            exoware_server::ingest_service(state),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        (
+            url,
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() }),
+        )
+    });
     let client = StoreClient::builder()
         .url(&url)
         .client_transport(connectrpc::client::HttpClient::plaintext_http2_only())

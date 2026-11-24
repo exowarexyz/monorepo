@@ -17,14 +17,15 @@ traits also satisfies `StoreEngine`.
 Once your backend implements those traits, this function serves it on localhost:
 
 ```rust
-use exoware_server::{connect_stack, ingest::transport, AppState, StoreEngine};
+use exoware_server::{connect_stack, ingest::transport, runtime::TokioRuntime, AppState, StoreEngine};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
 async fn serve<E: StoreEngine>(engine: Arc<E>) -> std::io::Result<()> {
-    let service = connect_stack(AppState::new(engine));
+    let runtime = TokioRuntime::current();
+    let service = connect_stack(AppState::new(runtime.clone(), engine));
     let listener = TcpListener::bind("127.0.0.1:8080").await?;
-    transport::serve(listener, service, std::future::pending()).await
+    transport::serve(runtime, listener, service, std::future::pending()).await
 }
 ```
 
@@ -82,11 +83,32 @@ to return the standard details and retry hint.
 
 ## Configure limits and resources
 
+### Ingestion runtime
+
+Pass the same `Arc<dyn runtime::Runtime>` to `AppState::new`,
+`IngestState::new`, and `ingest::transport::serve`. The runtime supplies the
+shared clock, scoped asynchronous tasks, and CPU execution. Production Tokio
+applications select `runtime::TokioRuntime::current()` at construction. Other
+applications implement `runtime::Runtime` with their executor and clock.
+There is no implicit runtime selection in Put configuration.
+
+Request and connection deadlines, idle timeouts, and Hyper timers all use the
+selected clock. `TokioClock` follows monotonic Tokio time, including paused time.
+A deterministic adapter can run the same transport and ingestion code without
+entering Tokio. The `runtime::simulated` module provides bounded byte streams
+with fragmentation, read/write gates, reset, EOF, and half-close controls.
+
+Direct `PutInput` callers supply a `runtime::Deadline` and a decode executor.
+`RuntimeDecodeExecutor` delegates to the selected runtime. CPU work owns its
+captures until completion after cancellation. Dropping an asynchronous `Task`
+requests cancellation, while graceful server shutdown stops accepting and drains
+existing connections.
+
 ### Put limits and timeouts
 
 Use `AppState::with_ingest_limits` to set validation limits and
 `AppState::with_put_config` to configure transport admission, wire size, deadlines,
-the clock, and observation. Ingest-only services expose the same controls through
+and observation. Ingest-only services expose the same controls through
 `IngestState`. Custom clients must send Connect unary protobuf with identity or
 bounded single-frame zstd encoding.
 
@@ -98,12 +120,6 @@ can override it with the `connect-timeout-ms` header, up to a five-minute ceilin
 The idle timeout includes waiting for HTTP EOF but excludes decoding and backend
 processing time. Set it to `None` to rely only on the absolute deadline, and size
 both timeouts for the maximum accepted request and the slowest supported link.
-
-`PutConfig.clock` controls request deadlines, idle timeouts, and elapsed-time
-measurements. It defaults to `TokioClock`. Deterministic tests can supply a
-`PutClock` backed by their runtime. Use a monotonic clock in production.
-Connection timers stay on Tokio. To run Put without a Tokio runtime, also replace
-the default blocking decoder through `PutInput::set_executor`.
 
 ### Put admission and memory
 

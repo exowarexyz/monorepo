@@ -32,8 +32,10 @@ use exoware_sdk::{common::kv::v1::Entry, log::ingest::v1::PutRequest};
 use exoware_server::{
     ingest::{
         box_body, BudgetConfig, IngestBudget, IngestEvent, IngestObserver, PutLimits, PutMetadata,
+        RuntimeDecodeExecutor,
     },
-    Ingest, PutDeadline, PutInput, TokioClock,
+    runtime::TokioRuntime,
+    Deadline, Ingest, PutInput,
 };
 use exoware_simulator::RocksStore;
 use std::{
@@ -353,7 +355,13 @@ fn rows_bytes(rows: &[(Bytes, Bytes)]) -> usize {
 }
 
 /// Submits one request through the direct or streaming ingest path.
-async fn submit(store: &RocksStore, batch: Batch, fragment_bytes: usize, observed: &Arc<Observed>) {
+async fn submit(
+    store: &RocksStore,
+    batch: Batch,
+    fragment_bytes: usize,
+    observed: &Arc<Observed>,
+    decode: &Arc<RuntimeDecodeExecutor>,
+) {
     match batch {
         Batch::Direct(batch) => {
             store.put_batch(batch).await.expect("put batch");
@@ -378,8 +386,9 @@ async fn submit(store: &RocksStore, batch: Batch, fragment_bytes: usize, observe
                     ..Default::default()
                 },
                 PutLimits::default(),
-                PutDeadline::after(Arc::new(TokioClock::new()), Duration::from_secs(300)),
+                Deadline::after(decode.0.clock(), Duration::from_secs(300)),
                 admission,
+                decode.clone(),
             )
             .with_observer(observed.clone());
             store.put(&mut input).await.expect("streaming put");
@@ -394,6 +403,7 @@ async fn run(
     fragment_bytes: usize,
     observed: Arc<Observed>,
 ) -> (f64, usize, usize) {
+    let decode = Arc::new(RuntimeDecodeExecutor(TokioRuntime::current()));
     let mut queues: Vec<Vec<Block>> = (0..writers).map(|_| Vec::new()).collect();
     for (index, block) in blocks.into_iter().enumerate() {
         queues[index % writers].push(block);
@@ -406,6 +416,7 @@ async fn run(
     for queue in queues {
         let store = store.clone();
         let observed = observed.clone();
+        let decode = decode.clone();
         tasks.push(tokio::spawn(async move {
             for block in queue {
                 // A block's requests are in flight together, as the publisher sends them, and
@@ -413,10 +424,10 @@ async fn run(
                 let requests = block
                     .requests
                     .into_iter()
-                    .map(|batch| submit(&store, batch, fragment_bytes, &observed));
+                    .map(|batch| submit(&store, batch, fragment_bytes, &observed, &decode));
                 futures::future::join_all(requests).await;
                 if let Some(artifact) = block.artifact {
-                    submit(&store, artifact, fragment_bytes, &observed).await;
+                    submit(&store, artifact, fragment_bytes, &observed, &decode).await;
                 }
             }
         }));

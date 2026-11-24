@@ -260,7 +260,16 @@ async fn handler(
     let path = request.uri().path().to_owned();
     let version = request.version();
     if path == "/health" {
-        assert_eq!(control.arm_http1(Version::HTTP_2, Instant::now()), None);
+        assert_eq!(
+            control.arm_http1(
+                Version::HTTP_2,
+                exoware_server::runtime::Deadline::after(
+                    Arc::new(exoware_server::runtime::TokioClock::new()),
+                    Duration::ZERO
+                )
+            ),
+            None
+        );
         return Ok(Response::new(Body::empty()));
     }
     if path == "/hold" {
@@ -283,7 +292,13 @@ async fn handler(
     if path.contains("delayed") {
         sleep(Duration::from_millis(160)).await;
     }
-    let id = control.arm_http1(version, deadline);
+    let id = control.arm_http1(
+        version,
+        exoware_server::runtime::Deadline::after(
+            Arc::new(exoware_server::runtime::TokioClock::new()),
+            deadline.saturating_duration_since(Instant::now()),
+        ),
+    );
 
     // Run the previous request's cleanup only after its successor is armed.
     if let Some(stale_id) = stats.stale_id.lock().unwrap().take() {
@@ -396,7 +411,11 @@ impl Server {
             timeout: DEADLINE,
             ..PutConfig::default()
         };
-        let state = IngestState::new(Arc::new(ConsumeIngest)).with_put_config(config);
+        let state = IngestState::new(
+            exoware_server::runtime::TokioRuntime::current(),
+            Arc::new(ConsumeIngest),
+        )
+        .with_put_config(config);
         let ingest = ingest_service(state).with_put_middleware(DelayMiddleware);
         let requests = stats.clone();
         let service = service_fn(move |request: Request<Body>| {
@@ -432,10 +451,15 @@ impl Server {
         let (shutdown, receive) = oneshot::channel();
         let shutdown_stats = stats.clone();
         let task = tokio::spawn(async move {
-            serve(listener, service, async {
-                let _ = receive.await;
-                shutdown_stats.shutdown_started.notify_one();
-            })
+            serve(
+                exoware_server::runtime::TokioRuntime::current(),
+                listener,
+                service,
+                async {
+                    let _ = receive.await;
+                    shutdown_stats.shutdown_started.notify_one();
+                },
+            )
             .await
             .unwrap();
         });
@@ -486,7 +510,9 @@ impl Server {
             stats: stats.clone(),
             gate,
         };
-        let service = ingest_service(IngestState::new(backend).with_put_config(config));
+        let runtime = exoware_server::runtime::TokioRuntime::current();
+        let service =
+            ingest_service(IngestState::new(runtime.clone(), backend).with_put_config(config));
         let requests = stats.clone();
         let service = service_fn(move |request: Request<Body>| {
             let service = service.clone();
@@ -515,7 +541,7 @@ impl Server {
         });
         let (shutdown, receive) = oneshot::channel();
         let task = tokio::spawn(async move {
-            serve(listener, service, async {
+            serve(runtime, listener, service, async {
                 let _ = receive.await;
             })
             .await
@@ -932,12 +958,16 @@ async fn http1_finished_upload_keeps_backend_timeout_response_and_connection() -
             gate: Arc::new(Gate::default()),
         };
         let backend = Arc::new(FinishedUploadIngest::default());
-        let service = ingest_service(IngestState::new(backend.clone()).with_put_config(
-            PutConfig {
+        let service = ingest_service(
+            IngestState::new(
+                exoware_server::runtime::TokioRuntime::current(),
+                backend.clone(),
+            )
+            .with_put_config(PutConfig {
                 timeout: request_timeout,
                 ..PutConfig::default()
-            },
-        ));
+            }),
+        );
         let handler_gate = Arc::new(Gate::default());
         handler_gate.blocked.store(true, Ordering::SeqCst);
         let held_at_deadline = Arc::new(Notify::new());
@@ -976,9 +1006,14 @@ async fn http1_finished_upload_keeps_backend_timeout_response_and_connection() -
         });
         let (shutdown, receive) = oneshot::channel();
         let task = tokio::spawn(async move {
-            serve(listener, service, async {
-                let _ = receive.await;
-            })
+            serve(
+                exoware_server::runtime::TokioRuntime::current(),
+                listener,
+                service,
+                async {
+                    let _ = receive.await;
+                },
+            )
             .await
             .unwrap();
         });
@@ -1104,10 +1139,16 @@ async fn production_body_size_admission_and_declared_length_validation() {
             release: tokio::sync::Semaphore::new(0),
         });
         let budget = IngestBudget::new(BudgetConfig::default());
-        let service = ingest_service(IngestState::new(ingest.clone()).with_put_config(PutConfig {
-            budget: budget.clone(),
-            ..PutConfig::default()
-        }));
+        let service = ingest_service(
+            IngestState::new(
+                exoware_server::runtime::TokioRuntime::current(),
+                ingest.clone(),
+            )
+            .with_put_config(PutConfig {
+                budget: budget.clone(),
+                ..PutConfig::default()
+            }),
+        );
         let mut tasks = Vec::new();
         for _ in 0..count {
             let mut request =
@@ -1220,7 +1261,11 @@ async fn production_metadata_rejections_precede_exhausted_admission() {
             max_bytes: 0,
         });
         let service = ingest_service(
-            IngestState::new(Arc::new(UnreachableIngest)).with_put_config(PutConfig {
+            IngestState::new(
+                exoware_server::runtime::TokioRuntime::current(),
+                Arc::new(UnreachableIngest),
+            )
+            .with_put_config(PutConfig {
                 budget: budget.clone(),
                 ..PutConfig::default()
             }),
@@ -1293,7 +1338,10 @@ async fn production_unsupported_methods_preserve_http_and_client_errors() {
         http::Method::DELETE,
         http::Method::GET,
     ] {
-        let service = ingest_service(IngestState::new(Arc::new(UnreachableIngest)));
+        let service = ingest_service(IngestState::new(
+            exoware_server::runtime::TokioRuntime::current(),
+            Arc::new(UnreachableIngest),
+        ));
         let request = Request::builder()
             .method(method.clone())
             .uri(PUT_PATH)
@@ -1333,12 +1381,16 @@ async fn production_known_bounds_are_enforced_and_maximum_still_validates() {
     use tower::ServiceExt;
 
     for (declared, maximum) in [(4, 32), (32, 4)] {
-        let service = ingest_service(IngestState::new(Arc::new(ConsumeIngest)).with_put_config(
-            PutConfig {
+        let service = ingest_service(
+            IngestState::new(
+                exoware_server::runtime::TokioRuntime::current(),
+                Arc::new(ConsumeIngest),
+            )
+            .with_put_config(PutConfig {
                 max_wire_bytes: maximum,
                 ..PutConfig::default()
-            },
-        ));
+            }),
+        );
         let request = Request::post(PUT_PATH)
             .header(header::CONTENT_TYPE, "application/proto")
             .header(header::CONTENT_LENGTH, declared)
@@ -1360,7 +1412,11 @@ async fn production_exact_length_exceeding_maximum_rejects_before_backend() {
 
     for declared in [None, Some(1), Some(32)] {
         let service = ingest_service(
-            IngestState::new(Arc::new(UnreachableIngest)).with_put_config(PutConfig {
+            IngestState::new(
+                exoware_server::runtime::TokioRuntime::current(),
+                Arc::new(UnreachableIngest),
+            )
+            .with_put_config(PutConfig {
                 max_wire_bytes: 4,
                 ..PutConfig::default()
             }),
@@ -1442,10 +1498,13 @@ async fn production_known_body_copies_fit_without_another_full_wire_reservation(
         max_bytes: 4096,
     });
     let service = ingest_service(
-        IngestState::new(Arc::new(CopyHeldIngest {
-            entered: entered.clone(),
-            release: release.clone(),
-        }))
+        IngestState::new(
+            exoware_server::runtime::TokioRuntime::current(),
+            Arc::new(CopyHeldIngest {
+                entered: entered.clone(),
+                release: release.clone(),
+            }),
+        )
         .with_put_config(PutConfig {
             budget: budget.clone(),
             ..PutConfig::default()
@@ -1490,7 +1549,9 @@ impl exoware_server::ingest::DecodeExecutor for CountedIngest {
     {
         self.0.fetch_add(1, Ordering::Relaxed);
         exoware_server::ingest::DecodeExecutor::execute(
-            &exoware_server::ingest::BlockingDecodeExecutor,
+            &exoware_server::ingest::RuntimeDecodeExecutor(
+                exoware_server::runtime::TokioRuntime::current(),
+            ),
             state,
             buffers,
         )
@@ -1515,11 +1576,19 @@ async fn production_http1_fragmented_upload_amortizes_cpu_handoffs() -> Result<(
     let jobs = Arc::new(AtomicUsize::new(0));
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
-    let service = ingest_service(IngestState::new(Arc::new(CountedIngest(jobs.clone()))));
+    let service = ingest_service(IngestState::new(
+        exoware_server::runtime::TokioRuntime::current(),
+        Arc::new(CountedIngest(jobs.clone())),
+    ));
     let (shutdown, stop) = oneshot::channel();
-    let server = tokio::spawn(serve(listener, service, async {
-        let _ = stop.await;
-    }));
+    let server = tokio::spawn(serve(
+        exoware_server::runtime::TokioRuntime::current(),
+        listener,
+        service,
+        async {
+            let _ = stop.await;
+        },
+    ));
     let wire = TINY_PUT.repeat(128);
     let mut request = format!("POST {PUT_PATH} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/proto\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").into_bytes();
     for byte in &wire {
@@ -1548,8 +1617,12 @@ async fn http2_completed_rejections_preserve_connect_errors() -> Result<(), Erro
     for admission_exhausted in [true, false] {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
-        let service = ingest_service(IngestState::new(Arc::new(ConsumeIngest)).with_put_config(
-            PutConfig {
+        let service = ingest_service(
+            IngestState::new(
+                exoware_server::runtime::TokioRuntime::current(),
+                Arc::new(ConsumeIngest),
+            )
+            .with_put_config(PutConfig {
                 max_wire_bytes: 4,
                 budget: exoware_server::ingest::IngestBudget::new(
                     exoware_server::ingest::BudgetConfig {
@@ -1558,12 +1631,17 @@ async fn http2_completed_rejections_preserve_connect_errors() -> Result<(), Erro
                     },
                 ),
                 ..PutConfig::default()
+            }),
+        );
+        let (shutdown, stop) = oneshot::channel();
+        let server = tokio::spawn(serve(
+            exoware_server::runtime::TokioRuntime::current(),
+            listener,
+            service,
+            async {
+                let _ = stop.await;
             },
         ));
-        let (shutdown, stop) = oneshot::channel();
-        let server = tokio::spawn(serve(listener, service, async {
-            let _ = stop.await;
-        }));
 
         let uri: http::Uri = format!("http://{addr}").parse().unwrap();
         let transport = connectrpc::client::Http2Connection::connect_plaintext(uri.clone())
@@ -1617,16 +1695,25 @@ async fn http1_malformed_timeout_delivers_error_after_write_backpressure() -> Re
         stats: stats.clone(),
         gate: gate.clone(),
     };
-    let service = ingest_service(IngestState::new(Arc::new(ConsumeIngest)).with_put_config(
-        PutConfig {
+    let service = ingest_service(
+        IngestState::new(
+            exoware_server::runtime::TokioRuntime::current(),
+            Arc::new(ConsumeIngest),
+        )
+        .with_put_config(PutConfig {
             timeout: DEADLINE,
             ..PutConfig::default()
+        }),
+    );
+    let (shutdown, receive) = oneshot::channel();
+    let server = tokio::spawn(serve(
+        exoware_server::runtime::TokioRuntime::current(),
+        listener,
+        service,
+        async {
+            let _ = receive.await;
         },
     ));
-    let (shutdown, receive) = oneshot::channel();
-    let server = tokio::spawn(serve(listener, service, async {
-        let _ = receive.await;
-    }));
     let mut tcp = client(addr).await?;
     tcp.write_all(b"POST /log.ingest.v1.Service/Put HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/proto\r\nconnect-timeout-ms: invalid\r\nContent-Length: 1\r\n\r\nx")
         .await?;
@@ -1658,11 +1745,19 @@ async fn http1_malformed_timeout_delivers_error_after_write_backpressure() -> Re
 async fn http2_malformed_timeout_preserves_connect_error() -> Result<(), Error> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
-    let service = ingest_service(IngestState::new(Arc::new(UnreachableIngest)));
+    let service = ingest_service(IngestState::new(
+        exoware_server::runtime::TokioRuntime::current(),
+        Arc::new(UnreachableIngest),
+    ));
     let (shutdown, stop) = oneshot::channel();
-    let server = tokio::spawn(serve(listener, service, async {
-        let _ = stop.await;
-    }));
+    let server = tokio::spawn(serve(
+        exoware_server::runtime::TokioRuntime::current(),
+        listener,
+        service,
+        async {
+            let _ = stop.await;
+        },
+    ));
     let (mut connection, driver) = h2::client::handshake(TcpStream::connect(addr).await?).await?;
     let driver = tokio::spawn(driver);
     let request = Request::post(format!("http://{addr}{PUT_PATH}"))
@@ -1709,21 +1804,30 @@ async fn http1_host_timeout_releases_stalled_uploads_during_shutdown() -> Result
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         let budget = IngestBudget::new(BudgetConfig::default());
-        let service = ingest_service(IngestState::new(Arc::new(ConsumeIngest)).with_put_config(
-            PutConfig {
+        let service = ingest_service(
+            IngestState::new(
+                exoware_server::runtime::TokioRuntime::current(),
+                Arc::new(ConsumeIngest),
+            )
+            .with_put_config(PutConfig {
                 budget: budget.clone(),
                 timeout: fallback,
                 max_timeout: cap,
                 idle_timeout: None,
                 ..PutConfig::default()
-            },
-        ));
+            }),
+        );
         let (shutdown, receive) = oneshot::channel();
         let (started, shutdown_started) = oneshot::channel();
-        let mut server = tokio::spawn(serve(listener, service, async {
-            let _ = receive.await;
-            let _ = started.send(());
-        }));
+        let mut server = tokio::spawn(serve(
+            exoware_server::runtime::TokioRuntime::current(),
+            listener,
+            service,
+            async {
+                let _ = receive.await;
+                let _ = started.send(());
+            },
+        ));
         let first = Instant::now();
         let mut clients = Vec::new();
         for _ in 0..count {
@@ -1769,18 +1873,27 @@ async fn http2_host_timeout_releases_a_stalled_upload() -> Result<(), Error> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
     let budget = IngestBudget::new(BudgetConfig::default());
-    let service = ingest_service(IngestState::new(Arc::new(ConsumeIngest)).with_put_config(
-        PutConfig {
+    let service = ingest_service(
+        IngestState::new(
+            exoware_server::runtime::TokioRuntime::current(),
+            Arc::new(ConsumeIngest),
+        )
+        .with_put_config(PutConfig {
             budget: budget.clone(),
             max_timeout: cap,
             idle_timeout: None,
             ..PutConfig::default()
+        }),
+    );
+    let (shutdown, receive) = oneshot::channel();
+    let server = tokio::spawn(serve(
+        exoware_server::runtime::TokioRuntime::current(),
+        listener,
+        service,
+        async {
+            let _ = receive.await;
         },
     ));
-    let (shutdown, receive) = oneshot::channel();
-    let server = tokio::spawn(serve(listener, service, async {
-        let _ = receive.await;
-    }));
     let mut h2 = Http2::open(addr).await?;
     let first = Instant::now();
     let request = Request::post(format!("http://{addr}{PUT_PATH}"))

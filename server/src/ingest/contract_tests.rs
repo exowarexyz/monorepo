@@ -69,6 +69,9 @@ async fn parse_fragmented(
         },
         tokio_deadline(Duration::from_secs(30)),
         admission,
+        std::sync::Arc::new(crate::ingest::RuntimeDecodeExecutor(
+            crate::runtime::TokioRuntime::current(),
+        )),
     );
     input.set_executor(Arc::new(InlineExecutor));
     let mut entries = Vec::new();
@@ -419,6 +422,9 @@ async fn declared_field_length_beyond_the_decoded_bound_does_not_reserve_the_mes
             PutLimits::default(),
             tokio_deadline(Duration::from_secs(30)),
             admission,
+            std::sync::Arc::new(crate::ingest::RuntimeDecodeExecutor(
+                crate::runtime::TokioRuntime::current(),
+            )),
         );
         input.set_executor(Arc::new(InlineExecutor));
         let mut peak = 0;

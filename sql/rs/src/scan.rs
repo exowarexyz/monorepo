@@ -719,10 +719,7 @@ pub(crate) async fn flush_projected_batch<'a>(
         ProjectedBatchBuilder::from_access_plan(ctx.model, ctx.access_plan),
     );
     let batch = ready.finish(ctx.projected_schema)?;
-    if tx.send(Ok(batch)).await.is_err() {
-        return Ok(false);
-    }
-    Ok(true)
+    Ok(tx.send(Ok(batch)).await.is_ok())
 }
 
 /// Streams matching rows through point reads, a secondary index, or primary-key ranges.

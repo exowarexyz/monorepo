@@ -7,7 +7,11 @@ use axum::{
     Router,
 };
 use exoware_sdk::{transport::set_tcp_nodelay, PreferZstdLayer};
-use exoware_server::{connect_stack, AppState};
+use exoware_server::{
+    connect_stack,
+    runtime::{Runtime, TokioRuntime},
+    AppState,
+};
 use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
 use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
@@ -41,10 +45,10 @@ fn store_config(max_open_files: i32) -> RocksConfig {
 }
 
 /// The simulator's routes, shared by [`run`] and [`open_temp`] so tests serve the same stack.
-fn app(engine: RocksStore) -> Router {
+fn app(runtime: Arc<dyn Runtime>, engine: RocksStore) -> Router {
     Router::new()
         .route("/health", get(health))
-        .fallback_service(connect_stack(AppState::new(Arc::new(engine))))
+        .fallback_service(connect_stack(AppState::new(runtime, Arc::new(engine))))
         .layer(PreferZstdLayer)
         .layer(CorsLayer::very_permissive())
 }
@@ -55,17 +59,19 @@ pub async fn run(
     port: u16,
     max_open_files: i32,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let app = app(RocksStore::open(
-        directory,
-        Some(store_config(max_open_files)),
-    )?);
+    let runtime = TokioRuntime::current();
+    let app = app(
+        runtime.clone(),
+        RocksStore::open(directory, Some(store_config(max_open_files)))?,
+    );
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     info!(%addr, directory = %directory.display(), "store simulator listening");
     let listener = tokio::net::TcpListener::bind(addr)
         .await?
         .tap_io(set_tcp_nodelay);
-    exoware_server::ingest::transport::serve(listener, app, std::future::pending()).await?;
+    exoware_server::ingest::transport::serve(runtime, listener, app, std::future::pending())
+        .await?;
     Ok(())
 }
 
@@ -76,18 +82,24 @@ pub async fn run(
 pub async fn open_temp(
 ) -> Result<(tokio::task::JoinHandle<()>, String), Box<dyn std::error::Error + Send + Sync>> {
     let data_dir = tempfile::tempdir()?;
-    let app = app(RocksStore::open_owned(
-        data_dir,
-        Some(store_config(DEFAULT_MAX_OPEN_FILES)),
-    )?);
+    let runtime = TokioRuntime::current();
+    let app = app(
+        runtime.clone(),
+        RocksStore::open_owned(data_dir, Some(store_config(DEFAULT_MAX_OPEN_FILES)))?,
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await?
         .tap_io(set_tcp_nodelay);
     let port = listener.local_addr()?.port();
     let url = format!("http://127.0.0.1:{port}");
     let handle = tokio::spawn(async move {
-        let _ =
-            exoware_server::ingest::transport::serve(listener, app, std::future::pending()).await;
+        let _ = exoware_server::ingest::transport::serve(
+            runtime,
+            listener,
+            app,
+            std::future::pending(),
+        )
+        .await;
     });
     wait_for_health(&url).await?;
     Ok((handle, url))

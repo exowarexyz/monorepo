@@ -769,6 +769,9 @@ mod tests {
             PutLimits::default(),
             tokio_deadline(Duration::from_secs(1)),
             budget.try_admit(wire.len()).unwrap(),
+            std::sync::Arc::new(crate::ingest::RuntimeDecodeExecutor(
+                crate::runtime::TokioRuntime::current(),
+            )),
         );
         let chunk = input
             .next_batch(DecodeBuffers::new(64, 8))
@@ -824,6 +827,9 @@ mod tests {
             PutLimits::default(),
             tokio_deadline(Duration::from_secs(1)),
             budget.try_admit(wire.len()).unwrap(),
+            std::sync::Arc::new(crate::ingest::RuntimeDecodeExecutor(
+                crate::runtime::TokioRuntime::current(),
+            )),
         );
         let allocations = Arc::new(std::sync::Mutex::new(Vec::new()));
         input.set_executor(Arc::new(Inspect {
@@ -862,6 +868,9 @@ mod tests {
             PutLimits::default(),
             tokio_deadline(Duration::from_secs(1)),
             budget.try_admit(wire.len()).unwrap(),
+            std::sync::Arc::new(crate::ingest::RuntimeDecodeExecutor(
+                crate::runtime::TokioRuntime::current(),
+            )),
         );
         let chunk = input
             .next_batch(DecodeBuffers::new(64, 8))

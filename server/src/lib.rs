@@ -8,6 +8,7 @@ mod connect;
 mod engine;
 pub mod ingest;
 mod reduce;
+pub mod runtime;
 mod stream;
 mod validate;
 
@@ -33,7 +34,7 @@ pub use exoware_sdk::{
 pub use ingest::{
     parser::{decode_entry_with_budget, Field, PutEntryCursor, PutParseError, UnknownBudget},
     service::{PutConfig, PutMiddleware, PutService},
-    PutClock, PutDeadline, PutError, PutInput, TokioClock,
+    Clock, Deadline, PutError, PutInput, TokioClock,
 };
 pub use reduce::RangeError;
 pub use stream::{
