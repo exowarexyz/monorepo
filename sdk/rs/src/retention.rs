@@ -26,19 +26,19 @@ pub enum RetentionPolicy {
 impl Write for RetentionPolicy {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            RetentionPolicy::KeepLatest { count } => {
+            Self::KeepLatest { count } => {
                 0u8.write(buf);
                 count.write(buf);
             }
-            RetentionPolicy::GreaterThan { threshold } => {
+            Self::GreaterThan { threshold } => {
                 1u8.write(buf);
                 threshold.write(buf);
             }
-            RetentionPolicy::GreaterThanOrEqual { threshold } => {
+            Self::GreaterThanOrEqual { threshold } => {
                 2u8.write(buf);
                 threshold.write(buf);
             }
-            RetentionPolicy::DropAll => {
+            Self::DropAll => {
                 3u8.write(buf);
             }
         }
@@ -48,10 +48,10 @@ impl Write for RetentionPolicy {
 impl EncodeSize for RetentionPolicy {
     fn encode_size(&self) -> usize {
         1 + match self {
-            RetentionPolicy::KeepLatest { .. }
-            | RetentionPolicy::GreaterThan { .. }
-            | RetentionPolicy::GreaterThanOrEqual { .. } => u64::SIZE,
-            RetentionPolicy::DropAll => 0,
+            Self::KeepLatest { .. }
+            | Self::GreaterThan { .. }
+            | Self::GreaterThanOrEqual { .. } => u64::SIZE,
+            Self::DropAll => 0,
         }
     }
 }
@@ -60,16 +60,16 @@ impl Read for RetentionPolicy {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         match u8::read(buf)? {
-            0 => Ok(RetentionPolicy::KeepLatest {
+            0 => Ok(Self::KeepLatest {
                 count: u64::read(buf)?,
             }),
-            1 => Ok(RetentionPolicy::GreaterThan {
+            1 => Ok(Self::GreaterThan {
                 threshold: u64::read(buf)?,
             }),
-            2 => Ok(RetentionPolicy::GreaterThanOrEqual {
+            2 => Ok(Self::GreaterThanOrEqual {
                 threshold: u64::read(buf)?,
             }),
-            3 => Ok(RetentionPolicy::DropAll),
+            3 => Ok(Self::DropAll),
             v => Err(CodecError::InvalidEnum(v)),
         }
     }

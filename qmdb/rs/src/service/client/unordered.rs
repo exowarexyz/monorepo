@@ -1,52 +1,42 @@
 //! Verifying client for unordered QMDB.
 
-use std::collections::BTreeMap;
-use std::fmt::Display;
-
+use super::rpc::{
+    verify::verify_key_value_from_proto, CurrentOperationClient, KeyLookupClient,
+    OperationLogClient, OperationLogSubscription,
+};
+use crate::{
+    proof::{VerifiedCurrentRange, VerifiedKeyValue, VerifiedOperationRange},
+    service::proto::qmdb::v1::{
+        current_key_lookup_result, CurrentKeyLookupResult, CurrentKeyValueProof,
+        GetCurrentOperationRangeRequest, GetManyRequest, GetOperationRangeRequest, GetRequest,
+        SubscribeRequest,
+    },
+    QmdbError,
+};
 use bytes::Bytes;
-use commonware_codec::{Decode, DecodeExt, Encode, Read};
+use commonware_codec::{Encode, Read};
 use commonware_cryptography::Hasher;
-use commonware_storage::merkle::Location;
-use commonware_storage::qmdb::sync::Target as SyncTarget;
 use commonware_storage::{
-    merkle::Graftable,
+    merkle::{Graftable, Location},
     qmdb::{
-        any::{
-            unordered,
-            value::{ValueEncoding, VariableEncoding},
-        },
+        any::unordered,
         operation::Key as QmdbKey,
+        sync::Target as SyncTarget,
+        value::{ValueEncoding, VariableEncoding},
     },
 };
 use commonware_utils::range::NonEmptyRange;
 use connectrpc::client::{ClientConfig, ClientTransport};
 use exoware_sdk::proto::PreferZstdHttpClient;
 use http_body::Body;
-
-use super::rpc::OperationLogSubscription;
-use crate::proof::{VerifiedCurrentRange, VerifiedOperationRange};
-use crate::service::proto::qmdb::v1::{
-    GetCurrentOperationRangeRequest, GetManyRequest, GetOperationRangeRequest, GetRequest,
-    SubscribeRequest,
-};
-
-use crate::proof::VerifiedKeyValue;
-use crate::service::proto::qmdb::v1::{
-    current_key_lookup_result, CurrentKeyLookupResult, CurrentKeyValueProof,
-};
-use crate::QmdbError;
-
-use super::rpc::verify::verify_key_value_from_proto;
-use super::rpc::{CurrentOperationClient, KeyLookupClient, OperationLogClient};
+use std::{collections::BTreeMap, fmt::Display};
 
 /// Verifies unordered `KeyLookupService` responses: hits only, in request
 /// order.
 pub struct UnorderedLookupVerifier<F, H, K, V, const N: usize, E>
 where
     F: Graftable,
-    H: Hasher,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
     E: ValueEncoding<Value = V>,
     unordered::Operation<F, K, E>: Read,
 {
@@ -57,13 +47,11 @@ where
 impl<F, H, K, V, const N: usize, E> UnorderedLookupVerifier<F, H, K, V, N, E>
 where
     F: Graftable,
-    H: Hasher,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
     E: ValueEncoding<Value = V>,
     unordered::Operation<F, K, E>: Read,
 {
-    pub fn new(op_cfg: <unordered::Operation<F, K, E> as Read>::Cfg) -> Self {
+    pub const fn new(op_cfg: <unordered::Operation<F, K, E> as Read>::Cfg) -> Self {
         Self {
             op_cfg,
             _marker: std::marker::PhantomData,
@@ -76,11 +64,10 @@ impl<F, H, K, V, const N: usize, E> super::rpc::LookupVerifier
 where
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V: Clone,
     E: ValueEncoding<Value = V>,
-    unordered::Operation<F, K, E>: Decode + Encode + Read,
+    unordered::Operation<F, K, E>: Encode + Read,
 {
     type Digest = H::Digest;
     type Hit = VerifiedKeyValue<H::Digest, unordered::Operation<F, K, E>, F>;
@@ -108,14 +95,14 @@ where
 
     fn verify_get_many(
         &self,
-        requested_keys: &[Vec<u8>],
+        requested_keys: &[Bytes],
         results: &[CurrentKeyLookupResult],
         root: &H::Digest,
     ) -> Result<Vec<Self::Lookup>, QmdbError> {
         let requested = requested_keys
             .iter()
             .enumerate()
-            .map(|(index, key)| (key.as_slice(), index))
+            .map(|(index, key)| (key.as_ref(), index))
             .collect::<BTreeMap<&[u8], usize>>();
         let mut last_index = None;
         results
@@ -168,13 +155,13 @@ where
 pub struct Unordered<
     T,
     F: Graftable,
-    H: Hasher,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    H,
+    K: QmdbKey,
+    V,
     const N: usize,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > where
-    unordered::Operation<F, K, E>: Encode + Read,
+    unordered::Operation<F, K, E>: Read,
 {
     key_lookup: KeyLookupClient<T, UnorderedLookupVerifier<F, H, K, V, N, E>>,
     current_operation: CurrentOperationClient<T, F, H, unordered::Operation<F, K, E>, N>,
@@ -185,11 +172,10 @@ impl<F, H, K, V, const N: usize, E> Unordered<PreferZstdHttpClient, F, H, K, V, 
 where
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V: Clone,
     E: ValueEncoding<Value = V>,
-    unordered::Operation<F, K, E>: Decode + Encode + Read,
+    unordered::Operation<F, K, E>: Encode + Read,
 {
     pub fn plaintext(base: &str, op_cfg: <unordered::Operation<F, K, E> as Read>::Cfg) -> Self {
         Self::new(
@@ -202,16 +188,14 @@ where
 
 impl<T, F, H, K, V, const N: usize, E> Unordered<T, F, H, K, V, N, E>
 where
-    T: ClientTransport + Clone,
-    T::ResponseBody: Body<Data = Bytes> + Unpin,
+    T: ClientTransport,
     <T::ResponseBody as Body>::Error: Display,
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V: Clone,
     E: ValueEncoding<Value = V>,
-    unordered::Operation<F, K, E>: Decode + Encode + Read,
+    unordered::Operation<F, K, E>: Encode + Read,
 {
     pub fn new(
         transport: T,
@@ -244,7 +228,7 @@ where
         self.key_lookup
             .get(
                 GetRequest {
-                    key: key.encode().to_vec(),
+                    key: key.encode(),
                     tip: tip.as_u64(),
                     min_sequence_number,
                     ..Default::default()
@@ -266,7 +250,7 @@ where
         self.key_lookup
             .get_many(
                 GetManyRequest {
-                    keys: keys.iter().map(|key| key.encode().to_vec()).collect(),
+                    keys: keys.iter().map(|key| key.encode()).collect(),
                     tip: tip.as_u64(),
                     min_sequence_number,
                     ..Default::default()
@@ -343,7 +327,10 @@ where
     ) -> Result<
         OperationLogSubscription<T::ResponseBody, F, H, unordered::Operation<F, K, E>>,
         QmdbError,
-    > {
+    >
+    where
+        T::ResponseBody: Unpin,
+    {
         self.operation_log.subscribe(request).await
     }
 }

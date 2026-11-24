@@ -1,35 +1,30 @@
-use std::marker::PhantomData;
-use std::sync::Arc;
-
-use commonware_codec::{Codec, Copying, Decode, Encode, Read as CodecRead};
+use crate::{
+    adapter::{
+        core,
+        operation_range::{load_operation_range_checkpoint, load_operations_multi_proof},
+        read_cache::ReadCache,
+    },
+    error::QmdbError,
+    proof::{
+        MultiProofOperations, OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange,
+    },
+    request::OperationLocations,
+    PublishedWatermark,
+};
+use commonware_codec::{Copying, Decode, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::{Family, Graftable, Location},
     qmdb::{
-        any::value::{ValueEncoding, VariableEncoding},
         keyless,
+        value::{ValueEncoding, VariableEncoding},
     },
 };
 use exoware_sdk::{PrefixedStoreClient, ReadSession};
+use std::{marker::PhantomData, sync::Arc};
 
-use crate::adapter::core;
-use crate::adapter::operation_range::{
-    load_operation_range_checkpoint, load_operations_multi_proof,
-};
-use crate::adapter::read_cache::ReadCache;
-use crate::error::QmdbError;
-use crate::proof::{
-    MultiProofOperations, OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange,
-};
-use crate::OperationKv;
-use crate::PublishedWatermark;
-
-pub struct Keyless<
-    F: Family,
-    H: Hasher,
-    V: Codec + Send + Sync,
-    E: ValueEncoding<Value = V> = VariableEncoding<V>,
-> where
+pub struct Keyless<F: Family, H: Hasher, V, E: ValueEncoding<Value = V> = VariableEncoding<V>>
+where
     keyless::Operation<F, E>: CodecRead,
 {
     store: PrefixedStoreClient,
@@ -43,7 +38,6 @@ impl<F, H, V, E> Clone for Keyless<F, H, V, E>
 where
     F: Family,
     H: Hasher,
-    V: Codec + Send + Sync,
     E: ValueEncoding<Value = V>,
     keyless::Operation<F, E>: CodecRead,
 {
@@ -62,7 +56,6 @@ impl<F, H, V, E> std::fmt::Debug for Keyless<F, H, V, E>
 where
     F: Family,
     H: Hasher,
-    V: Codec + Send + Sync,
     E: ValueEncoding<Value = V>,
     keyless::Operation<F, E>: CodecRead,
 {
@@ -75,9 +68,8 @@ impl<F, H, V, E> Keyless<F, H, V, E>
 where
     F: Graftable,
     H: Hasher,
-    V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
-    keyless::Operation<F, E>: Encode + Decode + Clone,
+    keyless::Operation<F, E>: Decode,
 {
     /// Read client for the Store namespace.
     pub fn new(
@@ -93,11 +85,12 @@ where
         }
     }
 
-    pub(crate) fn extract_operation_kv(
+    pub(crate) fn inspect_operation_kv<T>(
         &self,
         location: Location<F>,
         bytes: &[u8],
-    ) -> Result<OperationKv, QmdbError>
+        inspect: impl FnOnce(Option<&[u8]>, Option<&[u8]>) -> T,
+    ) -> Result<T, QmdbError>
     where
         V: AsRef<[u8]>,
     {
@@ -107,12 +100,12 @@ where
                     "failed to decode keyless operation at location {location}: {e}"
                 ))
             })?;
-        let value = match &op {
-            keyless::Operation::Append(value) => Some(value.as_ref().to_vec()),
-            keyless::Operation::Commit(Some(value), _) => Some(value.as_ref().to_vec()),
+        let value: Option<&[u8]> = match &op {
+            keyless::Operation::Append(value) => Some(value.as_ref()),
+            keyless::Operation::Commit(Some(value), _) => Some(value.as_ref()),
             keyless::Operation::Commit(None, _) => None,
         };
-        Ok(OperationKv { key: None, value })
+        Ok(inspect(None, value))
     }
 
     /// Refresh publication evidence and return the greatest watermark observed by this client.
@@ -211,6 +204,28 @@ where
         Ok(proof)
     }
 
+    /// Prove a nonempty set of strictly ascending operation locations at or below `tip`.
+    /// `min_sequence_number` is the minimum Store sequence for the publication lookup.
+    pub async fn operation_multi_proof(
+        &self,
+        tip: Location<F>,
+        locations: &[Location<F>],
+        min_sequence_number: Option<u64>,
+    ) -> Result<RawBatchMultiProof<H::Digest, F>, QmdbError> {
+        // Validate the request and Merkle family bounds before reading the Store.
+        let requested = locations
+            .iter()
+            .map(|location| location.as_u64())
+            .collect::<Vec<_>>();
+        OperationLocations::with_max_leaves(tip.as_u64(), &requested, F::MAX_LEAVES.as_u64())?;
+
+        // `min_sequence_number` bounds the publication lookup. Proof reads use
+        // the observed publication sequence as their minimum.
+        let watermark = self.resolve_watermark(tip, min_sequence_number).await?;
+        self.multi_proof_at(watermark, MultiProofOperations::Read(locations))
+            .await
+    }
+
     /// Multi-proof at a published watermark, built from the same cached reads
     /// as [`Self::operation_range_checkpoint_at`].
     pub(crate) async fn multi_proof_at(
@@ -255,7 +270,7 @@ where
             .enumerate()
             .map(|(offset, bytes)| {
                 let location = checkpoint.start_location + offset as u64;
-                keyless::Operation::<F, E>::decode_cfg(Copying(bytes.as_slice()), &self.op_cfg)
+                keyless::Operation::<F, E>::decode_cfg(Copying(bytes.as_ref()), &self.op_cfg)
                     .map_err(|e| {
                         QmdbError::CorruptData(format!(
                             "failed to decode authenticated operation at location {location}: {e}"
@@ -279,7 +294,6 @@ async fn inactive_peaks_at<F, V, E>(
 ) -> Result<usize, QmdbError>
 where
     F: Graftable,
-    V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
     keyless::Operation<F, E>: Decode,
 {
@@ -293,8 +307,7 @@ fn inactive_peaks_from_operation<F, V, E>(
     operation: keyless::Operation<F, E>,
 ) -> Result<usize, QmdbError>
 where
-    F: Graftable,
-    V: Codec + Clone + Send + Sync,
+    F: Family,
     E: ValueEncoding<Value = V>,
 {
     let keyless::Operation::Commit(_, floor) = operation else {

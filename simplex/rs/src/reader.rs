@@ -1,13 +1,13 @@
+use crate::{
+    error::SimplexError,
+    keys::{self, RecordKind},
+    types::{BlockData, Finalized, Notarized},
+};
 use bytes::Bytes;
 use commonware_codec::{Decode, Read};
 use commonware_consensus::Block;
 use commonware_cryptography::{certificate, Digest};
-use exoware_sdk::keys::Key;
-use exoware_sdk::{PrefixedStoreClient, RangeMode, ReadSession};
-
-use crate::error::SimplexError;
-use crate::keys::{self, RecordKind};
-use crate::types::{BlockData, Finalized, Notarized};
+use exoware_sdk::{keys::Key, PrefixedStoreClient, RangeMode, ReadSession};
 
 /// Session-backed reader for Commonware Simplex blocks and certificates.
 ///
@@ -122,7 +122,6 @@ impl SimplexReader {
         B: Block<Digest = D> + Read,
         S: certificate::Scheme,
         D: Digest,
-        <S::Certificate as commonware_codec::Read>::Cfg: Clone,
     {
         self.decode_indexed(
             self.get_notarized_by_round_raw(round).await?,
@@ -140,7 +139,6 @@ impl SimplexReader {
         B: Block<Digest = D> + Read,
         S: certificate::Scheme,
         D: Digest,
-        <S::Certificate as commonware_codec::Read>::Cfg: Clone,
     {
         self.decode_indexed(
             self.get_finalized_by_height_raw(height).await?,
@@ -158,7 +156,6 @@ impl SimplexReader {
         B: Block<Digest = D> + Read,
         S: certificate::Scheme,
         D: Digest,
-        <S::Certificate as commonware_codec::Read>::Cfg: Clone,
     {
         self.decode_indexed(
             self.get_finalized_by_round_raw(round).await?,
@@ -175,7 +172,6 @@ impl SimplexReader {
         B: Block<Digest = D> + Read,
         S: certificate::Scheme,
         D: Digest,
-        <S::Certificate as commonware_codec::Read>::Cfg: Clone,
     {
         let Some((key, value)) = self.latest_finalized_row().await? else {
             return Ok(None);

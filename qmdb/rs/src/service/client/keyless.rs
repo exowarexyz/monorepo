@@ -1,34 +1,28 @@
 //! Verifying client for keyless QMDB.
 
-use std::fmt::Display;
-
-use bytes::Bytes;
-use commonware_codec::{Decode, DecodeExt, Encode, Read};
+use super::rpc::{OperationLogClient, OperationLogSubscription};
+use crate::{
+    proof::VerifiedOperationRange,
+    service::proto::qmdb::v1::{GetOperationRangeRequest, SubscribeRequest},
+    QmdbError,
+};
+use commonware_codec::{Encode, Read};
 use commonware_cryptography::Hasher;
-use commonware_storage::merkle::Location;
 use commonware_storage::{
-    merkle::Graftable,
-    qmdb::{any::value::ValueEncoding, keyless},
+    merkle::{Family, Graftable, Location},
+    qmdb::{keyless, value::ValueEncoding},
 };
 use connectrpc::client::{ClientConfig, ClientTransport};
 use exoware_sdk::proto::PreferZstdHttpClient;
 use http_body::Body;
-
-use super::rpc::OperationLogSubscription;
-use crate::proof::VerifiedOperationRange;
-use crate::service::proto::qmdb::v1::{GetOperationRangeRequest, SubscribeRequest};
-use crate::QmdbError;
-
-use super::rpc::OperationLogClient;
+use std::fmt::Display;
 
 /// Verifying client for a keyless-QMDB endpoint: the operation log.
 pub struct Keyless<T, F, H, V, E>
 where
-    F: Graftable,
-    H: Hasher,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    F: Family,
     E: ValueEncoding<Value = V>,
-    keyless::Operation<F, E>: Encode + Read,
+    keyless::Operation<F, E>: Read,
 {
     operation_log: OperationLogClient<T, F, H, keyless::Operation<F, E>>,
 }
@@ -37,10 +31,8 @@ impl<F, H, V, E> Keyless<PreferZstdHttpClient, F, H, V, E>
 where
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
-    V: commonware_codec::Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
-    keyless::Operation<F, E>: Decode + Encode + Read,
+    keyless::Operation<F, E>: Encode + Read,
 {
     pub fn plaintext(base: &str, op_cfg: <keyless::Operation<F, E> as Read>::Cfg) -> Self {
         Self::new(
@@ -54,14 +46,11 @@ where
 impl<T, F, H, V, E> Keyless<T, F, H, V, E>
 where
     T: ClientTransport,
-    T::ResponseBody: Body<Data = Bytes> + Unpin,
     <T::ResponseBody as Body>::Error: Display,
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
-    V: commonware_codec::Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
-    keyless::Operation<F, E>: Decode + Encode + Read,
+    keyless::Operation<F, E>: Encode + Read,
 {
     pub fn new(
         transport: T,
@@ -102,6 +91,8 @@ where
         &self,
         request: SubscribeRequest,
     ) -> Result<OperationLogSubscription<T::ResponseBody, F, H, keyless::Operation<F, E>>, QmdbError>
+    where
+        T::ResponseBody: Unpin,
     {
         self.operation_log.subscribe(request).await
     }

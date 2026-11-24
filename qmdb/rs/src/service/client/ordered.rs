@@ -1,52 +1,47 @@
 //! Verifying client for ordered QMDB.
 
-use std::fmt::Display;
-
+use super::rpc::{
+    verify::{verify_key_exclusion_from_proto, verify_key_value_from_proto},
+    CurrentOperationClient, KeyLookupClient, KeyRangeClient, OperationLogClient,
+    OperationLogSubscription,
+};
+use crate::{
+    proof::{
+        VerifiedCurrentRange, VerifiedKeyLookup, VerifiedKeyRange, VerifiedKeyValue,
+        VerifiedOperationRange,
+    },
+    service::proto::qmdb::v1::{
+        current_key_lookup_result, CurrentKeyLookupResult, CurrentKeyValueProof,
+        GetCurrentOperationRangeRequest, GetManyRequest, GetOperationRangeRequest, GetRangeRequest,
+        GetRequest, SubscribeRequest,
+    },
+    QmdbError,
+};
 use bytes::Bytes;
-use commonware_codec::{Copying, Decode, DecodeExt, Encode, Read};
+use commonware_codec::{Copying, Decode, Encode, Read};
 use commonware_cryptography::Hasher;
-use commonware_storage::merkle::Location;
-use commonware_storage::qmdb::sync::Target as SyncTarget;
 use commonware_storage::{
-    merkle::Graftable,
+    merkle::{Graftable, Location},
     qmdb::{
-        any::{
-            ordered,
-            value::{ValueEncoding, VariableEncoding},
-        },
-        current::ordered::proof::constant::ExclusionProof,
+        any::ordered,
         operation::Key as QmdbKey,
+        sync::Target as SyncTarget,
+        value::{ValueEncoding, VariableEncoding},
     },
 };
 use commonware_utils::range::NonEmptyRange;
 use connectrpc::client::{ClientConfig, ClientTransport};
 use exoware_sdk::proto::PreferZstdHttpClient;
 use http_body::Body;
-
-use super::rpc::OperationLogSubscription;
-use crate::proof::{VerifiedCurrentRange, VerifiedKeyRange, VerifiedOperationRange};
-use crate::service::proto::qmdb::v1::{
-    GetCurrentOperationRangeRequest, GetManyRequest, GetOperationRangeRequest, GetRangeRequest,
-    GetRequest, SubscribeRequest,
-};
-
-use crate::proof::{VerifiedKeyLookup, VerifiedKeyValue};
-use crate::service::proto::qmdb::v1::{
-    current_key_lookup_result, CurrentKeyLookupResult, CurrentKeyValueProof,
-};
-use crate::QmdbError;
-
-use super::rpc::verify::{verify_key_exclusion_from_proto, verify_key_value_from_proto};
-use super::rpc::{CurrentOperationClient, KeyLookupClient, KeyRangeClient, OperationLogClient};
+use std::fmt::Display;
 
 /// Verifies ordered `KeyLookupService` responses: hits and exclusion-proven
 /// misses.
 pub struct OrderedLookupVerifier<F, H, K, V, const N: usize, E>
 where
     F: Graftable,
-    H: Hasher,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V: Decode,
     E: ValueEncoding<Value = V>,
     ordered::Operation<F, K, E>: Read,
     ordered::Update<K, E>: Read,
@@ -62,16 +57,13 @@ impl<F, H, K, V, const N: usize, E> OrderedLookupVerifier<F, H, K, V, N, E>
 where
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V: commonware_codec::Codec + Clone,
     E: ValueEncoding<Value = V>,
-    ordered::Operation<F, K, E>: Decode + Encode + Read,
+    ordered::Operation<F, K, E>: Encode + Read,
     ordered::Update<K, E>: Read,
-    ExclusionProof<F, K, E, H::Digest, N>:
-        Read<Cfg = (usize, <ordered::Update<K, E> as Read>::Cfg, V::Cfg)>,
 {
-    pub fn new(
+    pub const fn new(
         op_cfg: <ordered::Operation<F, K, E> as Read>::Cfg,
         update_cfg: <ordered::Update<K, E> as Read>::Cfg,
         key_cfg: K::Cfg,
@@ -123,14 +115,11 @@ impl<F, H, K, V, const N: usize, E> super::rpc::LookupVerifier
 where
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V: commonware_codec::Codec + Clone,
     E: ValueEncoding<Value = V>,
-    ordered::Operation<F, K, E>: Decode + Encode + Read,
+    ordered::Operation<F, K, E>: Encode + Read,
     ordered::Update<K, E>: Read,
-    ExclusionProof<F, K, E, H::Digest, N>:
-        Read<Cfg = (usize, <ordered::Update<K, E> as Read>::Cfg, V::Cfg)>,
 {
     type Digest = H::Digest;
     type Hit = VerifiedKeyValue<H::Digest, ordered::Operation<F, K, E>, F>;
@@ -148,7 +137,7 @@ where
 
     fn verify_get_many(
         &self,
-        requested_keys: &[Vec<u8>],
+        requested_keys: &[Bytes],
         results: &[CurrentKeyLookupResult],
         root: &H::Digest,
     ) -> Result<Vec<Self::Lookup>, QmdbError> {
@@ -174,7 +163,7 @@ where
                     Some(current_key_lookup_result::Result::Miss(proof)) => {
                         verify_key_exclusion_from_proto::<F, H, K, V, N, E>(
                             proof,
-                            requested_key.as_slice(),
+                            requested_key.as_ref(),
                             root,
                             &self.update_cfg,
                             &self.key_cfg,
@@ -198,13 +187,13 @@ where
 pub struct Ordered<
     T,
     F: Graftable,
-    H: Hasher,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    H,
+    K: QmdbKey,
+    V: Read,
     const N: usize,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > where
-    ordered::Operation<F, K, E>: Encode + Read,
+    ordered::Operation<F, K, E>: Read,
     ordered::Update<K, E>: Read,
 {
     key_lookup: KeyLookupClient<T, OrderedLookupVerifier<F, H, K, V, N, E>>,
@@ -217,14 +206,11 @@ impl<F, H, K, V, const N: usize, E> Ordered<PreferZstdHttpClient, F, H, K, V, N,
 where
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V: commonware_codec::Codec + Clone,
     E: ValueEncoding<Value = V>,
-    ordered::Operation<F, K, E>: Decode + Encode + Read,
+    ordered::Operation<F, K, E>: Encode + Read,
     ordered::Update<K, E>: Read,
-    ExclusionProof<F, K, E, H::Digest, N>:
-        Read<Cfg = (usize, <ordered::Update<K, E> as Read>::Cfg, V::Cfg)>,
 {
     pub fn plaintext(
         base: &str,
@@ -246,19 +232,15 @@ where
 
 impl<T, F, H, K, V, const N: usize, E> Ordered<T, F, H, K, V, N, E>
 where
-    T: ClientTransport + Clone,
-    T::ResponseBody: Body<Data = Bytes> + Unpin,
+    T: ClientTransport,
     <T::ResponseBody as Body>::Error: Display,
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V: commonware_codec::Codec + Clone,
     E: ValueEncoding<Value = V>,
-    ordered::Operation<F, K, E>: Decode + Encode + Read,
+    ordered::Operation<F, K, E>: Encode + Read,
     ordered::Update<K, E>: Read,
-    ExclusionProof<F, K, E, H::Digest, N>:
-        Read<Cfg = (usize, <ordered::Update<K, E> as Read>::Cfg, V::Cfg)>,
 {
     pub fn new(
         transport: T,
@@ -307,7 +289,7 @@ where
         self.key_lookup
             .get(
                 GetRequest {
-                    key: key.encode().to_vec(),
+                    key: key.encode(),
                     tip: tip.as_u64(),
                     min_sequence_number,
                     ..Default::default()
@@ -329,7 +311,7 @@ where
         self.key_lookup
             .get_many(
                 GetManyRequest {
-                    keys: keys.iter().map(|key| key.encode().to_vec()).collect(),
+                    keys: keys.iter().map(|key| key.encode()).collect(),
                     tip: tip.as_u64(),
                     min_sequence_number,
                     ..Default::default()
@@ -353,8 +335,8 @@ where
         self.key_range
             .get_range(
                 GetRangeRequest {
-                    start_key: start_key.encode().to_vec(),
-                    end_key: end_key.map(|key| key.encode().to_vec()),
+                    start_key: start_key.encode(),
+                    end_key: end_key.map(|key| key.encode()),
                     limit,
                     tip: tip.as_u64(),
                     min_sequence_number,
@@ -430,7 +412,10 @@ where
     ) -> Result<
         OperationLogSubscription<T::ResponseBody, F, H, ordered::Operation<F, K, E>>,
         QmdbError,
-    > {
+    >
+    where
+        T::ResponseBody: Unpin,
+    {
         self.operation_log.subscribe(request).await
     }
 }

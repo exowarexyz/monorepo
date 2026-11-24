@@ -1,22 +1,24 @@
 //! SQL contexts with shared Store read sessions.
 
-use std::sync::Arc;
-
-use datafusion::catalog::{CatalogProvider, TableProvider};
-use datafusion::common::{DataFusionError, Result, TableReference};
-use datafusion::dataframe::DataFrame;
-use datafusion::execution::runtime_env::RuntimeEnv;
-use datafusion::execution::session_state::SessionStateBuilder;
-use datafusion::logical_expr::{AggregateUDF, ScalarUDF, WindowUDF};
-use datafusion::prelude::{SessionConfig, SessionContext as DataFusionContext};
+use crate::{
+    aggregate::{KvAggregatePushdownRule, KvQueryPlanner},
+    KvSchema,
+};
+use datafusion::{
+    catalog::{CatalogProvider, TableProvider},
+    common::{DataFusionError, Result, TableReference},
+    dataframe::DataFrame,
+    execution::{runtime_env::RuntimeEnv, session_state::SessionStateBuilder},
+    logical_expr::{AggregateUDF, ScalarUDF, WindowUDF},
+    prelude::{SessionConfig, SessionContext as DataFusionContext},
+};
 use exoware_sdk::{PrefixedStoreClient, ReadSession};
-
-use crate::aggregate::{KvAggregatePushdownRule, KvQueryPlanner};
-use crate::KvSchema;
+use std::sync::Arc;
 
 /// A SQL context whose Store reads share a read session across statements.
 #[derive(Clone)]
 pub struct SqlContext {
+    /// DataFusion context whose session config holds the shared `ReadSession` as an extension.
     inner: DataFusionContext,
 }
 
@@ -36,10 +38,11 @@ impl SqlContext {
     }
 
     /// Accesses DataFusion functionality beyond the SQL context's convenience methods.
-    pub fn datafusion(&self) -> &DataFusionContext {
+    pub const fn datafusion(&self) -> &DataFusionContext {
         &self.inner
     }
 
+    /// Returns the read session that Store-backed tables in this context read through.
     pub fn read_session(&self) -> Arc<ReadSession> {
         self.inner
             .copied_config()
@@ -114,7 +117,11 @@ impl SqlContext {
 
 /// Configures a SQL context, installing its read session when built.
 pub struct SqlContextBuilder {
+    /// DataFusion state being configured, starting with the Store aggregate pushdown rule and
+    /// query planner.
     state: SessionStateBuilder,
+    /// Read session installed when the context is built. Defaults to a monotonic session with
+    /// no initial floor.
     session: ReadSession,
 }
 

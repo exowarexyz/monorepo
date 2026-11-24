@@ -1,28 +1,26 @@
+use crate::{
+    proof::{
+        CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
+        RawKeyExclusionProof, RawKeyLookupProof, RawKeyRangeProof, RawKeyValueProof,
+    },
+    service::proto::qmdb::v1::{
+        GetCurrentOperationRangeResponse, GetManyResponse, GetOperationRangeResponse,
+        GetOperationsResponse, GetRangeResponse, GetResponse, SubscribeResponse,
+    },
+};
 use bytes::{BufMut, Bytes, BytesMut};
 use commonware_codec::{Encode, EncodeSize, Write as CodecWrite};
 use commonware_cryptography::Digest;
 use commonware_storage::{
     merkle::Graftable,
-    qmdb::{
-        any::{ordered, value::ValueEncoding},
-        operation::Key as QmdbKey,
-    },
+    qmdb::{any::ordered, operation::Key as QmdbKey, value::ValueEncoding},
 };
 use connectrpc::PreEncoded;
-
-use crate::proof::{
-    CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
-    RawKeyExclusionProof, RawKeyLookupProof, RawKeyRangeProof, RawKeyValueProof,
-};
-use crate::service::proto::qmdb::v1::{
-    GetCurrentOperationRangeResponse, GetManyResponse, GetOperationRangeResponse,
-    GetOperationsResponse, GetRangeResponse, GetResponse, SubscribeResponse,
-};
 
 const WIRE_VARINT: u64 = buffa::encoding::WireType::Varint as u64;
 const WIRE_LENGTH_DELIMITED: u64 = buffa::encoding::WireType::LengthDelimited as u64;
 
-fn tag_len(field: u32, wire: u64) -> usize {
+const fn tag_len(field: u32, wire: u64) -> usize {
     buffa::encoding::varint_len(((field as u64) << 3) | wire)
 }
 
@@ -37,7 +35,7 @@ fn message_bytes(len: usize, write: impl FnOnce(&mut BytesMut)) -> Bytes {
     buf.freeze()
 }
 
-fn varint_field_len(field: u32, value: u64) -> usize {
+const fn varint_field_len(field: u32, value: u64) -> usize {
     if value == 0 {
         0
     } else {
@@ -52,11 +50,11 @@ fn write_u64_field(buf: &mut impl BufMut, field: u32, value: u64) {
     }
 }
 
-fn length_delimited_len(field: u32, len: usize) -> usize {
+const fn length_delimited_len(field: u32, len: usize) -> usize {
     tag_len(field, WIRE_LENGTH_DELIMITED) + buffa::encoding::varint_len(len as u64) + len
 }
 
-fn bytes_field_len(field: u32, bytes: &[u8]) -> usize {
+const fn bytes_field_len(field: u32, bytes: &[u8]) -> usize {
     if bytes.is_empty() {
         0
     } else {
@@ -64,7 +62,7 @@ fn bytes_field_len(field: u32, bytes: &[u8]) -> usize {
     }
 }
 
-fn repeated_bytes_field_len(field: u32, bytes: &[u8]) -> usize {
+const fn repeated_bytes_field_len(field: u32, bytes: &[u8]) -> usize {
     length_delimited_len(field, bytes.len())
 }
 
@@ -126,7 +124,7 @@ fn write_repeated_codec_field<T: CodecWrite + EncodeSize>(
     write_codec_body(buf, value);
 }
 
-fn message_field_len(field: u32, inner_len: usize) -> usize {
+const fn message_field_len(field: u32, inner_len: usize) -> usize {
     length_delimited_len(field, inner_len)
 }
 
@@ -135,7 +133,7 @@ fn write_message_field(buf: &mut impl BufMut, field: u32, inner_len: usize) {
     buffa::encoding::encode_varint(inner_len as u64, buf);
 }
 
-fn multi_proof_operation_len(location: u64, encoded_operation: &[u8]) -> usize {
+const fn multi_proof_operation_len(location: u64, encoded_operation: &[u8]) -> usize {
     varint_field_len(1, location) + bytes_field_len(2, encoded_operation)
 }
 
@@ -144,7 +142,7 @@ fn write_multi_proof_operation(buf: &mut impl BufMut, location: u64, encoded_ope
     write_bytes_field(buf, 2, encoded_operation);
 }
 
-fn historical_multi_proof_len<D: Digest, F: Graftable>(proof: &RawBatchMultiProof<D, F>) -> usize {
+fn operation_multi_proof_len<D: Digest, F: Graftable>(proof: &RawBatchMultiProof<D, F>) -> usize {
     codec_field_len(1, &proof.proof)
         + proof
             .operations
@@ -161,7 +159,7 @@ fn historical_multi_proof_len<D: Digest, F: Graftable>(proof: &RawBatchMultiProo
             .unwrap_or_default()
 }
 
-fn write_historical_multi_proof<D: Digest, F: Graftable>(
+fn write_operation_multi_proof<D: Digest, F: Graftable>(
     buf: &mut impl BufMut,
     proof: &RawBatchMultiProof<D, F>,
 ) {
@@ -216,6 +214,26 @@ fn write_operation_range_checkpoint<D: Digest, F: Graftable>(
     for node in &proof.pinned_nodes {
         write_repeated_codec_field(buf, 6, node);
     }
+}
+
+/// Encode `proof` as a `qmdb.v1.OperationRangeProof` protobuf message.
+pub fn encode_operation_range_proof<D: Digest, F: Graftable>(
+    proof: &OperationRangeCheckpoint<D, F>,
+) -> Vec<u8> {
+    message_bytes(operation_range_checkpoint_len(proof), |buf| {
+        write_operation_range_checkpoint(buf, proof);
+    })
+    .to_vec()
+}
+
+/// Encode `proof` as a `qmdb.v1.OperationMultiProof` protobuf message.
+pub fn encode_operation_multi_proof<D: Digest, F: Graftable>(
+    proof: &RawBatchMultiProof<D, F>,
+) -> Vec<u8> {
+    message_bytes(operation_multi_proof_len(proof), |buf| {
+        write_operation_multi_proof(buf, proof);
+    })
+    .to_vec()
 }
 
 fn current_operation_range_proof_len<D: Digest, Op: Encode, const N: usize, F: Graftable>(
@@ -289,8 +307,8 @@ fn write_key_lookup_result_hit<D: Digest, Op: Encode, const N: usize, F: Graftab
 
 fn key_lookup_result_miss_len<
     D: Digest,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V,
     const N: usize,
     F: Graftable,
     E: ValueEncoding<Value = V>,
@@ -307,8 +325,8 @@ where
 
 fn write_key_lookup_result_miss<
     D: Digest,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V,
     const N: usize,
     F: Graftable,
     E: ValueEncoding<Value = V>,
@@ -353,14 +371,8 @@ impl<D: Digest, Op: Encode, const N: usize, F: Graftable> LookupResult
     }
 }
 
-impl<
-        D: Digest,
-        K: QmdbKey + commonware_codec::Codec,
-        V: commonware_codec::Codec + Clone + Send + Sync,
-        const N: usize,
-        F: Graftable,
-        E: ValueEncoding<Value = V>,
-    > LookupResult for RawKeyLookupProof<D, K, V, N, F, E>
+impl<D: Digest, K: QmdbKey, V, const N: usize, F: Graftable, E: ValueEncoding<Value = V>>
+    LookupResult for RawKeyLookupProof<D, K, V, N, F, E>
 where
     ordered::Operation<F, K, E>: Encode,
     commonware_storage::qmdb::current::ordered::proof::constant::ExclusionProof<F, K, E, D, N>:
@@ -368,15 +380,15 @@ where
 {
     fn result_len(&self) -> usize {
         match self {
-            RawKeyLookupProof::Hit(proof) => key_lookup_result_hit_len(proof),
-            RawKeyLookupProof::Miss(proof) => key_lookup_result_miss_len(proof),
+            Self::Hit(proof) => key_lookup_result_hit_len(proof),
+            Self::Miss(proof) => key_lookup_result_miss_len(proof),
         }
     }
 
     fn write_result(&self, buf: &mut impl BufMut) {
         match self {
-            RawKeyLookupProof::Hit(proof) => write_key_lookup_result_hit(buf, proof),
-            RawKeyLookupProof::Miss(proof) => write_key_lookup_result_miss(buf, proof),
+            Self::Hit(proof) => write_key_lookup_result_hit(buf, proof),
+            Self::Miss(proof) => write_key_lookup_result_miss(buf, proof),
         }
     }
 }
@@ -400,8 +412,8 @@ pub(crate) fn get_many_response<R: LookupResult>(results: &[R]) -> PreEncoded<Ge
 
 pub(crate) fn get_range_response<
     D: Digest,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V,
     const N: usize,
     F: Graftable,
     E: ValueEncoding<Value = V>,
@@ -454,10 +466,10 @@ pub(crate) fn get_operation_range_response<D: Digest, F: Graftable>(
 pub(crate) fn get_operations_response<D: Digest, F: Graftable>(
     proof: &RawBatchMultiProof<D, F>,
 ) -> PreEncoded<GetOperationsResponse> {
-    let proof_len = historical_multi_proof_len(proof);
+    let proof_len = operation_multi_proof_len(proof);
     PreEncoded::from_bytes_unchecked(message_bytes(message_field_len(1, proof_len), |buf| {
         write_message_field(buf, 1, proof_len);
-        write_historical_multi_proof(buf, proof);
+        write_operation_multi_proof(buf, proof);
     }))
 }
 
@@ -465,12 +477,12 @@ pub(crate) fn subscribe_response<D: Digest, F: Graftable>(
     resume_sequence_number: u64,
     proof: &RawBatchMultiProof<D, F>,
 ) -> PreEncoded<SubscribeResponse> {
-    let proof_len = historical_multi_proof_len(proof);
+    let proof_len = operation_multi_proof_len(proof);
     let len = varint_field_len(1, resume_sequence_number) + message_field_len(2, proof_len);
     PreEncoded::from_bytes_unchecked(message_bytes(len, |buf| {
         write_u64_field(buf, 1, resume_sequence_number);
         write_message_field(buf, 2, proof_len);
-        write_historical_multi_proof(buf, proof);
+        write_operation_multi_proof(buf, proof);
     }))
 }
 

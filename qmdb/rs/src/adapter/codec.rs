@@ -1,11 +1,9 @@
+use crate::{error::QmdbError, MAX_OPERATION_SIZE};
 use commonware_codec::{Buf, Copying, DecodeExt};
 use commonware_cryptography::Digest;
 use commonware_storage::merkle::{Family, Location, Position};
 use commonware_utils::bitmap::Prunable;
 use exoware_sdk::keys::{Key, KeyMut, Prefix};
-
-use crate::error::QmdbError;
-use crate::MAX_OPERATION_SIZE;
 
 // A family byte encodes *row semantics* (what kind of row this is), not which
 // instance or backend it belongs to. The same semantic row therefore uses the
@@ -74,7 +72,7 @@ impl<D: Digest> commonware_codec::Read for CurrentBoundaryMetadata<D> {
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let (root, pruned_chunks) = <(D, u64) as commonware_codec::Read>::read_cfg(buf, &((), ()))?;
-        Ok(CurrentBoundaryMetadata {
+        Ok(Self {
             root,
             pruned_chunks,
         })
@@ -105,7 +103,7 @@ pub(crate) fn op_count_for_watermark<F: Family>(
         .ok_or_else(|| QmdbError::CorruptData("watermark overflow".to_string()))
 }
 
-pub(crate) fn ensure_encoded_value_size(len: usize) -> Result<(), QmdbError> {
+pub(crate) const fn ensure_encoded_value_size(len: usize) -> Result<(), QmdbError> {
     if len <= MAX_OPERATION_SIZE {
         Ok(())
     } else {
@@ -153,11 +151,11 @@ pub(crate) fn encode_ordered_key_bytes(raw_key: &[u8]) -> Vec<u8> {
     out
 }
 
-pub(crate) fn validate_ordered_key_bytes(bytes: &[u8], label: &str) -> Result<(), QmdbError> {
+pub(crate) fn validate_ordered_key_bytes(bytes: &[u8]) -> Result<(), QmdbError> {
     if bytes.len() < ORDERED_KEY_TERMINATOR_LEN {
-        return Err(QmdbError::CorruptData(format!(
-            "{label} shorter than ordered-key terminator"
-        )));
+        return Err(QmdbError::CorruptData(
+            "update key shorter than ordered-key terminator".to_string(),
+        ));
     }
     let mut idx = 0usize;
     let end = bytes.len() - ORDERED_KEY_TERMINATOR_LEN;
@@ -166,14 +164,14 @@ pub(crate) fn validate_ordered_key_bytes(bytes: &[u8], label: &str) -> Result<()
             match bytes.get(idx + 1) {
                 Some(&ORDERED_KEY_ZERO_ESCAPE) => idx += 2,
                 Some(_) => {
-                    return Err(QmdbError::CorruptData(format!(
-                        "{label} contains invalid ordered-key escape"
-                    )))
+                    return Err(QmdbError::CorruptData(
+                        "update key contains invalid ordered-key escape".to_string(),
+                    ))
                 }
                 None => {
-                    return Err(QmdbError::CorruptData(format!(
-                        "{label} truncated in ordered-key escape"
-                    )))
+                    return Err(QmdbError::CorruptData(
+                        "update key truncated in ordered-key escape".to_string(),
+                    ))
                 }
             }
         } else {
@@ -181,15 +179,15 @@ pub(crate) fn validate_ordered_key_bytes(bytes: &[u8], label: &str) -> Result<()
         }
     }
     if bytes[end] != ORDERED_KEY_ESCAPE_BYTE || bytes[end + 1] != ORDERED_KEY_ESCAPE_BYTE {
-        return Err(QmdbError::CorruptData(format!(
-            "{label} missing ordered-key terminator"
-        )));
+        return Err(QmdbError::CorruptData(
+            "update key missing ordered-key terminator".to_string(),
+        ));
     }
     Ok(())
 }
 
 pub(crate) fn decode_ordered_key_bytes(bytes: &[u8]) -> Result<Vec<u8>, QmdbError> {
-    validate_ordered_key_bytes(bytes, "update key")?;
+    validate_ordered_key_bytes(bytes)?;
     let mut out = Vec::with_capacity(bytes.len().saturating_sub(ORDERED_KEY_TERMINATOR_LEN));
     let end = bytes.len() - ORDERED_KEY_TERMINATOR_LEN;
     let mut idx = 0usize;
@@ -243,7 +241,7 @@ fn split_update_payload(key: &Key) -> Result<(Key, usize), QmdbError> {
 
 pub(crate) fn decode_update_location<F: Family>(key: &Key) -> Result<Location<F>, QmdbError> {
     let (payload, ordered_len) = split_update_payload(key)?;
-    validate_ordered_key_bytes(&payload[..ordered_len], "update key")?;
+    validate_ordered_key_bytes(&payload[..ordered_len])?;
     Ok(Location::new(decode_location_bytes(
         &payload[ordered_len..],
         "update location",
@@ -353,12 +351,13 @@ pub(crate) fn encode_chunk_key<F: Family>(chunk_index: u64, watermark: Location<
 
 /// Clear every bitmap bit below `floor` within the chunk at `chunk_index`.
 ///
-/// Bits below the inactivity floor are definitionally 0 at any watermark. The
-/// producer does not republish a chunk every time floor advancement flips one
-/// of its bits, so the stored payload may carry stale 1s. Fold those clears
-/// in deterministically at read time. Mirrors the bit layout used by
-/// `commonware_utils::bitmap::BitMap`: byte offset within the chunk is
-/// `(L / 8) % N`, bit mask is `1 << (L % 8)`.
+/// In the source bitmap, every bit below the inactivity floor is 0, because no
+/// operation below the floor is active. Chunk rows are not authenticated when
+/// they are uploaded, so a chunk loaded from the Store can still hold a 1
+/// there.
+///
+/// The layout is that of `commonware_utils::bitmap::BitMap`. Location `L` is
+/// bit `L % 8` of byte `(L / 8) % N` in its chunk.
 pub(crate) fn clear_below_floor<F: Family, const N: usize>(
     chunk: &mut [u8; N],
     chunk_index: u64,

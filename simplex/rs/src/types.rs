@@ -37,7 +37,7 @@ pub struct BlockData<B> {
 }
 
 impl<B> BlockData<B> {
-    pub fn new(header: B) -> Self {
+    pub const fn new(header: B) -> Self {
         Self {
             header,
             body: Bytes::new(),
@@ -156,7 +156,6 @@ where
     B: Block<Digest = D> + Read,
     S: certificate::Scheme,
     D: Digest,
-    <S::Certificate as Read>::Cfg: Clone,
 {
     type Cfg = (<S::Certificate as Read>::Cfg, <B as Read>::Cfg);
 
@@ -237,7 +236,6 @@ where
     B: Block<Digest = D> + Read,
     S: certificate::Scheme,
     D: Digest,
-    <S::Certificate as Read>::Cfg: Clone,
 {
     type Cfg = (<S::Certificate as Read>::Cfg, <B as Read>::Cfg);
 

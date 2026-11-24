@@ -3,9 +3,6 @@
 //! Full and compact append-only QMDB sources share the same Store and Connect adapters
 
 use crate::common;
-
-use std::{fmt::Debug, sync::Arc};
-
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_parallel::Sequential;
@@ -14,22 +11,24 @@ use commonware_storage::{
     journal::contiguous::fixed::Config as FixedJournalConfig,
     merkle::{mmb, mmr, Family, Graftable, Location, Proof},
     qmdb::{
-        any::value::{FixedEncoding, ValueEncoding, VariableEncoding},
         immutable, keyless,
         operation::Key as QmdbKey,
-        verify_proof_and_pinned_nodes,
+        value::{FixedEncoding, ValueEncoding, VariableEncoding},
+        verify::ProofExt as _,
     },
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
-    adapter::upload::prepare_authenticated_range, adapter::upload::stage_authenticated_range,
-    adapter::upload::stage_watermark, adapter::upload::AuthenticatedOperationRange,
-    adapter::upload::PreparedAuthenticatedRange, adapter::upload::UploadOperation,
-    service::client::rpc::OperationLogClient, service::proto::qmdb::v1::GetOperationRangeRequest,
+    adapter::upload::{
+        prepare_authenticated_range, stage_authenticated_range, stage_watermark,
+        AuthenticatedOperationRange, PreparedAuthenticatedRange, UploadOperation,
+    },
+    service::{client::rpc::OperationLogClient, proto::qmdb::v1::GetOperationRangeRequest},
     QmdbError,
 };
 use exoware_sdk::{PrefixedStoreClient, StoreWriteBatch};
+use std::{fmt::Debug, sync::Arc};
 
 type FixedKey = FixedBytes<32>;
 type FixedValue = FixedBytes<16>;
@@ -53,7 +52,7 @@ fn byte_config() -> ByteConfig {
     ((0..=10_000).into(), ())
 }
 
-fn fixed_key(index: u8) -> FixedKey {
+const fn fixed_key(index: u8) -> FixedKey {
     FixedBytes::new([index; 32])
 }
 
@@ -61,7 +60,7 @@ fn variable_key(index: u8) -> Vec<u8> {
     vec![index; usize::from(index % 3 + 1)]
 }
 
-fn fixed_value(index: u8) -> FixedValue {
+const fn fixed_value(index: u8) -> FixedValue {
     FixedBytes::new([index; 16])
 }
 
@@ -69,8 +68,8 @@ fn variable_value(index: u8) -> Vec<u8> {
     vec![index; usize::from(index % 5 + 1)]
 }
 
-fn page_cache(context: &deterministic::Context) -> CacheRef {
-    CacheRef::from_pooler(context, NZU16!(64), NZUsize!(8))
+fn page_cache() -> CacheRef {
+    CacheRef::new(NZU16!(64), NZUsize!(8))
 }
 
 fn fixed_journal_config(prefix: &str, cache: CacheRef) -> FixedJournalConfig {
@@ -83,44 +82,35 @@ fn fixed_journal_config(prefix: &str, cache: CacheRef) -> FixedJournalConfig {
     }
 }
 
-fn keyless_fixed_full_config(
-    prefix: &str,
-    context: &deterministic::Context,
-) -> keyless::fixed::Config<Sequential> {
-    let cache = page_cache(context);
+fn keyless_fixed_full_config(prefix: &str) -> keyless::fixed::Config<Sequential> {
+    let cache = page_cache();
     keyless::Config {
-        merkle: common::merkle_config(prefix, cache.clone()),
+        merkle: common::merkle_config(prefix),
         log: fixed_journal_config(prefix, cache),
+        init_concurrency: NZUsize!(1),
     }
 }
 
-fn immutable_fixed_full_config(
-    prefix: &str,
-    context: &deterministic::Context,
-) -> immutable::fixed::Config<TwoCap, Sequential> {
-    let cache = page_cache(context);
+fn immutable_fixed_full_config(prefix: &str) -> immutable::fixed::Config<TwoCap, Sequential> {
+    let cache = page_cache();
     immutable::Config {
-        merkle_config: common::merkle_config(prefix, cache.clone()),
+        merkle: common::merkle_config(prefix),
         log: fixed_journal_config(prefix, cache),
         translator: TwoCap,
         init_buffer: NZUsize!(1024),
+        init_concurrency: NZUsize!(1),
     }
 }
 
-fn compact_config<C>(
-    prefix: &str,
-    context: &deterministic::Context,
-    codec: C,
-) -> immutable::CompactConfig<C, Sequential> {
+fn compact_config<C>(prefix: &str, codec: C) -> immutable::CompactConfig<C, Sequential> {
     immutable::CompactConfig {
         strategy: Sequential,
         witness: common::variable_journal_config(
             &format!("{prefix}-witness"),
-            page_cache(context),
-            (),
+            page_cache(),
+            codec,
             NZU64!(7),
         ),
-        commit_codec_config: codec,
     }
 }
 
@@ -141,7 +131,7 @@ macro_rules! source {
     ) => {
         fn $name<$family: Graftable + Eq>(prefix: &'static str) -> Source<$family, $operation> {
             deterministic::Runner::default().start(move |context| async move {
-                let config = ($config)(prefix, &context);
+                let config = ($config)(prefix);
                 let mut db: $database = <$database>::init(context.child(prefix), config, None)
                     .await
                     .expect("initialize Commonware source");
@@ -159,7 +149,9 @@ macro_rules! source {
                         index += 1;
                     }
                     let batch = batch
-                        .merkleize(&db, Some($value(200 + batch_index as u8)), floor)
+                        .with_metadata($value(200 + batch_index as u8))
+                        .with_inactivity_floor(floor)
+                        .merkleize(&db)
                         .await
                         .expect("merkleize source batch");
                     let (start, operations) = batch.operations();
@@ -169,7 +161,7 @@ macro_rules! source {
                     assert_eq!(
                         operations
                             .last()
-                            .and_then(|operation| operation.has_floor()),
+                            .and_then(|operation| operation.inactivity_floor()),
                         Some(floor)
                     );
                     if batch_index > 0 {
@@ -180,10 +172,9 @@ macro_rules! source {
                     // Capture and authenticate the source suffix before compact history is discarded
                     let proof = batch.proof(&db).expect("source batch proof");
                     let pinned_nodes = batch.pinned_nodes(&db).expect("source pinned frontier");
-                    assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
-                        &proof,
+                    assert!(proof.verify_with_pinned_nodes::<Sha256, _>(
                         start,
-                        &operations,
+                        operations.iter(),
                         &pinned_nodes,
                         &root,
                     ));
@@ -195,7 +186,7 @@ macro_rules! source {
                         pinned_nodes,
                     });
                     next_location = end;
-                    (db, _) = db.apply_batch(batch).await.expect("apply source batch");
+                    db = db.apply_batch(batch).await.expect("apply source batch");
                     db = db.commit().await.expect("commit source batch");
                     assert_eq!(db.root(), root);
                 }
@@ -223,7 +214,7 @@ source!(
     immutable_fixed_compact_fixed_keys_fixed_values_source, F,
     immutable::Operation<F, FixedKey, FixedEncoding<FixedValue>>,
     immutable::fixed::CompactDb<F, deterministic::Context, FixedKey, FixedValue, Sha256, Sequential>,
-    |prefix, context| compact_config(prefix, context, ()),
+    |prefix| compact_config(prefix, ()),
     immutable, fixed_key, fixed_value
 );
 
@@ -231,8 +222,8 @@ source!(
     immutable_variable_full_fixed_keys_fixed_values_source, F,
     immutable::Operation<F, FixedKey, VariableEncoding<FixedValue>>,
     immutable::variable::Db<F, deterministic::Context, FixedKey, FixedValue, Sha256, TwoCap, Sequential>,
-    |prefix, context| common::immutable_variable_config(
-        prefix, page_cache(context), ((), ()), NZU64!(7)
+    |prefix| common::immutable_variable_config(
+        prefix, page_cache(), ((), ()), NZU64!(7)
     ),
     immutable, fixed_key, fixed_value
 );
@@ -240,8 +231,8 @@ source!(
 source!(
     immutable_variable_compact_fixed_keys_fixed_values_source, F,
     immutable::Operation<F, FixedKey, VariableEncoding<FixedValue>>,
-    immutable::variable::CompactDb<F, deterministic::Context, FixedKey, FixedValue, Sha256, ((), ()), Sequential>,
-    |prefix, context| compact_config(prefix, context, ((), ())),
+    immutable::variable::CompactDb<F, deterministic::Context, FixedKey, FixedValue, Sha256, Sequential>,
+    |prefix| compact_config(prefix, ((), ())),
     immutable, fixed_key, fixed_value
 );
 
@@ -249,8 +240,8 @@ source!(
     immutable_variable_full_fixed_keys_variable_values_source, F,
     immutable::Operation<F, FixedKey, VariableEncoding<Vec<u8>>>,
     immutable::variable::Db<F, deterministic::Context, FixedKey, Vec<u8>, Sha256, TwoCap, Sequential>,
-    |prefix, context| common::immutable_variable_config(
-        prefix, page_cache(context), ((), byte_config()), NZU64!(7)
+    |prefix| common::immutable_variable_config(
+        prefix, page_cache(), ((), byte_config()), NZU64!(7)
     ),
     immutable, fixed_key, variable_value
 );
@@ -258,8 +249,8 @@ source!(
 source!(
     immutable_variable_compact_fixed_keys_variable_values_source, F,
     immutable::Operation<F, FixedKey, VariableEncoding<Vec<u8>>>,
-    immutable::variable::CompactDb<F, deterministic::Context, FixedKey, Vec<u8>, Sha256, ((), ByteConfig), Sequential>,
-    |prefix, context| compact_config(prefix, context, ((), byte_config())),
+    immutable::variable::CompactDb<F, deterministic::Context, FixedKey, Vec<u8>, Sha256, Sequential>,
+    |prefix| compact_config(prefix, ((), byte_config())),
     immutable, fixed_key, variable_value
 );
 
@@ -267,8 +258,8 @@ source!(
     immutable_variable_full_variable_keys_fixed_values_source, F,
     immutable::Operation<F, Vec<u8>, VariableEncoding<FixedValue>>,
     immutable::variable::Db<F, deterministic::Context, Vec<u8>, FixedValue, Sha256, TwoCap, Sequential>,
-    |prefix, context| common::immutable_variable_config(
-        prefix, page_cache(context), (byte_config(), ()), NZU64!(7)
+    |prefix| common::immutable_variable_config(
+        prefix, page_cache(), (byte_config(), ()), NZU64!(7)
     ),
     immutable, variable_key, fixed_value
 );
@@ -276,8 +267,8 @@ source!(
 source!(
     immutable_variable_compact_variable_keys_fixed_values_source, F,
     immutable::Operation<F, Vec<u8>, VariableEncoding<FixedValue>>,
-    immutable::variable::CompactDb<F, deterministic::Context, Vec<u8>, FixedValue, Sha256, (ByteConfig, ()), Sequential>,
-    |prefix, context| compact_config(prefix, context, (byte_config(), ())),
+    immutable::variable::CompactDb<F, deterministic::Context, Vec<u8>, FixedValue, Sha256, Sequential>,
+    |prefix| compact_config(prefix, (byte_config(), ())),
     immutable, variable_key, fixed_value
 );
 
@@ -285,8 +276,8 @@ source!(
     immutable_variable_full_variable_keys_variable_values_source, F,
     immutable::Operation<F, Vec<u8>, VariableEncoding<Vec<u8>>>,
     immutable::variable::Db<F, deterministic::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, Sequential>,
-    |prefix, context| common::immutable_variable_config(
-        prefix, page_cache(context), (byte_config(), byte_config()), NZU64!(7)
+    |prefix| common::immutable_variable_config(
+        prefix, page_cache(), (byte_config(), byte_config()), NZU64!(7)
     ),
     immutable, variable_key, variable_value
 );
@@ -294,8 +285,8 @@ source!(
 source!(
     immutable_variable_compact_variable_keys_variable_values_source, F,
     immutable::Operation<F, Vec<u8>, VariableEncoding<Vec<u8>>>,
-    immutable::variable::CompactDb<F, deterministic::Context, Vec<u8>, Vec<u8>, Sha256, (ByteConfig, ByteConfig), Sequential>,
-    |prefix, context| compact_config(prefix, context, (byte_config(), byte_config())),
+    immutable::variable::CompactDb<F, deterministic::Context, Vec<u8>, Vec<u8>, Sha256, Sequential>,
+    |prefix| compact_config(prefix, (byte_config(), byte_config())),
     immutable, variable_key, variable_value
 );
 
@@ -311,7 +302,7 @@ source!(
     keyless_fixed_compact_fixed_values_source, F,
     keyless::Operation<F, FixedEncoding<FixedValue>>,
     keyless::fixed::CompactDb<F, deterministic::Context, FixedValue, Sha256, Sequential>,
-    |prefix, context| compact_config(prefix, context, ()),
+    |prefix| compact_config(prefix, ()),
     keyless, fixed_key, fixed_value
 );
 
@@ -319,8 +310,8 @@ source!(
     keyless_variable_full_fixed_values_source, F,
     keyless::Operation<F, VariableEncoding<FixedValue>>,
     keyless::variable::Db<F, deterministic::Context, FixedValue, Sha256, Sequential>,
-    |prefix, context| common::keyless_variable_config(
-        prefix, page_cache(context), (), NZU64!(7)
+    |prefix| common::keyless_variable_config(
+        prefix, page_cache(), (), NZU64!(7)
     ),
     keyless, fixed_key, fixed_value
 );
@@ -328,8 +319,8 @@ source!(
 source!(
     keyless_variable_compact_fixed_values_source, F,
     keyless::Operation<F, VariableEncoding<FixedValue>>,
-    keyless::variable::CompactDb<F, deterministic::Context, FixedValue, Sha256, (), Sequential>,
-    |prefix, context| compact_config(prefix, context, ()),
+    keyless::variable::CompactDb<F, deterministic::Context, FixedValue, Sha256, Sequential>,
+    |prefix| compact_config(prefix, ()),
     keyless, fixed_key, fixed_value
 );
 
@@ -337,8 +328,8 @@ source!(
     keyless_variable_full_variable_values_source, F,
     keyless::Operation<F, VariableEncoding<Vec<u8>>>,
     keyless::variable::Db<F, deterministic::Context, Vec<u8>, Sha256, Sequential>,
-    |prefix, context| common::keyless_variable_config(
-        prefix, page_cache(context), byte_config(), NZU64!(7)
+    |prefix| common::keyless_variable_config(
+        prefix, page_cache(), byte_config(), NZU64!(7)
     ),
     keyless, fixed_key, variable_value
 );
@@ -346,8 +337,8 @@ source!(
 source!(
     keyless_variable_compact_variable_values_source, F,
     keyless::Operation<F, VariableEncoding<Vec<u8>>>,
-    keyless::variable::CompactDb<F, deterministic::Context, Vec<u8>, Sha256, ByteConfig, Sequential>,
-    |prefix, context| compact_config(prefix, context, byte_config()),
+    keyless::variable::CompactDb<F, deterministic::Context, Vec<u8>, Sha256, Sequential>,
+    |prefix| compact_config(prefix, byte_config()),
     keyless, fixed_key, variable_value
 );
 

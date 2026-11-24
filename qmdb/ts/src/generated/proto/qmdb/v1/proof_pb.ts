@@ -10,10 +10,10 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file qmdb/v1/proof.proto.
  */
 export const file_qmdb_v1_proof: GenFile = /*@__PURE__*/
-  fileDesc("ChNxbWRiL3YxL3Byb29mLnByb3RvEgdxbWRiLnYxIkIKE011bHRpUHJvb2ZPcGVyYXRpb24SEAoIbG9jYXRpb24YASABKAQSGQoRZW5jb2RlZF9vcGVyYXRpb24YAiABKAwigwEKFEhpc3RvcmljYWxNdWx0aVByb29mEg0KBXByb29mGAEgASgMEjAKCm9wZXJhdGlvbnMYAiADKAsyHC5xbWRiLnYxLk11bHRpUHJvb2ZPcGVyYXRpb24SEAoIb3BzX3Jvb3QYAyABKAwSGAoQb3BzX3Jvb3Rfd2l0bmVzcxgEIAEoDCKkAQodSGlzdG9yaWNhbE9wZXJhdGlvblJhbmdlUHJvb2YSDQoFcHJvb2YYASABKAwSFgoOc3RhcnRfbG9jYXRpb24YAiABKAQSGgoSZW5jb2RlZF9vcGVyYXRpb25zGAMgAygMEhAKCG9wc19yb290GAQgASgMEhgKEG9wc19yb290X3dpdG5lc3MYBSABKAwSFAoMcGlubmVkX25vZGVzGAYgAygMIm8KGkN1cnJlbnRPcGVyYXRpb25SYW5nZVByb29mEg0KBXByb29mGAEgASgMEhYKDnN0YXJ0X2xvY2F0aW9uGAIgASgEEhoKEmVuY29kZWRfb3BlcmF0aW9ucxgDIAMoDBIOCgZjaHVua3MYBCADKAwiQAoUQ3VycmVudEtleVZhbHVlUHJvb2YSDQoFcHJvb2YYASABKAwSGQoRZW5jb2RlZF9vcGVyYXRpb24YAiABKAwiKQoYQ3VycmVudEtleUV4Y2x1c2lvblByb29mEg0KBXByb29mGAEgASgMIoMBChZDdXJyZW50S2V5TG9va3VwUmVzdWx0EiwKA2hpdBgBIAEoCzIdLnFtZGIudjEuQ3VycmVudEtleVZhbHVlUHJvb2ZIABIxCgRtaXNzGAIgASgLMiEucW1kYi52MS5DdXJyZW50S2V5RXhjbHVzaW9uUHJvb2ZIAEIICgZyZXN1bHRiBnByb3RvMw");
+  fileDesc("ChNxbWRiL3YxL3Byb29mLnByb3RvEgdxbWRiLnYxIkIKE011bHRpUHJvb2ZPcGVyYXRpb24SEAoIbG9jYXRpb24YASABKAQSGQoRZW5jb2RlZF9vcGVyYXRpb24YAiABKAwiggEKE09wZXJhdGlvbk11bHRpUHJvb2YSDQoFcHJvb2YYASABKAwSMAoKb3BlcmF0aW9ucxgCIAMoCzIcLnFtZGIudjEuTXVsdGlQcm9vZk9wZXJhdGlvbhIQCghvcHNfcm9vdBgDIAEoDBIYChBvcHNfcm9vdF93aXRuZXNzGAQgASgMIpoBChNPcGVyYXRpb25SYW5nZVByb29mEg0KBXByb29mGAEgASgMEhYKDnN0YXJ0X2xvY2F0aW9uGAIgASgEEhoKEmVuY29kZWRfb3BlcmF0aW9ucxgDIAMoDBIQCghvcHNfcm9vdBgEIAEoDBIYChBvcHNfcm9vdF93aXRuZXNzGAUgASgMEhQKDHBpbm5lZF9ub2RlcxgGIAMoDCJvChpDdXJyZW50T3BlcmF0aW9uUmFuZ2VQcm9vZhINCgVwcm9vZhgBIAEoDBIWCg5zdGFydF9sb2NhdGlvbhgCIAEoBBIaChJlbmNvZGVkX29wZXJhdGlvbnMYAyADKAwSDgoGY2h1bmtzGAQgAygMIkAKFEN1cnJlbnRLZXlWYWx1ZVByb29mEg0KBXByb29mGAEgASgMEhkKEWVuY29kZWRfb3BlcmF0aW9uGAIgASgMIikKGEN1cnJlbnRLZXlFeGNsdXNpb25Qcm9vZhINCgVwcm9vZhgBIAEoDCKDAQoWQ3VycmVudEtleUxvb2t1cFJlc3VsdBIsCgNoaXQYASABKAsyHS5xbWRiLnYxLkN1cnJlbnRLZXlWYWx1ZVByb29mSAASMQoEbWlzcxgCIAEoCzIhLnFtZGIudjEuQ3VycmVudEtleUV4Y2x1c2lvblByb29mSABCCAoGcmVzdWx0YgZwcm90bzM");
 
 /**
- * One historical operation proven by a multi-proof.
+ * One operation proven by a multi-proof.
  *
  * @generated from message qmdb.v1.MultiProofOperation
  */
@@ -37,11 +37,11 @@ export const MultiProofOperationSchema: GenMessage<MultiProofOperation> = /*@__P
   messageDesc(file_qmdb_v1_proof, 0);
 
 /**
- * Historical QMDB multi-proof over a set of operation locations.
+ * Operation-log membership proof over a set of operation locations.
  *
- * @generated from message qmdb.v1.HistoricalMultiProof
+ * @generated from message qmdb.v1.OperationMultiProof
  */
-export type HistoricalMultiProof = Message<"qmdb.v1.HistoricalMultiProof"> & {
+export type OperationMultiProof = Message<"qmdb.v1.OperationMultiProof"> & {
   /**
    * @generated from field: bytes proof = 1;
    */
@@ -53,7 +53,7 @@ export type HistoricalMultiProof = Message<"qmdb.v1.HistoricalMultiProof"> & {
   operations: MultiProofOperation[];
 
   /**
-   * Operation-log root used to verify the historical proof. Current-boundary
+   * Operation-log root used to verify this proof. Current-boundary
    * endpoints authenticate this with `ops_root_witness`; operation-log-only
    * endpoints omit the witness and clients authenticate this root out-of-band.
    *
@@ -72,18 +72,18 @@ export type HistoricalMultiProof = Message<"qmdb.v1.HistoricalMultiProof"> & {
 };
 
 /**
- * Describes the message qmdb.v1.HistoricalMultiProof.
- * Use `create(HistoricalMultiProofSchema)` to create a new message.
+ * Describes the message qmdb.v1.OperationMultiProof.
+ * Use `create(OperationMultiProofSchema)` to create a new message.
  */
-export const HistoricalMultiProofSchema: GenMessage<HistoricalMultiProof> = /*@__PURE__*/
+export const OperationMultiProofSchema: GenMessage<OperationMultiProof> = /*@__PURE__*/
   messageDesc(file_qmdb_v1_proof, 1);
 
 /**
- * Historical QMDB range proof over a contiguous operation interval.
+ * Operation-log membership proof over a contiguous operation interval.
  *
- * @generated from message qmdb.v1.HistoricalOperationRangeProof
+ * @generated from message qmdb.v1.OperationRangeProof
  */
-export type HistoricalOperationRangeProof = Message<"qmdb.v1.HistoricalOperationRangeProof"> & {
+export type OperationRangeProof = Message<"qmdb.v1.OperationRangeProof"> & {
   /**
    * @generated from field: bytes proof = 1;
    */
@@ -100,7 +100,7 @@ export type HistoricalOperationRangeProof = Message<"qmdb.v1.HistoricalOperation
   encodedOperations: Uint8Array[];
 
   /**
-   * Operation-log root used to verify the historical proof. Current-boundary
+   * Operation-log root used to verify this proof. Current-boundary
    * endpoints authenticate this with `ops_root_witness`; operation-log-only
    * endpoints omit the witness and clients authenticate this root out-of-band.
    *
@@ -136,10 +136,10 @@ export type HistoricalOperationRangeProof = Message<"qmdb.v1.HistoricalOperation
 };
 
 /**
- * Describes the message qmdb.v1.HistoricalOperationRangeProof.
- * Use `create(HistoricalOperationRangeProofSchema)` to create a new message.
+ * Describes the message qmdb.v1.OperationRangeProof.
+ * Use `create(OperationRangeProofSchema)` to create a new message.
  */
-export const HistoricalOperationRangeProofSchema: GenMessage<HistoricalOperationRangeProof> = /*@__PURE__*/
+export const OperationRangeProofSchema: GenMessage<OperationRangeProof> = /*@__PURE__*/
   messageDesc(file_qmdb_v1_proof, 2);
 
 /**

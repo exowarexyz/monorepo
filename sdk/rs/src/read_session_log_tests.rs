@@ -1,12 +1,15 @@
 use super::*;
-
 use buffa::Message as _;
 use futures::channel::mpsc;
 use http_body_util::BodyExt as _;
-use std::collections::VecDeque;
-use std::convert::Infallible;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::{
+    collections::VecDeque,
+    convert::Infallible,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
+};
 
 type TestBody = http_body_util::combinators::UnsyncBoxBody<Bytes, Infallible>;
 
@@ -139,8 +142,7 @@ fn stream_body(
 
 fn client<T>(transport: T) -> PrefixedStoreClient
 where
-    T: connectrpc::client::ClientTransport<Error = ConnectError> + Clone + 'static,
-    T::ResponseBody: http_body::Body<Data = Bytes> + Send + Unpin + 'static,
+    T: connectrpc::client::ClientTransport<Error = ConnectError>,
     <T::ResponseBody as http_body::Body>::Error: std::fmt::Display,
 {
     StoreClient::builder()

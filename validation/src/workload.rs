@@ -1,11 +1,9 @@
+use crate::deterministic::GOLDEN_RATIO_64;
 use anyhow::{ensure, Context};
 use clap::ValueEnum;
 use rand::{RngExt, SeedableRng};
 use serde::{Deserialize, Serialize};
-use std::ops::Range;
-use std::sync::Arc;
-
-use crate::deterministic::GOLDEN_RATIO_64;
+use std::{ops::Range, sync::Arc};
 
 /// Default seed used when the caller does not provide one.
 pub const DEFAULT_BENCH_RNG_SEED: u64 = 0x5eed_c0de;
@@ -108,31 +106,31 @@ struct SuccessfulWriteWindow {
 
 impl Scenario {
     /// Returns the default operation mix for a named scenario.
-    pub fn mix(self) -> WorkloadMix {
+    pub const fn mix(self) -> WorkloadMix {
         match self {
-            Scenario::ReadHeavy => WorkloadMix {
+            Self::ReadHeavy => WorkloadMix {
                 read_ratio: 0.95,
                 write_ratio: 0.05,
                 scan_ratio: 0.00,
             },
             // Read-dominant with meaningful writes and a modest scan share, so the default mix
             // exercises every read path (point, ingest, range) rather than skipping scans.
-            Scenario::Balanced => WorkloadMix {
+            Self::Balanced => WorkloadMix {
                 read_ratio: 0.67,
                 write_ratio: 0.30,
                 scan_ratio: 0.03,
             },
-            Scenario::WriteHeavy => WorkloadMix {
+            Self::WriteHeavy => WorkloadMix {
                 read_ratio: 0.20,
                 write_ratio: 0.80,
                 scan_ratio: 0.00,
             },
-            Scenario::ScanHeavy => WorkloadMix {
+            Self::ScanHeavy => WorkloadMix {
                 read_ratio: 0.40,
                 write_ratio: 0.10,
                 scan_ratio: 0.50,
             },
-            Scenario::IngestBurst => WorkloadMix {
+            Self::IngestBurst => WorkloadMix {
                 read_ratio: 0.00,
                 write_ratio: 1.00,
                 scan_ratio: 0.00,
@@ -293,13 +291,13 @@ impl WorkerPlan {
             .and_then(|offset| initial_keys.checked_add(offset))
     }
 
-    fn write_batch_first_write_number(&self, batch_number: u64) -> u64 {
+    const fn write_batch_first_write_number(&self, batch_number: u64) -> u64 {
         batch_number
             .checked_mul(self.write_batch_size)
             .expect("acknowledged write batch should be representable")
     }
 
-    fn write_batch_last_write_number(&self, batch_number: u64) -> u64 {
+    const fn write_batch_last_write_number(&self, batch_number: u64) -> u64 {
         self.write_batch_first_write_number(batch_number)
             .checked_add(self.write_batch_size - 1)
             .expect("acknowledged write batch should be representable")
@@ -610,10 +608,9 @@ fn approx_eq(a: f64, b: f64, eps: f64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
     use super::*;
     use rand::{RngExt, SeedableRng};
+    use std::collections::HashSet;
 
     fn sample_spec() -> WorkloadSpec {
         WorkloadSpec::new(
