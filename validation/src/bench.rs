@@ -446,7 +446,7 @@ async fn run_workload(config: Config) -> anyhow::Result<BenchReport> {
 
     let mut totals = WorkerTally::default();
     let workers_result = join_all_or_abort(&mut workers, "benchmark worker", |tally| {
-        totals.merge(&tally);
+        totals.merge(tally);
     })
     .await;
 
@@ -506,14 +506,14 @@ struct WorkerTally {
 }
 
 impl WorkerTally {
-    fn merge(&mut self, other: &Self) {
+    fn merge(&mut self, other: Self) {
         self.reads_ok += other.reads_ok;
         self.reads_miss += other.reads_miss;
         self.writes_ok += other.writes_ok;
         self.scans_ok += other.scans_ok;
         self.scans_rows += other.scans_rows;
         self.errors += other.errors;
-        self.latencies.merge(&other.latencies);
+        self.latencies.merge(other.latencies);
     }
 }
 

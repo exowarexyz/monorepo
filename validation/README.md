@@ -72,7 +72,8 @@ The commands use different success criteria:
 [Benchmark reports](src/report.rs) contain the normalized configuration,
 seed, operation counters, and separate read/write/scan latency histograms.
 Latencies include failed calls and use fixed microsecond buckets. The text
-summary reports p50, p95, p99, and maximum latency.
+summary reports exact nearest-rank p50, p95, and p99 over all recorded samples,
+along with maximum latency.
 
 Interpret scan results in the context of the fixture. Load and benchmark keys
 spread across the physical key range, and benchmark scans start at a sampled
