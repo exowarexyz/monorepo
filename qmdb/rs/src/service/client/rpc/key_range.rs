@@ -30,7 +30,7 @@ pub struct KeyRangeClient<
     F: Graftable,
     H,
     K: QmdbKey,
-    V: commonware_codec::Codec,
+    V: Read,
     const N: usize,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > where
@@ -50,7 +50,7 @@ where
     T: Clone,
     F: Graftable,
     K: QmdbKey,
-    V: commonware_codec::Codec,
+    V: Read,
     E: ValueEncoding<Value = V>,
     ordered::Operation<F, K, E>: Read,
     ordered::Update<K, E>: Read,

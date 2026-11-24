@@ -74,7 +74,7 @@ where
     F: Graftable,
     H: Hasher,
     K: QmdbKey,
-    V: commonware_codec::Codec,
+    V: Decode,
     E: ValueEncoding<Value = V>,
     ordered::Operation<F, K, E>: Encode + Read,
     ordered::Update<K, E>: Read,
