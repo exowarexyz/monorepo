@@ -7,45 +7,52 @@ use axum::{
     serve::{Listener, ListenerExt},
     Router,
 };
+use commonware_codec::{Decode as _, Encode as _, Read};
 use commonware_cryptography::Digest;
 use commonware_parallel::Sequential;
 use commonware_runtime::buffer::paged::CacheRef;
 use commonware_storage::{
-    journal::contiguous::variable::Config as VariableJournalConfig,
-    merkle::{full::Config as MerkleConfig, Family, Graftable},
+    journal::{
+        authenticated::{Config as MerkleConfig, ResidentHeight},
+        contiguous::variable::Config as VariableJournalConfig,
+    },
+    merkle::{Family, Graftable},
     qmdb::{
-        any,
-        current::{self, proof::RangeProof},
-        immutable, keyless,
+        any::{
+            self,
+            operation::{Operation as AnyOperation, Update},
+        },
+        current, immutable, keyless,
     },
     translator::TwoCap,
 };
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::NZUsize;
 use connectrpc::{
     client::ClientConfig, ConnectError, ConnectRpcService, ErrorCode, RequestContext as Context,
     ServiceRequest,
 };
 use exoware_qmdb::{
+    adapter::upload::{
+        prepare_publication, stage_authenticated_range, stage_watermark, Publication,
+        PublicationCfg, UploadOperation,
+    },
     service::proto::qmdb::v1::{
         GetOperationRangeRequest, GetOperationRangeResponse, GetOperationsRequest,
         GetOperationsResponse, OperationLogService, OperationLogServiceClient,
         OperationLogServiceServer, SubscribeRequest, SubscribeResponse,
     },
-    CurrentBoundaryState, QmdbError,
+    QmdbError,
 };
 use exoware_sdk::{proto::PreferZstdHttpClient, transport::set_tcp_nodelay, StoreClient};
 use std::{convert::Infallible, num::NonZeroU64, time::Duration};
 
 #[allow(dead_code)]
-pub fn merkle_config(prefix: &str, page_cache: CacheRef) -> MerkleConfig<Sequential> {
+pub fn merkle_config(prefix: &str) -> MerkleConfig<Sequential> {
     MerkleConfig {
-        journal_partition: format!("{prefix}-merkle-journal"),
-        metadata_partition: format!("{prefix}-merkle-metadata"),
-        items_per_blob: NZU64!(8),
-        write_buffer: NZUsize!(1024),
+        partition: format!("{prefix}-merkle-metadata"),
+        resident_height: ResidentHeight::default(),
         replay_buffer: NZUsize!(1024),
         strategy: Sequential,
-        page_cache,
     }
 }
 
@@ -75,8 +82,9 @@ pub fn keyless_variable_config<C>(
     items_per_section: NonZeroU64,
 ) -> keyless::variable::Config<C, Sequential> {
     keyless::Config {
-        merkle: merkle_config(prefix, page_cache.clone()),
+        merkle: merkle_config(prefix),
         log: variable_journal_config(prefix, page_cache, codec_config, items_per_section),
+        init_concurrency: NZUsize!(1),
     }
 }
 
@@ -86,19 +94,14 @@ pub fn any_variable_config<C>(
     page_cache: CacheRef,
     codec_config: C,
     items_per_section: NonZeroU64,
-) -> any::VariableConfig<TwoCap, C, Sequential> {
+) -> any::Config<TwoCap, VariableJournalConfig<C>, Sequential> {
     any::Config {
-        merkle_config: merkle_config(prefix, page_cache.clone()),
-        journal_config: variable_journal_config(
-            prefix,
-            page_cache,
-            codec_config,
-            items_per_section,
-        ),
+        merkle: merkle_config(prefix),
+        log: variable_journal_config(prefix, page_cache, codec_config, items_per_section),
         translator: TwoCap,
         init_cache: None,
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(1),
     }
 }
 
@@ -108,20 +111,15 @@ pub fn current_variable_config<C>(
     page_cache: CacheRef,
     codec_config: C,
     items_per_section: NonZeroU64,
-) -> current::VariableConfig<TwoCap, C, Sequential> {
+) -> current::Config<TwoCap, VariableJournalConfig<C>, Sequential> {
     current::Config {
-        merkle_config: merkle_config(prefix, page_cache.clone()),
-        journal_config: variable_journal_config(
-            prefix,
-            page_cache,
-            codec_config,
-            items_per_section,
-        ),
+        merkle: merkle_config(prefix),
+        log: variable_journal_config(prefix, page_cache, codec_config, items_per_section),
         grafted_metadata_partition: format!("{prefix}-grafted-metadata"),
         translator: TwoCap,
         init_cache: None,
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(1),
     }
 }
 
@@ -133,10 +131,11 @@ pub fn immutable_variable_config<C>(
     items_per_section: NonZeroU64,
 ) -> immutable::variable::Config<TwoCap, C, Sequential> {
     immutable::Config {
-        merkle_config: merkle_config(prefix, page_cache.clone()),
+        merkle: merkle_config(prefix),
         log: variable_journal_config(prefix, page_cache, codec_config, items_per_section),
         translator: TwoCap,
         init_buffer: NZUsize!(1 << 21),
+        init_concurrency: NZUsize!(1),
     }
 }
 
@@ -170,24 +169,6 @@ where
 mod operations;
 pub use operations::prepare_operations;
 
-/// Extract the one operation's bitmap chunk from a native current range proof
-#[allow(dead_code)]
-pub async fn current_proof_chunk<F, D, Op, E, const N: usize>(
-    proof: impl std::future::Future<Output = Result<(RangeProof<F, D>, Vec<Op>, Vec<[u8; N]>), E>>,
-) -> Result<(RangeProof<F, D>, [u8; N]), QmdbError>
-where
-    F: Graftable,
-    D: Digest,
-    E: std::fmt::Display,
-{
-    let (proof, operations, chunks) = proof
-        .await
-        .map_err(|error| QmdbError::CorruptData(error.to_string()))?;
-    assert_eq!(operations.len(), 1, "one source operation");
-    assert_eq!(chunks.len(), 1, "one source bitmap chunk");
-    Ok((proof, chunks[0]))
-}
-
 #[allow(dead_code)]
 pub async fn commit_operations<F, Op>(
     client: &exoware_sdk::PrefixedStoreClient,
@@ -196,37 +177,79 @@ pub async fn commit_operations<F, Op>(
 ) -> Result<(), QmdbError>
 where
     F: Family,
-    Op: exoware_qmdb::adapter::upload::UploadOperation<F>,
+    Op: UploadOperation<F>,
 {
     let (_, prepared) = prepare_operations::<F, Op>(operations, cfg);
     let mut batch = exoware_sdk::StoreWriteBatch::new();
     let latest = prepared.latest_location();
-    exoware_qmdb::adapter::upload::stage_authenticated_range(client, prepared, &mut batch)?;
-    exoware_qmdb::adapter::upload::stage_watermark(client, latest, &mut batch)?;
+    stage_authenticated_range(client, prepared, &mut batch)?;
+    stage_watermark(client, latest, &mut batch)?;
     batch.commit(client.client()).await?;
     Ok(())
 }
 
+/// Stages consecutive current batch publications and the watermark at the last one's final
+/// location, trusting each publication's own root as the expected current root.
 #[allow(dead_code)]
-pub async fn commit_current_operations<F, Op, const N: usize>(
+pub fn stage_publications<F, U, const N: usize>(
     client: &exoware_sdk::PrefixedStoreClient,
-    operations: &[Op],
-    cfg: &Op::Cfg,
-    boundary: &CurrentBoundaryState<commonware_cryptography::sha256::Digest, N, F>,
+    publications: &[Publication<F, commonware_cryptography::sha256::Digest, U, N>],
+    batch: &mut exoware_sdk::StoreWriteBatch,
 ) -> Result<(), QmdbError>
 where
     F: Graftable,
-    Op: exoware_qmdb::adapter::upload::UploadOperation<F>,
+    U: Update,
+    AnyOperation<F, U>: UploadOperation<F>,
 {
-    let (_, prepared) = prepare_operations::<F, Op>(operations, cfg);
-    let prepared =
-        prepared.with_current_boundary::<commonware_cryptography::Sha256, N>(boundary)?;
-    let latest = prepared.latest_location();
+    let mut latest = None;
+    for publication in publications {
+        let prepared = prepare_publication::<F, commonware_cryptography::Sha256, U, _, N>(
+            publication,
+            &publication.root,
+            &Sequential,
+        )?;
+        latest = Some(prepared.latest_location());
+        stage_authenticated_range(client, prepared, batch)?;
+    }
+    let latest = latest.expect("publications must not be empty");
+    stage_watermark(client, latest, batch)
+}
+
+/// Uploads consecutive current batch publications and publishes the last one's final location.
+#[allow(dead_code)]
+pub async fn commit_publications<F, U, const N: usize>(
+    client: &exoware_sdk::PrefixedStoreClient,
+    publications: &[Publication<F, commonware_cryptography::sha256::Digest, U, N>],
+) -> Result<(), QmdbError>
+where
+    F: Graftable,
+    U: Update,
+    AnyOperation<F, U>: UploadOperation<F>,
+{
     let mut batch = exoware_sdk::StoreWriteBatch::new();
-    exoware_qmdb::adapter::upload::stage_authenticated_range(client, prepared, &mut batch)?;
-    exoware_qmdb::adapter::upload::stage_watermark(client, latest, &mut batch)?;
+    stage_publications(client, publications, &mut batch)?;
     batch.commit(client.client()).await?;
     Ok(())
+}
+
+/// Re-decodes `publication` from its encoding, as a writer that deferred its upload would.
+#[allow(dead_code)]
+pub fn round_trip_publication<F, U, const N: usize>(
+    publication: &Publication<F, commonware_cryptography::sha256::Digest, U, N>,
+    operation: <AnyOperation<F, U> as Read>::Cfg,
+) -> Publication<F, commonware_cryptography::sha256::Digest, U, N>
+where
+    F: Graftable,
+    U: Update,
+    AnyOperation<F, U>: UploadOperation<F>,
+{
+    let cfg = PublicationCfg {
+        operation,
+        operations: (..).into(),
+        chunks: (..).into(),
+        grafted_nodes: (..).into(),
+    };
+    Publication::decode_cfg(publication.encode(), &cfg).expect("publication must decode")
 }
 
 #[allow(dead_code)]

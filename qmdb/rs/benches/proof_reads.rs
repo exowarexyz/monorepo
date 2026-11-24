@@ -16,21 +16,20 @@ use commonware_runtime::{
     buffer::paged::CacheRef, tokio as cw_tokio, Runner as _, Supervisor as _,
 };
 use commonware_storage::{
-    merkle::{mmr, Location, Proof},
+    merkle::{mmr, Location},
     qmdb::{
-        any::{ordered::variable::Operation as OrderedOperation, unordered::variable::Operation},
+        any::{
+            ordered::variable::Update as OrderedUpdate,
+            unordered::variable::Update as UnorderedUpdate,
+        },
         current::{ordered::variable::Db as OrderedDb, unordered::variable::Db as UnorderedDb},
     },
     translator::TwoCap,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use exoware_qmdb::{
-    adapter::upload::recover_boundary_state, proof::RawKeyLookupProof, CurrentBoundaryState,
-    MAX_OPERATION_SIZE,
-};
+use exoware_qmdb::{adapter::upload::Publication, proof::RawKeyLookupProof, MAX_OPERATION_SIZE};
 use exoware_sdk::{PrefixedStoreClient, StoreClient};
 use std::{
-    num::NonZeroU64,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -42,8 +41,8 @@ const FIRST: usize = 500;
 
 type Family = mmr::Family;
 type Digest = commonware_cryptography::sha256::Digest;
-type OrderedOp = OrderedOperation<Family, Vec<u8>, Vec<u8>>;
-type UnorderedOp = Operation<Family, Digest, Vec<u8>>;
+type OrderedPublication = Publication<Family, Digest, OrderedUpdate<Vec<u8>, Vec<u8>>, N>;
+type UnorderedPublication = Publication<Family, Digest, UnorderedUpdate<Digest, Vec<u8>>, N>;
 type OrderedClient = exoware_qmdb::adapter::Ordered<Family, Sha256, Vec<u8>, Vec<u8>, N>;
 type UnorderedClient = exoware_qmdb::adapter::Unordered<Family, Sha256, Digest, Vec<u8>, N>;
 type OrderedSourceDb = OrderedDb<
@@ -86,14 +85,13 @@ fn unordered_key(index: usize) -> Digest {
     Sha256::hash(&[&(index as u64).to_be_bytes()])
 }
 
-/// Operations and boundary state of a source database holding `KEYS` keys.
-struct Source<Op> {
+/// Publications and tip of a source database holding `KEYS` keys.
+struct Source<P> {
     latest: Location<Family>,
-    operations: Vec<Op>,
-    boundary: CurrentBoundaryState<Digest, N, Family>,
+    publications: [P; 2],
 }
 
-async fn ordered_source() -> Source<OrderedOp> {
+async fn ordered_source() -> Source<OrderedPublication> {
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
             let cfg = common::current_variable_config(
@@ -105,41 +103,19 @@ async fn ordered_source() -> Source<OrderedOp> {
             let mut db = OrderedSourceDb::init(context.child("proof_reads_ordered"), cfg, None)
                 .await
                 .unwrap();
+            let initial = Publication::initial(&db).unwrap();
             let mut batch = db.new_batch();
             for index in 0..KEYS {
                 batch = batch.write(ordered_key(index), Some(vec![0x5a; 32]));
             }
-            let batch = batch
-                .merkleize(
-                    &db,
-                    None::<Vec<u8>>,
-                    &mut commonware_storage::qmdb::floor::Proportional,
-                )
-                .await
-                .unwrap();
+            let batch = batch.merkleize(&db).await.unwrap();
+            let publication = Publication::from_batch(&batch, &db).unwrap();
             db = db.apply_batch(batch).await.unwrap();
             let latest = db.bounds().end - 1;
-            let count = NonZeroU64::new(*latest + 1).unwrap();
-            let (_, operations): (Proof<Family, Digest>, Vec<OrderedOp>) = db
-                .ops_historical_proof(latest + 1, Location::new(0), count)
-                .await
-                .unwrap();
-            let witness = db.ops_root_witness().await.unwrap();
-            let boundary = recover_boundary_state::<Family, Sha256, _, N, _, _>(
-                None,
-                &operations,
-                db.root(),
-                0,
-                witness,
-                |location| common::current_proof_chunk(db.range_proof(location, NZU64!(1))),
-            )
-            .await
-            .unwrap();
             db.destroy().await.unwrap();
             Source {
                 latest,
-                operations,
-                boundary,
+                publications: [initial, publication],
             }
         })
     })
@@ -147,7 +123,7 @@ async fn ordered_source() -> Source<OrderedOp> {
     .unwrap()
 }
 
-async fn unordered_source() -> Source<UnorderedOp> {
+async fn unordered_source() -> Source<UnorderedPublication> {
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
             let cfg = common::current_variable_config(
@@ -159,41 +135,19 @@ async fn unordered_source() -> Source<UnorderedOp> {
             let mut db = UnorderedSourceDb::init(context.child("proof_reads_unordered"), cfg, None)
                 .await
                 .unwrap();
+            let initial = Publication::initial(&db).unwrap();
             let mut batch = db.new_batch();
             for index in 0..KEYS {
                 batch = batch.write(unordered_key(index), Some(vec![0x5a; 32]));
             }
-            let batch = batch
-                .merkleize(
-                    &db,
-                    None::<Vec<u8>>,
-                    &mut commonware_storage::qmdb::floor::Proportional,
-                )
-                .await
-                .unwrap();
+            let batch = batch.merkleize(&db).await.unwrap();
+            let publication = Publication::from_batch(&batch, &db).unwrap();
             db = db.apply_batch(batch).await.unwrap();
             let latest = db.bounds().end - 1;
-            let count = NonZeroU64::new(*latest + 1).unwrap();
-            let (_, operations): (Proof<Family, Digest>, Vec<UnorderedOp>) = db
-                .ops_historical_proof(latest + 1, Location::new(0), count)
-                .await
-                .unwrap();
-            let witness = db.ops_root_witness().await.unwrap();
-            let boundary = recover_boundary_state::<Family, Sha256, _, N, _, _>(
-                None,
-                &operations,
-                db.root(),
-                0,
-                witness,
-                |location| common::current_proof_chunk(db.range_proof(location, NZU64!(1))),
-            )
-            .await
-            .unwrap();
             db.destroy().await.unwrap();
             Source {
                 latest,
-                operations,
-                boundary,
+                publications: [initial, publication],
             }
         })
     })
@@ -251,11 +205,9 @@ async fn check_ordered_get_many(
 async fn run(delay: Duration, runs: usize) {
     let (ordered_query, ordered_store) = delayed_store(delay).await;
     let source = ordered_source().await;
-    common::commit_current_operations(
+    common::commit_publications(
         &PrefixedStoreClient::empty(ordered_store.clone()),
-        &source.operations,
-        &(bytes_cfg(), bytes_cfg()),
-        &source.boundary,
+        &source.publications,
     )
     .await
     .unwrap();
@@ -332,11 +284,9 @@ async fn run(delay: Duration, runs: usize) {
 
     let (unordered_query, unordered_store) = delayed_store(delay).await;
     let source = unordered_source().await;
-    common::commit_current_operations(
+    common::commit_publications(
         &PrefixedStoreClient::empty(unordered_store.clone()),
-        &source.operations,
-        &((), bytes_cfg()),
-        &source.boundary,
+        &source.publications,
     )
     .await
     .unwrap();

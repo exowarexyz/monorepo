@@ -16,7 +16,7 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_codec::{Copying, Decode, DecodeExt, Encode, Read};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::{Family, Graftable, Location, Proof},
     qmdb::{
@@ -24,7 +24,7 @@ use commonware_storage::{
         sync::{
             source, Request as SyncRequest, Response as SyncResponse, Source, Target as SyncTarget,
         },
-        verify::{verify_multi_proof, verify_proof_and_pinned_nodes},
+        verify::ProofExt,
     },
 };
 use commonware_utils::range::NonEmptyRange;
@@ -34,7 +34,7 @@ use http_body::Body;
 use std::{fmt::Display, marker::PhantomData, num::NonZeroU64, sync::Arc};
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct OperationLogSubscribeProof<D: Digest, Op, F: Family> {
+pub struct OperationLogSubscribeProof<D, Op, F: Family> {
     pub resume_sequence_number: u64,
     pub tip: Location<F>,
     /// Canonical root at `tip`; see [`crate::proof::VerifiedOperationRange::root`].
@@ -44,13 +44,11 @@ pub struct OperationLogSubscribeProof<D: Digest, Op, F: Family> {
 
 impl<T, F, H, Op> Source for OperationLogClient<T, F, H, Op>
 where
-    T: ClientTransport + Clone + Send + Sync + 'static,
-    T::ResponseBody: Body<Data = Bytes> + Unpin,
+    T: ClientTransport,
     <T::ResponseBody as Body>::Error: Display,
-    F: Graftable + Send + Sync + 'static,
-    H: Hasher + Send + Sync + 'static,
-    H::Digest: DecodeExt<()>,
-    Op: Decode + Encode + Read + Send + Sync + 'static,
+    F: Graftable,
+    H: Hasher,
+    Op: Encode + Read + Send + Sync,
 {
     type Family = F;
     type Digest = H::Digest;
@@ -65,7 +63,7 @@ where
     }
 }
 
-pub struct OperationLogSubscription<B, F: Graftable, H: Hasher, Op: Decode + Encode + Read> {
+pub struct OperationLogSubscription<B, F, H, Op: Read> {
     stream: ServerStream<B, SubscribeResponseView<'static>>,
     op_cfg: Arc<Op::Cfg>,
     _marker: PhantomData<(F, H, Op)>,
@@ -77,8 +75,7 @@ where
     B::Error: Display,
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
-    Op: Decode + Encode + Read,
+    Op: Encode + Read,
 {
     pub async fn message_with_root<R>(
         &mut self,
@@ -122,7 +119,7 @@ where
 /// Client for `qmdb.v1.OperationLogService`, parameterized on the Merkle
 /// family and backend operation type. Implements Commonware QMDB sync [`Source`].
 /// Callers supply a target with an independently trusted operation-log root.
-pub struct OperationLogClient<T, F: Graftable, H: Hasher, Op: Encode + Read> {
+pub struct OperationLogClient<T, F, H, Op: Read> {
     rpc: OperationLogServiceClient<T>,
     op_cfg: Arc<Op::Cfg>,
     _marker: PhantomData<(F, H, Op)>,
@@ -130,9 +127,7 @@ pub struct OperationLogClient<T, F: Graftable, H: Hasher, Op: Encode + Read> {
 
 impl<T, F, H, Op> Clone for OperationLogClient<T, F, H, Op>
 where
-    F: Graftable,
-    H: Hasher,
-    Op: Encode + Read,
+    Op: Read,
     OperationLogServiceClient<T>: Clone,
 {
     fn clone(&self) -> Self {
@@ -148,8 +143,7 @@ impl<F, H, Op> OperationLogClient<PreferZstdHttpClient, F, H, Op>
 where
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
-    Op: Decode + Encode + Read,
+    Op: Encode + Read,
 {
     pub fn plaintext(base: &str, op_cfg: Op::Cfg) -> Self {
         Self::new(
@@ -163,12 +157,10 @@ where
 impl<T, F, H, Op> OperationLogClient<T, F, H, Op>
 where
     T: ClientTransport,
-    T::ResponseBody: Body<Data = Bytes> + Unpin,
     <T::ResponseBody as Body>::Error: Display,
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
-    Op: Decode + Encode + Read,
+    Op: Encode + Read,
 {
     pub fn new(transport: T, config: ClientConfig, op_cfg: Op::Cfg) -> Self {
         Self::from_service_client(OperationLogServiceClient::new(transport, config), op_cfg)
@@ -259,7 +251,10 @@ where
     pub async fn subscribe(
         &self,
         request: SubscribeRequest,
-    ) -> Result<OperationLogSubscription<T::ResponseBody, F, H, Op>, QmdbError> {
+    ) -> Result<OperationLogSubscription<T::ResponseBody, F, H, Op>, QmdbError>
+    where
+        T::ResponseBody: Unpin,
+    {
         let stream = self
             .rpc
             .subscribe(request)
@@ -371,7 +366,6 @@ async fn fetch_operation_range_proof<T>(
 ) -> Result<OperationRangeProof, QmdbError>
 where
     T: ClientTransport,
-    T::ResponseBody: Body<Data = Bytes> + Unpin,
     <T::ResponseBody as Body>::Error: Display,
 {
     let response = rpc
@@ -402,7 +396,6 @@ fn current_sync_target_from_witness<F, H>(
 ) -> Result<SyncTarget<F, H::Digest>, QmdbError>
 where
     F: Graftable,
-    H::Digest: DecodeExt<()>,
     H: Hasher,
 {
     let ops_root = decode_digest::<H::Digest>(ops_root, "current sync ops root")?;
@@ -417,7 +410,10 @@ where
             kind: crate::ProofKind::RangeCheckpoint,
         });
     }
-    Ok(SyncTarget::new(ops_root, range))
+    Ok(SyncTarget {
+        root: ops_root,
+        range,
+    })
 }
 
 fn operation_target_root<F, H>(
@@ -427,7 +423,6 @@ fn operation_target_root<F, H>(
 ) -> Result<H::Digest, QmdbError>
 where
     F: Graftable,
-    H::Digest: DecodeExt<()>,
     H: Hasher,
 {
     if ops_root.is_empty() {
@@ -467,8 +462,7 @@ fn verify_multi_from_proto<F, H, Op>(
 where
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
-    Op: Decode + Encode + Read,
+    Op: Encode + Read,
 {
     let operations = proto
         .operations
@@ -486,7 +480,7 @@ where
         .collect::<Result<Vec<_>, QmdbError>>()?;
     let target_root =
         operation_target_root::<F, H>(&proto.ops_root, &proto.ops_root_witness, root)?;
-    if !verify_multi_proof::<H, _, _>(proof, &operations, &target_root) {
+    if !proof.verify_multi::<H, _>(&operations, &target_root) {
         return Err(QmdbError::ProofVerification {
             kind: crate::ProofKind::BatchMulti,
         });
@@ -503,8 +497,7 @@ fn verify_operation_range_from_proto<F, H, Op>(
 where
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
-    Op: Decode + Encode + Read,
+    Op: Encode + Read,
 {
     if proto.encoded_operations.is_empty() {
         return Err(QmdbError::CorruptData(
@@ -541,8 +534,7 @@ where
         .iter()
         .map(|bytes| decode_digest::<H::Digest>(bytes.as_ref(), "operation range pinned node"))
         .collect::<Result<Vec<_>, QmdbError>>()?;
-    if !verify_proof_and_pinned_nodes::<H, _, _>(
-        &proof,
+    if !proof.verify_with_pinned_nodes::<H, _>(
         start,
         &decoded_operations,
         &pinned_nodes,

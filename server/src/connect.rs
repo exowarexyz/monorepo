@@ -255,10 +255,7 @@ impl<I> Clone for IngestState<I> {
     }
 }
 
-impl<I> IngestState<I>
-where
-    I: Ingest,
-{
+impl<I> IngestState<I> {
     pub fn new(ingest: Arc<I>) -> Self {
         Self {
             ingest,
@@ -317,10 +314,7 @@ impl<Q> Clone for QueryState<Q> {
     }
 }
 
-impl<Q> QueryState<Q>
-where
-    Q: Query,
-{
+impl<Q> QueryState<Q> {
     /// Creates a query service with DataFusion's shared, unbounded memory pool.
     ///
     /// Group state must fit in memory by default. Supply a native runtime with a
@@ -363,10 +357,7 @@ impl<P> Clone for PruneState<P> {
     }
 }
 
-impl<P> PruneState<P>
-where
-    P: Prune,
-{
+impl<P> PruneState<P> {
     pub const fn new(prune: Arc<P>) -> Self {
         Self { prune }
     }
@@ -394,10 +385,7 @@ impl<R> Clone for RetentionState<R> {
     }
 }
 
-impl<R> RetentionState<R>
-where
-    R: Retention,
-{
+impl<R> RetentionState<R> {
     pub const fn new(retention: Arc<R>) -> Self {
         Self { retention }
     }
@@ -428,10 +416,7 @@ impl<L> Clone for StreamState<L> {
     }
 }
 
-impl<L> StreamState<L>
-where
-    L: Log,
-{
+impl<L> StreamState<L> {
     pub fn new(log: Arc<L>, notifier: Arc<dyn StreamNotifier>) -> Self {
         Self { log, notifier }
     }
@@ -506,10 +491,7 @@ impl<Q> Clone for QueryConnect<Q> {
     }
 }
 
-impl<Q> QueryConnect<Q>
-where
-    Q: Query,
-{
+impl<Q> QueryConnect<Q> {
     pub fn new(state: impl Into<QueryState<Q>>) -> Self {
         Self {
             state: state.into(),
@@ -768,10 +750,7 @@ impl<P> Clone for PruneConnect<P> {
     }
 }
 
-impl<P> PruneConnect<P>
-where
-    P: Prune,
-{
+impl<P> PruneConnect<P> {
     pub fn new(state: impl Into<PruneState<P>>) -> Self {
         Self {
             state: state.into(),
@@ -813,10 +792,7 @@ impl<B> Clone for StreamConnect<B> {
     }
 }
 
-impl<B> StreamConnect<B>
-where
-    B: Log,
-{
+impl<B> StreamConnect<B> {
     pub fn new(state: impl Into<StreamState<B>>) -> Self {
         Self {
             state: state.into(),
@@ -1176,10 +1152,7 @@ impl<R> Clone for RetentionConnect<R> {
     }
 }
 
-impl<R> RetentionConnect<R>
-where
-    R: Retention,
-{
+impl<R> RetentionConnect<R> {
     pub fn new(state: impl Into<RetentionState<R>>) -> Self {
         Self {
             state: state.into(),
@@ -1281,10 +1254,7 @@ where
     StreamServiceServer::new(StreamConnect::new(state))
 }
 
-pub fn ingest_service<I>(state: IngestState<I>) -> IngestService<I>
-where
-    I: Ingest,
-{
+pub fn ingest_service<I: Ingest>(state: IngestState<I>) -> IngestService<I> {
     crate::ingest::service::PutService::new(
         state,
         ConnectRpcService::new(connectrpc::Router::new()),

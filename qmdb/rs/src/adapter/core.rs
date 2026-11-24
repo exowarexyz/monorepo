@@ -12,8 +12,8 @@ use crate::{
     PublishedWatermark, VersionedValue,
 };
 use bytes::Bytes;
-use commonware_codec::{Codec, Copying, Decode};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_codec::{Copying, Decode};
+use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_storage::merkle::{
@@ -49,7 +49,7 @@ pub(crate) async fn read_latest_watermark_with_sequence<F: Family>(
 }
 
 /// Decodes a loaded operation and verifies that it matches the requested key.
-pub(crate) trait LatestValueResolver<F: Family, K: Codec, V: Codec> {
+pub(crate) trait LatestValueResolver<F: Family, K, V> {
     fn resolve_latest_value(
         &self,
         location: Location<F>,
@@ -58,18 +58,19 @@ pub(crate) trait LatestValueResolver<F: Family, K: Codec, V: Codec> {
     ) -> Result<VersionedValue<K, V, F>, QmdbError>;
 }
 
-/// Caches the greatest published QMDB watermark and the lowest Store sequence
-/// known to include it. That sequence comes from a publication lookup or from
-/// a subscription frame that carried the watermark row.
+/// Caches the greatest published QMDB watermark it has seen and the lowest
+/// Store sequence known to include it. That sequence comes from a watermark
+/// lookup or from a subscription frame that carried the watermark row.
 ///
-/// Reads at that watermark or an earlier one can skip publication lookup, given
-/// their data and proof reads must require at least the cached sequence as `min_sequence_number`.
+/// Reads at that watermark or an earlier one can skip the watermark lookup,
+/// provided their data and proof reads require at least the cached sequence as
+/// `min_sequence_number`.
 ///
 /// Share a cache only between clients for the same store and namespace.
 #[derive(Debug)]
 pub(crate) struct PublicationCache<F: Family> {
     published: Mutex<Option<PublishedWatermark<F>>>,
-    // Serializes publication lookups, so a `require` that waits here can use
+    // Serializes watermark lookups, so a `require` that waits here can use
     // the result of the lookup it waited on. `published` has its own lock, so
     // updating it doesn't need this gate.
     refresh_gate: tokio::sync::Mutex<()>,
@@ -188,8 +189,6 @@ pub(crate) async fn query_many_at<F, K, V, Q, R>(
 ) -> Result<Vec<Option<VersionedValue<K, V, F>>>, QmdbError>
 where
     F: Family,
-    K: Codec,
-    V: Codec,
     Q: AsRef<[u8]>,
     R: LatestValueResolver<F, K, V>,
 {
@@ -413,7 +412,7 @@ pub(crate) async fn load_operation_bytes_range<F: Family>(
 
 /// Extend a pinned prefix with encoded operations, returning the root, frontier,
 /// and every new node needed to serve proofs.
-pub(crate) struct MerkleExtension<F: Family, D: Digest> {
+pub(crate) struct MerkleExtension<F: Family, D> {
     pub(crate) size: Position<F>,
     pub(crate) peaks: Vec<(Position<F>, u32, D)>,
     pub(crate) root: D,
@@ -431,7 +430,7 @@ where
     F: Family,
     H: Hasher,
     S: Strategy,
-    I: IntoIterator + Send,
+    I: IntoIterator,
     I::Item: AsRef<[u8]> + Send,
     I::IntoIter: Send,
 {

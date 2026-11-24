@@ -52,6 +52,9 @@ pub enum ProofKind {
     RangeCheckpoint,
     /// Contiguous current-state range proof.
     CurrentRange,
+    /// [`Publication`](crate::adapter::upload::Publication): a current batch
+    /// whose root and operation-log witness bind to the expected root.
+    Publication,
 }
 
 impl std::fmt::Display for ProofKind {
@@ -62,6 +65,7 @@ impl std::fmt::Display for ProofKind {
             Self::BatchMulti => "batch multi",
             Self::RangeCheckpoint => "range checkpoint",
             Self::CurrentRange => "current range",
+            Self::Publication => "publication",
         };
         f.write_str(s)
     }
@@ -93,8 +97,6 @@ impl From<crate::request::InvalidLocations> for QmdbError {
 pub enum QmdbError {
     #[error(transparent)]
     Client(#[from] ClientError),
-    #[error("batch must contain at least one operation")]
-    EmptyBatch,
     #[error("proof request must contain at least one key")]
     EmptyProofRequest,
     #[error("range proof max_locations must be > 0")]
