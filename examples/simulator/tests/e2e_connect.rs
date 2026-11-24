@@ -64,7 +64,7 @@ async fn generated_zstd_put_uses_the_shared_streaming_path() {
     let response = ingest
         .put(PutRequest {
             kvs: vec![Entry {
-                key: key.to_vec(),
+                key: key.clone(),
                 value: value.clone(),
                 ..Default::default()
             }],
@@ -120,7 +120,7 @@ async fn assert_responses_in<T>(
 
     let response = query
         .get(GetRequest {
-            key: key.to_vec(),
+            key: key.clone(),
             min_sequence_number: Some(sequence),
             ..Default::default()
         })
@@ -131,7 +131,7 @@ async fn assert_responses_in<T>(
 
     let mut stream = query
         .get_many(GetManyRequest {
-            keys: vec![key.to_vec()],
+            keys: vec![key.clone()],
             min_sequence_number: Some(sequence),
             batch_size: 1,
             ..Default::default()

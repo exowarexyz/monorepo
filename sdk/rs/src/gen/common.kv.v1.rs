@@ -15,7 +15,7 @@ pub struct Entry {
         with = "::buffa::json_helpers::bytes",
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
-    pub key: ::buffa::alloc::vec::Vec<u8>,
+    pub key: ::buffa::bytes::Bytes,
     /// Field 2: `value`
     #[serde(
         rename = "value",
@@ -102,7 +102,7 @@ impl ::buffa::Message for Entry {
                     tag,
                     ::buffa::encoding::WireType::LengthDelimited,
                 )?;
-                ::buffa::types::merge_bytes(&mut self.key, buf)?;
+                self.key = ::buffa::types::decode_bytes_to_bytes(buf)?;
             }
             2u32 => {
                 ::buffa::encoding::check_wire_type(
@@ -119,7 +119,7 @@ impl ::buffa::Message for Entry {
         ::core::result::Result::Ok(())
     }
     fn clear(&mut self) {
-        self.key.clear();
+        self.key = ::core::default::Default::default();
         self.value = ::core::default::Default::default();
         self.__buffa_unknown_fields.clear();
     }
@@ -706,7 +706,7 @@ pub mod __buffa {
                 use ::buffa::alloc::string::ToString as _;
                 let _ = __buffa_src;
                 ::core::result::Result::Ok(super::super::Entry {
-                    key: (self.key).to_vec(),
+                    key: ::buffa::view::bytes_from_source(__buffa_src, self.key),
                     value: ::buffa::view::bytes_from_source(__buffa_src, self.value),
                     __buffa_unknown_fields: self
                         .__buffa_unknown_fields

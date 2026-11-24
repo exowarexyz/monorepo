@@ -60,7 +60,7 @@ impl Service for RangeHarness {
 
         let frame = RangeFrame {
             results: vec![Entry {
-                key: row_key().to_vec(),
+                key: row_key(),
                 value: row_value(),
                 ..Default::default()
             }],
