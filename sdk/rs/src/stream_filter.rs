@@ -8,14 +8,11 @@
 //! `Filter` in the value list (OR within the value list; AND between key
 //! and value filters).
 
-use std::collections::BTreeSet;
-
+use crate::{keys::Prefix, selector::Selector};
 use anyhow::ensure;
 use bytes::Bytes;
 use regex::bytes::Regex;
-
-use crate::keys::Prefix;
-use crate::selector::Selector;
+use std::collections::BTreeSet;
 
 pub const MAX_SELECTORS_PER_FILTER: usize = 16;
 pub const MAX_VALUE_FILTERS_PER_FILTER: usize = 16;
@@ -81,7 +78,7 @@ impl CompiledFilters {
     }
 
     pub fn matches(&self, bytes: &[u8]) -> bool {
-        self.exacts.iter().any(|exact| exact.as_ref() == bytes)
+        self.exacts.contains(bytes)
             || self.prefixes.iter().any(|p| bytes.starts_with(p))
             || self.regexes.iter().any(|r| r.is_match(bytes))
     }

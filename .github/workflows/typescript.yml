@@ -15,11 +15,13 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Clear disk space
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Check disk space and configure swap
         uses: ./.github/actions/disk
       - name: Run setup
         uses: ./.github/actions/setup
+        with:
+          rust: "false"
       - name: Install sdk/ts dependencies
         run: cd sdk/ts && npm ci
       - name: Lint sdk/ts
@@ -35,8 +37,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Clear disk space
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Check disk space and configure swap
         uses: ./.github/actions/disk
       - name: Run setup
         uses: ./.github/actions/setup
@@ -51,11 +53,13 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Clear disk space
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Check disk space and configure swap
         uses: ./.github/actions/disk
       - name: Run setup
         uses: ./.github/actions/setup
+        with:
+          rust: "false"
       - name: Install sdk/ts dependencies
         run: cd sdk/ts && npm ci
       - name: Build sdk/ts
@@ -69,15 +73,20 @@ jobs:
       BUF_TOKEN: ${{ secrets.BUF_TOKEN }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Clear disk space
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Check disk space and configure swap
         uses: ./.github/actions/disk
+      # The three Web jobs compile the same two wasm crates (through the sandbox's prebuild),
+      # so they share one cache. SQL Web builds the most and is the only one that saves it.
       - name: Run setup
         uses: ./.github/actions/setup
+        with:
+          shared-cache-key: web
+          save-cache: "false"
       - name: Install wasm32 target
         run: rustup target add wasm32-unknown-unknown
       - name: Install wasm-pack + wasm-bindgen-cli
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
         with:
           tool: wasm-pack@0.13.1,wasm-bindgen-cli@0.2.127
       - name: Install sdk/ts dependencies
@@ -107,15 +116,20 @@ jobs:
       BUF_TOKEN: ${{ secrets.BUF_TOKEN }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Clear disk space
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Check disk space and configure swap
         uses: ./.github/actions/disk
+      # The three Web jobs compile the same two wasm crates (through the sandbox's prebuild),
+      # so they share one cache. SQL Web builds the most and is the only one that saves it.
       - name: Run setup
         uses: ./.github/actions/setup
+        with:
+          shared-cache-key: web
+          save-cache: "false"
       - name: Install wasm32 target
         run: rustup target add wasm32-unknown-unknown
       - name: Install wasm-pack + wasm-bindgen-cli
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
         with:
           tool: wasm-pack@0.13.1,wasm-bindgen-cli@0.2.127
       - name: Install sdk/ts dependencies
@@ -149,15 +163,19 @@ jobs:
       BUF_TOKEN: ${{ secrets.BUF_TOKEN }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Clear disk space
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Check disk space and configure swap
         uses: ./.github/actions/disk
+      # The three Web jobs compile the same two wasm crates (through the sandbox's prebuild),
+      # so they share one cache. SQL Web builds the most and is the only one that saves it.
       - name: Run setup
         uses: ./.github/actions/setup
+        with:
+          shared-cache-key: web
       - name: Install wasm32 target
         run: rustup target add wasm32-unknown-unknown
       - name: Install wasm-pack + wasm-bindgen-cli
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
         with:
           tool: wasm-pack@0.13.1,wasm-bindgen-cli@0.2.127
       - name: Install sdk/ts dependencies

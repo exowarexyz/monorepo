@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Client, type StoreClient } from '@exowarexyz/sdk';
 import { Buffer } from 'buffer';
 import './App.css';
-import { QMDB_URL, SIMPLEX_URL, SQL_URL } from './env';
+import { QMDB_URL, SIMPLEX_URL, SIMPLEX_STORE_PREFIX, SQL_URL } from './env';
 import { LogPanel } from './LogPanel';
 import { QmdbPanel } from './QmdbPanel';
 import { SimplexPanel } from './SimplexPanel';
@@ -127,7 +127,13 @@ function App() {
       </div>
 
       {QMDB_URL && <QmdbPanel qmdbUrl={QMDB_URL} showNotification={showNotification} />}
-      {SIMPLEX_URL && <SimplexPanel simplexUrl={SIMPLEX_URL} showNotification={showNotification} />}
+      {SIMPLEX_URL && (
+        <SimplexPanel
+          simplexUrl={SIMPLEX_URL}
+          storePrefix={SIMPLEX_STORE_PREFIX}
+          showNotification={showNotification}
+        />
+      )}
       {SQL_URL && <SqlPanel sqlUrl={SQL_URL} showNotification={showNotification} />}
     </div>
   );

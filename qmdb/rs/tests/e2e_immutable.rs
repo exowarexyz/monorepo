@@ -3,24 +3,23 @@
 
 mod common;
 
-use std::num::NonZeroU64;
-
-use commonware_runtime::{deterministic, Runner as _};
-use commonware_storage::journal::contiguous::fixed::Config as FixedJournalConfig;
-use commonware_storage::merkle::{mmr, Location};
-use commonware_storage::qmdb::any::value::FixedEncoding;
-use commonware_storage::qmdb::immutable::fixed::{
-    Db as FixedImmutable, Operation as FixedImmutableOperation,
-};
-use commonware_storage::qmdb::immutable::variable::{
-    Db as Immutable, Operation as ImmutableOperation,
-};
-use commonware_storage::translator::TwoCap;
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
-
-use exoware_sdk::{PrefixedStoreClient, StoreClient};
-
 use common::retry;
+use commonware_runtime::{deterministic, Runner as _};
+use commonware_storage::{
+    journal::contiguous::fixed::Config as FixedJournalConfig,
+    merkle::{mmr, Location},
+    qmdb::{
+        immutable::{
+            fixed::{Db as FixedImmutable, Operation as FixedImmutableOperation},
+            variable::{Db as Immutable, Operation as ImmutableOperation},
+        },
+        value::FixedEncoding,
+    },
+    translator::TwoCap,
+};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+use exoware_sdk::{PrefixedStoreClient, StoreClient};
+use std::num::NonZeroU64;
 
 type Digest = commonware_cryptography::sha256::Digest;
 type VariableDb = Immutable<
@@ -87,7 +86,7 @@ async fn build_variable_source() -> VariableSource {
     tokio::task::spawn_blocking(|| {
         deterministic::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::immutable_variable_config(
                 "immutable_variable_full_mmr_source",
                 page_cache,
@@ -112,12 +111,9 @@ async fn build_variable_source() -> VariableSource {
                     .new_batch()
                     .set(key_a, val_a)
                     .set(key_b.clone(), val_b.clone());
-                batch
-                    .merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
-                    .await
-                    .expect("merkleize")
+                batch.merkleize(&db).await.expect("merkleize")
             };
-            (db, _) = db.apply_batch(finalized).await.expect("apply");
+            db = db.apply_batch(finalized).await.expect("apply");
 
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -145,12 +141,9 @@ async fn build_fixed_source() -> FixedSource {
     tokio::task::spawn_blocking(|| {
         deterministic::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = commonware_storage::qmdb::immutable::Config {
-                merkle_config: common::merkle_config(
-                    "immutable_fixed_full_mmr_source",
-                    page_cache.clone(),
-                ),
+                merkle: common::merkle_config("immutable_fixed_full_mmr_source"),
                 log: FixedJournalConfig {
                     partition: "immutable_fixed_full_mmr_source-log".to_string(),
                     items_per_blob: NZU64!(5),
@@ -160,6 +153,7 @@ async fn build_fixed_source() -> FixedSource {
                 },
                 translator: TwoCap,
                 init_buffer: NZUsize!(1 << 21),
+                init_concurrency: NZUsize!(1),
             };
             let mut db: FixedDb =
                 FixedDb::init(context.child("immutable_fixed_full_mmr_source"), cfg, None)
@@ -173,12 +167,9 @@ async fn build_fixed_source() -> FixedSource {
 
             let finalized = {
                 let batch = db.new_batch().set(key_a, val_a).set(key_b.clone(), val_b);
-                batch
-                    .merkleize(&db, None::<Digest>, db.inactivity_floor_loc())
-                    .await
-                    .expect("merkleize")
+                batch.merkleize(&db).await.expect("merkleize")
             };
-            (db, _) = db.apply_batch(finalized).await.expect("apply fixed");
+            db = db.apply_batch(finalized).await.expect("apply fixed");
 
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();

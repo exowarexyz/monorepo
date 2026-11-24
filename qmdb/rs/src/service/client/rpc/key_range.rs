@@ -1,43 +1,36 @@
 //! Verifying client for `qmdb.v1.OrderedKeyRangeService`.
 
-use std::fmt::Display;
-use std::marker::PhantomData;
-use std::sync::Arc;
-
-use bytes::Bytes;
-use commonware_codec::{Copying, Decode, DecodeExt, Encode, Read};
+use super::{
+    connect_error_to_qmdb,
+    verify::{verify_key_exclusion_from_proto, verify_key_value_from_proto},
+};
+use crate::{
+    proof::VerifiedKeyRange,
+    request::validate_key_range,
+    service::proto::qmdb::v1::{GetRangeRequest, GetRangeResponse, OrderedKeyRangeServiceClient},
+    QmdbError,
+};
+use commonware_codec::{Copying, Encode, Read};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::Graftable,
     qmdb::{
-        any::{
-            ordered,
-            value::{ValueEncoding, VariableEncoding},
-        },
-        current::ordered::proof::constant::ExclusionProof,
+        any::ordered,
         operation::Key as QmdbKey,
+        value::{ValueEncoding, VariableEncoding},
     },
 };
 use connectrpc::client::{ClientConfig, ClientTransport};
 use http_body::Body;
-
-use crate::proof::VerifiedKeyRange;
-use crate::request::validate_key_range;
-use crate::service::proto::qmdb::v1::{
-    GetRangeRequest, GetRangeResponse, OrderedKeyRangeServiceClient,
-};
-use crate::QmdbError;
-
-use super::connect_error_to_qmdb;
-use super::verify::{verify_key_exclusion_from_proto, verify_key_value_from_proto};
+use std::{fmt::Display, marker::PhantomData, sync::Arc};
 
 /// Client for `qmdb.v1.OrderedKeyRangeService`.
 pub struct KeyRangeClient<
     T,
     F: Graftable,
-    H: Hasher,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    H,
+    K: QmdbKey,
+    V: Read,
     const N: usize,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > where
@@ -56,9 +49,8 @@ impl<T, F, H, K, V, const N: usize, E> Clone for KeyRangeClient<T, F, H, K, V, N
 where
     T: Clone,
     F: Graftable,
-    H: Hasher,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V: Read,
     E: ValueEncoding<Value = V>,
     ordered::Operation<F, K, E>: Read,
     ordered::Update<K, E>: Read,
@@ -78,18 +70,14 @@ where
 impl<T, F, H, K, V, const N: usize, E> KeyRangeClient<T, F, H, K, V, N, E>
 where
     T: ClientTransport,
-    T::ResponseBody: Body<Data = Bytes> + Unpin,
     <T::ResponseBody as Body>::Error: Display,
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V: commonware_codec::Codec + Clone,
     E: ValueEncoding<Value = V>,
-    ordered::Operation<F, K, E>: Decode + Encode + Read,
+    ordered::Operation<F, K, E>: Encode + Read,
     ordered::Update<K, E>: Read,
-    ExclusionProof<F, K, E, H::Digest, N>:
-        Read<Cfg = (usize, <ordered::Update<K, E> as Read>::Cfg, V::Cfg)>,
 {
     pub fn new(
         transport: T,
@@ -169,14 +157,11 @@ fn verify_get_range_from_proto<F, H, K, V, const N: usize, E>(
 where
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V: commonware_codec::Codec + Clone,
     E: ValueEncoding<Value = V>,
-    ordered::Operation<F, K, E>: Decode + Encode + Read,
+    ordered::Operation<F, K, E>: Encode + Read,
     ordered::Update<K, E>: Read,
-    ExclusionProof<F, K, E, H::Digest, N>:
-        Read<Cfg = (usize, <ordered::Update<K, E> as Read>::Cfg, V::Cfg)>,
 {
     let start_key = K::decode_cfg(Copying(start_key), key_cfg).map_err(|err| {
         QmdbError::CorruptData(format!("failed to decode range start key: {err}"))

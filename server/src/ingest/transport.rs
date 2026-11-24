@@ -1,3 +1,7 @@
+use axum::{body::Body, serve::Listener};
+use http::{Request, Response, Version};
+use http_body::Body as _;
+use hyper_util::{rt::TokioIo, server::conn::auto::Builder, service::TowerToHyperService};
 use std::{
     convert::Infallible,
     future::Future,
@@ -5,11 +9,6 @@ use std::{
     pin::Pin,
     task::{Context, Poll},
 };
-
-use axum::{body::Body, serve::Listener};
-use http::{Request, Response, Version};
-use http_body::Body as _;
-use hyper_util::{rt::TokioIo, server::conn::auto::Builder, service::TowerToHyperService};
 use tokio::{sync::watch, task::JoinSet, time::Instant};
 use tower::{service_fn, Service, ServiceExt};
 
@@ -90,7 +89,6 @@ impl http_body::Body for AdmissionBody {
 impl<F> hyper::rt::Executor<F> for StreamExecutor
 where
     F: Future + Send + 'static,
-    F::Output: Send + 'static,
 {
     fn execute(&self, future: F) {
         let (deadline, mut changes) = watch::channel(None);
@@ -304,13 +302,12 @@ impl ConnectionControl {
 pub async fn serve<L, S, B, F>(mut listener: L, service: S, shutdown: F) -> io::Result<()>
 where
     L: Listener,
-    L::Io: Send + Unpin + 'static,
     S: Service<Request<Body>, Response = Response<B>, Error = Infallible> + Clone + Send + 'static,
     S::Future: Send,
     B: http_body::Body + Send + 'static,
     B::Data: Send,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
-    F: Future<Output = ()> + Send,
+    F: Future<Output = ()>,
 {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let mut connections = JoinSet::new();

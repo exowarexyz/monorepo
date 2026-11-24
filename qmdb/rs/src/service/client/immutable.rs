@@ -1,35 +1,29 @@
 //! Verifying client for immutable QMDB.
 
-use std::fmt::Display;
-
-use bytes::Bytes;
-use commonware_codec::{Decode, DecodeExt, Encode, Read};
+use super::rpc::{OperationLogClient, OperationLogSubscription};
+use crate::{
+    proof::VerifiedOperationRange,
+    service::proto::qmdb::v1::{GetOperationRangeRequest, SubscribeRequest},
+    QmdbError,
+};
+use commonware_codec::{Encode, Read};
 use commonware_cryptography::Hasher;
-use commonware_storage::merkle::Location;
 use commonware_storage::{
-    merkle::Graftable,
-    qmdb::{any::value::ValueEncoding, immutable, operation::Key as QmdbKey},
+    merkle::{Family, Graftable, Location},
+    qmdb::{immutable, operation::Key as QmdbKey, value::ValueEncoding},
 };
 use connectrpc::client::{ClientConfig, ClientTransport};
 use exoware_sdk::proto::PreferZstdHttpClient;
 use http_body::Body;
-
-use super::rpc::OperationLogSubscription;
-use crate::proof::VerifiedOperationRange;
-use crate::service::proto::qmdb::v1::{GetOperationRangeRequest, SubscribeRequest};
-use crate::QmdbError;
-
-use super::rpc::OperationLogClient;
+use std::fmt::Display;
 
 /// Verifying client for an immutable-QMDB endpoint: the operation log.
 pub struct Immutable<T, F, H, K, V, E>
 where
-    F: Graftable,
-    H: Hasher,
+    F: Family,
     K: QmdbKey,
-    V: commonware_codec::Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
-    immutable::Operation<F, K, E>: Encode + Read,
+    immutable::Operation<F, K, E>: Read,
 {
     operation_log: OperationLogClient<T, F, H, immutable::Operation<F, K, E>>,
 }
@@ -38,11 +32,9 @@ impl<F, H, K, V, E> Immutable<PreferZstdHttpClient, F, H, K, V, E>
 where
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
     K: QmdbKey,
-    V: commonware_codec::Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
-    immutable::Operation<F, K, E>: Decode + Encode + Read,
+    immutable::Operation<F, K, E>: Encode + Read,
 {
     pub fn plaintext(base: &str, op_cfg: <immutable::Operation<F, K, E> as Read>::Cfg) -> Self {
         Self::new(
@@ -56,15 +48,12 @@ where
 impl<T, F, H, K, V, E> Immutable<T, F, H, K, V, E>
 where
     T: ClientTransport,
-    T::ResponseBody: Body<Data = Bytes> + Unpin,
     <T::ResponseBody as Body>::Error: Display,
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
     K: QmdbKey,
-    V: commonware_codec::Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
-    immutable::Operation<F, K, E>: Decode + Encode + Read,
+    immutable::Operation<F, K, E>: Encode + Read,
 {
     pub fn new(
         transport: T,
@@ -108,7 +97,10 @@ where
     ) -> Result<
         OperationLogSubscription<T::ResponseBody, F, H, immutable::Operation<F, K, E>>,
         QmdbError,
-    > {
+    >
+    where
+        T::ResponseBody: Unpin,
+    {
         self.operation_log.subscribe(request).await
     }
 }

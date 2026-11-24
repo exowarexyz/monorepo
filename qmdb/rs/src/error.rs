@@ -46,13 +46,15 @@ pub enum ProofKind {
     CurrentKeyValue,
     /// Current ordered proof that a key is inactive.
     CurrentKeyExclusion,
-    /// Subscribe-time multi-proof covering matched operations in one batch
-    /// (`OperationLogService.Subscribe`).
+    /// Operation-log membership proof over selected operations.
     BatchMulti,
-    /// Contiguous historical range proof (sync checkpoint).
+    /// Contiguous operation range proof (sync checkpoint).
     RangeCheckpoint,
     /// Contiguous current-state range proof.
     CurrentRange,
+    /// [`Publication`](crate::adapter::upload::Publication): a current batch
+    /// whose root and operation-log witness bind to the expected root.
+    Publication,
 }
 
 impl std::fmt::Display for ProofKind {
@@ -63,6 +65,7 @@ impl std::fmt::Display for ProofKind {
             Self::BatchMulti => "batch multi",
             Self::RangeCheckpoint => "range checkpoint",
             Self::CurrentRange => "current range",
+            Self::Publication => "publication",
         };
         f.write_str(s)
     }
@@ -94,8 +97,6 @@ impl From<crate::request::InvalidLocations> for QmdbError {
 pub enum QmdbError {
     #[error(transparent)]
     Client(#[from] ClientError),
-    #[error("batch must contain at least one operation")]
-    EmptyBatch,
     #[error("proof request must contain at least one key")]
     EmptyProofRequest,
     #[error("range proof max_locations must be > 0")]
@@ -123,7 +124,7 @@ pub enum QmdbError {
     RangeStartOutOfBounds { start: u64, count: u64 },
     #[error("invalid requested locations: {0}")]
     InvalidRequestedLocations(String),
-    #[error("requested tip {} exceeds the operation location domain", u64::MAX)]
+    #[error("requested tip exceeds the operation location domain")]
     TipOverflow,
     #[error("encoded value exceeds store value limit ({len} > {max})")]
     EncodedValueTooLarge { len: usize, max: usize },

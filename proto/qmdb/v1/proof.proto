@@ -2,17 +2,17 @@ syntax = "proto3";
 
 package qmdb.v1;
 
-// One historical operation proven by a multi-proof.
+// One operation proven by a multi-proof.
 message MultiProofOperation {
   uint64 location = 1;
   bytes encoded_operation = 2;
 }
 
-// Historical QMDB multi-proof over a set of operation locations.
-message HistoricalMultiProof {
+// Operation-log membership proof over a set of operation locations.
+message OperationMultiProof {
   bytes proof = 1;
   repeated MultiProofOperation operations = 2;
-  // Operation-log root used to verify the historical proof. Current-boundary
+  // Operation-log root used to verify this proof. Current-boundary
   // endpoints authenticate this with `ops_root_witness`; operation-log-only
   // endpoints omit the witness and clients authenticate this root out-of-band.
   bytes ops_root = 3;
@@ -22,12 +22,12 @@ message HistoricalMultiProof {
   bytes ops_root_witness = 4;
 }
 
-// Historical QMDB range proof over a contiguous operation interval.
-message HistoricalOperationRangeProof {
+// Operation-log membership proof over a contiguous operation interval.
+message OperationRangeProof {
   bytes proof = 1;
   uint64 start_location = 2;
   repeated bytes encoded_operations = 3;
-  // Operation-log root used to verify the historical proof. Current-boundary
+  // Operation-log root used to verify this proof. Current-boundary
   // endpoints authenticate this with `ops_root_witness`; operation-log-only
   // endpoints omit the witness and clients authenticate this root out-of-band.
   bytes ops_root = 4;

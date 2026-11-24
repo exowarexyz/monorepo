@@ -1,17 +1,17 @@
 #![allow(clippy::type_complexity)]
 
-//! Read and verify Commonware QMDB proofs from Exoware.
+//! Upload Commonware QMDB data to an Exoware Store, serve proof queries, and verify responses
+//! against trusted roots. Ordered, unordered, immutable, and keyless databases are supported,
+//! with MMR or MMB Merkle trees.
 //!
-//! Supports ordered, unordered, immutable, and keyless QMDB.
-//!
-//! Writes go directly to the store service, with this crate offering helpers such as
-//! [`adapter::upload::prepare_authenticated_range`], [`adapter::upload::stage_authenticated_range`]
-//! and [`adapter::upload::stage_watermark`].
+//! [`adapter::upload`] verifies and stages upload rows, and the application commits them to the
+//! Store. A current QMDB uploads each batch as an [`adapter::upload::Publication`] that also
+//! carries the batch's current-state changes.
 //!
 //! Reads take one of two paths. The adapters ([`adapter::Ordered`], [`adapter::Unordered`],
-//! [`adapter::Immutable`], and [`adapter::Keyless`]) query the store service directly. The
-//! clients under [`service::client`] query the QMDB ConnectRPC service and verify each
-//! response against a trusted root.
+//! [`adapter::Immutable`], and [`adapter::Keyless`]) query the Store directly. The clients
+//! under [`service::client`] query the `qmdb.v1` ConnectRPC service that [`service::server`]
+//! serves from the same rows, and verify each response against a trusted root.
 //!
 //! # Crate map
 //!
@@ -25,27 +25,33 @@
 //! - [`proof`]: raw and verified proof types shared by readers and clients.
 //! - [`error`]: [`QmdbError`] and [`ProofKind`].
 //!
-//! # Uploads and publication
+//! # Uploads and watermarks
 //!
-//! Callers provide authenticated Commonware operation ranges and stage their Store rows
-//! without constructing an uploader or reading remote state. An application-owned durable
-//! queue publishes the watermark after the whole contiguous prefix is durable.
+//! Preparation reads no remote state, so writers can prepare ranges and current batch publications
+//! of one history concurrently and in any order. Uploading them out of order is safe because
+//! readers reject a query at any location above the greatest published watermark. Publishing
+//! watermark `W` asserts that the whole contiguous prefix `[0, W]` is durable, so publish it only
+//! once every row through `W` is durable or is committed in the same Store batch. Below, three
+//! ranges are uploaded and the middle one arrives last.
 //!
-//! Uploads may still happen concurrently and out of order. Current batch-boundary
-//! state may also be uploaded ahead of publication. Only watermark publication is
-//! monotonic: publishing watermark `W` means the whole contiguous prefix
-//! `[0, W]` is available and may now be trusted by readers.
+//! ```text
+//!  location     0                 99 100              199 200              299
+//!  durable      [==================]          gap         [==================]
+//!  watermark                       ^ 99
 //!
-//! Readers fence historical queries against that low watermark. Historical proofs
-//! use the global ops Merkle nodes stored by `Position`.
+//!  durable      [==================] [==================] [==================]
+//!  watermark                                                                 ^ 299
+//! ```
 //!
-//! Current QMDB proofs use versioned current-state deltas:
-//! - bitmap chunk rows
-//! - grafted-node rows
+//! A gap keeps the watermark at or below the last commit of the prefix under it. Once the missing
+//! range is durable, the watermark can advance to the last commit before the next gap in one step.
 //!
-//! Those rows are versioned by uploaded batch boundary `Location`, not by the
-//! final published watermark. That is what preserves lower-boundary current
-//! proofs below a later published low watermark.
+//! An operation-log Merkle node never changes once written, so it has one row, keyed by its
+//! `Position`, and historical proofs at every later watermark read that row. Current state does
+//! change, so a publication's current-state rows are keyed by the batch's final location. They hold
+//! the current root, pruned chunk count, witness, bitmap chunks, and grafted nodes. A later batch
+//! adds rows under new keys and overwrites none, so a current proof at an earlier batch reads the
+//! same rows after the watermark moves past it.
 
 pub mod adapter;
 pub mod error;
@@ -55,12 +61,10 @@ pub mod service;
 
 #[cfg(feature = "test-utils")]
 pub use adapter::codec::{CHUNK_FAMILY, NODE_FAMILY};
-pub use error::{ProofKind, QmdbError};
-
 use commonware_codec::{Copying, DecodeExt};
 use commonware_cryptography::Digest;
-use commonware_storage::merkle::{self, Family, Graftable, Location};
-use commonware_storage::qmdb::current::proof::OpsRootWitness;
+use commonware_storage::merkle::{Family, Location};
+pub use error::{ProofKind, QmdbError};
 
 /// Maximum encoded operation size for QMDB key and value payloads (u16 length on the wire).
 pub const MAX_OPERATION_SIZE: usize = u16::MAX as usize;
@@ -71,38 +75,6 @@ pub struct VersionedValue<K, V, F: Family> {
     pub key: K,
     pub location: Location<F>,
     pub value: Option<V>,
-}
-
-/// Current-state rows for one uploaded current batch boundary.
-///
-/// Current QMDB uploads carry more than the historical op log: each published
-/// batch boundary also stores the current-state root, op-root witness, and the
-/// subset of bitmap chunks and grafted nodes that changed at that boundary.
-/// This struct is that versioned delta payload.
-///
-/// Callers typically obtain it from [`adapter::upload::recover_boundary_state`], using a local
-/// Commonware current DB, then attach it with
-/// [`adapter::upload::PreparedAuthenticatedRange::with_current_boundary`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CurrentBoundaryState<D: Digest, const N: usize, F: Graftable> {
-    /// Canonical current-state root at this batch boundary.
-    pub root: D,
-    /// Number of complete, all-zero chunks discarded from the start of the source bitmap.
-    /// Source pruning preserves the root. This count does not delete backend rows.
-    pub pruned_chunks: u64,
-    /// Proof that the raw operation-log root is committed by `root`.
-    pub ops_root_witness: OpsRootWitness<F, D>,
-    /// Changed bitmap chunks keyed by chunk index.
-    pub chunks: Vec<(u64, [u8; N])>,
-    /// Changed grafted digests keyed by ops-space Merkle position.
-    pub grafted_nodes: Vec<(merkle::Position<F>, D)>,
-}
-
-/// Decoded (key, value) payload for a QMDB operation. Either element is `None`
-/// when the operation's logical key or value is absent (e.g. keyless ops).
-pub(crate) struct OperationKv {
-    pub(crate) key: Option<Vec<u8>>,
-    pub(crate) value: Option<Vec<u8>>,
 }
 
 /// A requested watermark and the minimum Store sequence that makes it readable.
@@ -123,23 +95,13 @@ pub(crate) fn decode_digest<D: Digest>(
 // The native crate owns tests for request constraints shared with the WASM verifier.
 #[cfg(test)]
 mod tests {
-    use crate::request::{
-        span_contains, validate_key_range, InvalidLocations, InvalidWindow, OperationLocations,
-        OperationWindow, MAX_REQUESTED_LOCATIONS,
+    use crate::{
+        request::{
+            validate_key_range, InvalidLocations, InvalidWindow, OperationLocations,
+            OperationWindow,
+        },
+        service::{validate_operations_request, MAX_REQUESTED_LOCATIONS},
     };
-
-    #[test]
-    fn test_spans_wrap_past_the_greatest_key() {
-        assert!(span_contains(&2, &6, &2));
-        assert!(span_contains(&2, &6, &5));
-        assert!(!span_contains(&2, &6, &6));
-        assert!(!span_contains(&2, &6, &1));
-        assert!(span_contains(&6, &2, &7));
-        assert!(span_contains(&6, &2, &1));
-        assert!(!span_contains(&6, &2, &2));
-        assert!(!span_contains(&6, &2, &4));
-        assert!(span_contains(&3, &3, &9));
-    }
 
     #[test]
     fn test_operation_windows_preserve_large_absolute_positions() {
@@ -194,11 +156,19 @@ mod tests {
             })
         ));
         let many = (0..=MAX_REQUESTED_LOCATIONS as u64).collect::<Vec<_>>();
+        assert!(OperationLocations::new(u64::MAX - 1, &many).is_ok());
+    }
+
+    #[test]
+    fn test_operations_rpc_limits_locations() {
+        let many = (0..=MAX_REQUESTED_LOCATIONS as u64).collect::<Vec<_>>();
         assert!(matches!(
-            OperationLocations::new(u64::MAX - 1, &many),
-            Err(InvalidLocations::TooMany { count }) if count == MAX_REQUESTED_LOCATIONS + 1
+            validate_operations_request(u64::MAX - 1, &many),
+            Err(crate::QmdbError::InvalidRequestedLocations(_))
         ));
-        assert!(OperationLocations::new(u64::MAX - 1, &many[..MAX_REQUESTED_LOCATIONS]).is_ok());
+        assert!(
+            validate_operations_request(u64::MAX - 1, &many[..MAX_REQUESTED_LOCATIONS]).is_ok()
+        );
     }
 
     #[test]

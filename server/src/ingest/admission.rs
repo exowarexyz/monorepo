@@ -1,11 +1,12 @@
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-
 use buffa::MessageName;
 use connectrpc::{error::ErrorDetail, ConnectError};
 use exoware_sdk::{
     google::rpc::{ErrorInfo, RetryInfo},
     limits::{INGEST_ADMISSION_EXHAUSTED_REASON, INGEST_ERROR_DOMAIN},
+};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
 };
 
 const ADMISSION_RETRY_DELAY: Duration = Duration::from_millis(100);
@@ -150,7 +151,7 @@ pub struct ByteLease {
 }
 
 impl ByteLease {
-    pub fn bytes(&self) -> usize {
+    pub const fn bytes(&self) -> usize {
         self.bytes
     }
 
@@ -204,7 +205,7 @@ impl Admission {
     pub fn reserve_bytes(&self, bytes: usize) -> Result<ByteLease, ConnectError> {
         self.request.reserve_bytes(bytes)
     }
-    pub fn wire_bound(&self) -> usize {
+    pub const fn wire_bound(&self) -> usize {
         self.wire_bound
     }
 }

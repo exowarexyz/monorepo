@@ -1,5 +1,7 @@
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 const SDK_BYTES_FIELDS: &[&str] = &[
     ".common.kv.v1.Entry.value",

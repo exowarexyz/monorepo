@@ -1,55 +1,54 @@
 //! Ordered QMDB services: operation log, current operation ranges, key
 //! lookups (hits and misses), and ordered key ranges.
 
-use std::future::Future;
-use std::sync::Arc;
-
+use super::{
+    CurrentOperationReader, CurrentOperationServer, KeyLookupReader, KeyLookupServer,
+    KeyRangeReader, KeyRangeServer, OperationLogReader, OperationLogServer,
+};
+use crate::{
+    adapter::Ordered,
+    proof::{
+        CurrentOperationRangeProofResult, MultiProofOperations, OperationRangeCheckpoint,
+        RawBatchMultiProof, RawKeyLookupProof, RawKeyRangeProof, RawKeyValueProof,
+    },
+    service::proto::qmdb::v1::{
+        CurrentOperationServiceServer, KeyLookupServiceServer, OperationLogServiceServer,
+        OrderedKeyRangeServiceServer,
+    },
+    PublishedWatermark, QmdbError,
+};
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::{Graftable, Location},
     qmdb::{
-        any::{ordered, value::ValueEncoding},
-        current::ordered::proof::constant::ExclusionProof,
-        operation::Key as QmdbKey,
+        any::ordered, current::ordered::proof::constant::ExclusionProof, operation::Key as QmdbKey,
+        value::ValueEncoding,
     },
 };
 use connectrpc::{Chain, ConnectRpcService};
 use exoware_sdk::PrefixedStoreClient;
+use std::{future::Future, sync::Arc};
 
-use super::{
-    CurrentOperationReader, CurrentOperationServer, KeyLookupReader, KeyLookupServer,
-    KeyRangeReader, KeyRangeServer, OperationLogReader, OperationLogServer,
-};
-use crate::adapter::Ordered;
-use crate::proof::{
-    CurrentOperationRangeProofResult, MultiProofOperations, OperationRangeCheckpoint,
-    RawBatchMultiProof, RawKeyLookupProof, RawKeyRangeProof, RawKeyValueProof,
-};
-use crate::service::proto::qmdb::v1::{
-    CurrentOperationServiceServer, KeyLookupServiceServer, OperationLogServiceServer,
-    OrderedKeyRangeServiceServer,
-};
-use crate::{OperationKv, PublishedWatermark, QmdbError};
-
-impl<F, H, K, V, const N: usize, E> OperationLogReader for Ordered<F, H, K, V, N, E>
+impl<F, H, K, const N: usize, E> OperationLogReader for Ordered<F, H, K, E::Value, N, E>
 where
     F: Graftable,
-    H: Hasher + Send + Sync + 'static,
-    K: QmdbKey + commonware_codec::Codec + Send + Sync + 'static,
-    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    E: ValueEncoding<Value = V> + Send + Sync + 'static,
+    H: Hasher,
+    K: QmdbKey,
+    E: ValueEncoding,
+    E::Value: AsRef<[u8]>,
     ordered::Operation<F, K, E>: Encode + Decode,
 {
     type Family = F;
     type Digest = H::Digest;
 
-    fn extract_operation_kv(
+    fn inspect_operation_kv<T>(
         &self,
         location: Location<F>,
         bytes: &[u8],
-    ) -> Result<OperationKv, QmdbError> {
-        Ordered::extract_operation_kv(self, location, bytes)
+        inspect: impl FnOnce(Option<&[u8]>, Option<&[u8]>) -> T,
+    ) -> Result<T, QmdbError> {
+        Self::inspect_operation_kv(self, location, bytes, inspect)
     }
 
     fn resolve_watermark(
@@ -57,11 +56,11 @@ where
         watermark: Location<F>,
         min_sequence_number: Option<u64>,
     ) -> impl Future<Output = Result<PublishedWatermark<F>, QmdbError>> + Send {
-        Ordered::resolve_watermark(self, watermark, min_sequence_number)
+        Self::resolve_watermark(self, watermark, min_sequence_number)
     }
 
     fn observe_published(&self, location: Location<F>, sequence: u64) {
-        Ordered::observe_published(self, location, sequence)
+        Self::observe_published(self, location, sequence)
     }
 
     fn operation_range_checkpoint_at(
@@ -71,7 +70,7 @@ where
         max_locations: u32,
     ) -> impl Future<Output = Result<OperationRangeCheckpoint<Self::Digest, F>, QmdbError>> + Send
     {
-        Ordered::operation_range_checkpoint_at(self, watermark, start_location, max_locations)
+        Self::operation_range_checkpoint_at(self, watermark, start_location, max_locations)
     }
 
     fn multi_proof_at(
@@ -79,17 +78,16 @@ where
         watermark: PublishedWatermark<F>,
         operations: MultiProofOperations<'_, F>,
     ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest, F>, QmdbError>> + Send {
-        Ordered::multi_proof_at(self, watermark, operations)
+        Self::multi_proof_at(self, watermark, operations)
     }
 }
 
-impl<F, H, K, V, const N: usize, E> CurrentOperationReader<N> for Ordered<F, H, K, V, N, E>
+impl<F, H, K, const N: usize, E> CurrentOperationReader<N> for Ordered<F, H, K, E::Value, N, E>
 where
     F: Graftable,
-    H: Hasher + Send + Sync + 'static,
-    K: QmdbKey + commonware_codec::Codec + Send + Sync + 'static,
-    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    E: ValueEncoding<Value = V> + Send + Sync + 'static,
+    H: Hasher,
+    K: QmdbKey,
+    E: ValueEncoding,
     ordered::Operation<F, K, E>: Encode + Decode,
 {
     type Family = F;
@@ -108,7 +106,7 @@ where
             QmdbError,
         >,
     > + Send {
-        Ordered::current_operation_range_raw(
+        Self::current_operation_range_raw(
             self,
             watermark,
             start_location,
@@ -118,13 +116,12 @@ where
     }
 }
 
-impl<F, H, K, V, const N: usize, E> KeyLookupReader<N> for Ordered<F, H, K, V, N, E>
+impl<F, H, K, const N: usize, E> KeyLookupReader<N> for Ordered<F, H, K, E::Value, N, E>
 where
     F: Graftable,
-    H: Hasher + Send + Sync + 'static,
-    K: QmdbKey + commonware_codec::Codec + Send + Sync + 'static,
-    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    E: ValueEncoding<Value = V> + Send + Sync + 'static,
+    H: Hasher,
+    K: QmdbKey,
+    E: ValueEncoding,
     ordered::Operation<F, K, E>: Encode + Decode,
     ExclusionProof<F, K, E, H::Digest, N>: Encode,
 {
@@ -132,7 +129,7 @@ where
     type Digest = H::Digest;
     type Key = K;
     type Operation = ordered::Operation<F, K, E>;
-    type Lookup = RawKeyLookupProof<H::Digest, K, V, N, F, E>;
+    type Lookup = RawKeyLookupProof<H::Digest, K, E::Value, N, F, E>;
 
     fn key_value_proof(
         &self,
@@ -141,7 +138,7 @@ where
         min_sequence_number: Option<u64>,
     ) -> impl Future<Output = Result<RawKeyValueProof<Self::Digest, Self::Operation, N, F>, QmdbError>>
            + Send {
-        Ordered::get_raw(self, tip, key.as_ref(), min_sequence_number)
+        Self::get_raw(self, tip, key.as_ref(), min_sequence_number)
     }
 
     fn key_lookup_proofs(
@@ -150,24 +147,22 @@ where
         keys: &[K],
         min_sequence_number: Option<u64>,
     ) -> impl Future<Output = Result<Vec<Self::Lookup>, QmdbError>> + Send {
-        Ordered::get_many_raw(self, tip, keys, min_sequence_number)
+        Self::get_many_raw(self, tip, keys, min_sequence_number)
     }
 }
 
-impl<F, H, K, V, const N: usize, E> KeyRangeReader<N> for Ordered<F, H, K, V, N, E>
+impl<F, H, K, const N: usize, E> KeyRangeReader<N> for Ordered<F, H, K, E::Value, N, E>
 where
     F: Graftable,
-    H: Hasher + Send + Sync + 'static,
-    K: QmdbKey + commonware_codec::Codec + Send + Sync + 'static,
-    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    E: ValueEncoding<Value = V> + Send + Sync + 'static,
+    H: Hasher,
+    K: QmdbKey,
+    E: ValueEncoding,
     ordered::Operation<F, K, E>: Encode + Decode,
-    ExclusionProof<F, K, E, H::Digest, N>: Encode,
 {
     type Family = F;
     type Digest = H::Digest;
     type Key = K;
-    type Value = V;
+    type Value = E::Value;
     type Encoding = E;
 
     fn key_range_proof(
@@ -177,9 +172,9 @@ where
         end_key: Option<K>,
         limit: u32,
         min_sequence_number: Option<u64>,
-    ) -> impl Future<Output = Result<RawKeyRangeProof<H::Digest, K, V, N, F, E>, QmdbError>> + Send
+    ) -> impl Future<Output = Result<RawKeyRangeProof<H::Digest, K, E::Value, N, F, E>, QmdbError>> + Send
     {
-        Ordered::get_range_raw(self, tip, start_key, end_key, limit, min_sequence_number)
+        Self::get_range_raw(self, tip, start_key, end_key, limit, min_sequence_number)
     }
 }
 
@@ -187,11 +182,11 @@ where
 /// ranges, current operation ranges, and the operation log.
 pub fn ordered_stack<
     F: Graftable,
-    H: Hasher + Send + Sync + 'static,
-    K: QmdbKey + commonware_codec::Codec + Send + Sync + 'static,
-    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
+    H: Hasher,
+    K: QmdbKey,
+    V: AsRef<[u8]> + 'static,
     const N: usize,
-    E: ValueEncoding<Value = V> + Send + Sync + 'static,
+    E: ValueEncoding<Value = V>,
 >(
     raw_store: PrefixedStoreClient,
     op_cfg: <ordered::Operation<F, K, E> as Read>::Cfg,
@@ -226,11 +221,11 @@ where
 /// Mount only the ordered-QMDB operation log.
 pub fn ordered_operation_log_stack<
     F: Graftable,
-    H: Hasher + Send + Sync + 'static,
-    K: QmdbKey + commonware_codec::Codec + Send + Sync + 'static,
-    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
+    H: Hasher,
+    K: QmdbKey,
+    V: AsRef<[u8]> + 'static,
     const N: usize,
-    E: ValueEncoding<Value = V> + Send + Sync + 'static,
+    E: ValueEncoding<Value = V>,
 >(
     raw_store: PrefixedStoreClient,
     op_cfg: <ordered::Operation<F, K, E> as Read>::Cfg,

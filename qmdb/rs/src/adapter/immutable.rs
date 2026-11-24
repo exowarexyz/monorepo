@@ -1,37 +1,34 @@
-use std::marker::PhantomData;
-use std::sync::Arc;
-
-use commonware_codec::{Codec, Copying, Decode, Encode, Read as CodecRead};
+use crate::{
+    adapter::{
+        codec::decode_update_location,
+        core,
+        operation_range::{load_operation_range_checkpoint, load_operations_multi_proof},
+        read_cache::ReadCache,
+    },
+    error::QmdbError,
+    proof::{
+        MultiProofOperations, OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange,
+    },
+    PublishedWatermark, VersionedValue,
+};
+use commonware_codec::{Copying, Decode, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::{Family, Graftable, Location},
     qmdb::{
-        any::value::{ValueEncoding, VariableEncoding},
         immutable,
         operation::Key as QmdbKey,
+        value::{ValueEncoding, VariableEncoding},
     },
 };
 use exoware_sdk::{PrefixedStoreClient, ReadSession};
-
-use crate::adapter::codec::decode_update_location;
-use crate::adapter::core;
-use crate::adapter::operation_range::{
-    load_operation_range_checkpoint, load_operations_multi_proof,
-};
-use crate::adapter::read_cache::ReadCache;
-use crate::error::QmdbError;
-use crate::proof::{
-    MultiProofOperations, OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange,
-};
-use crate::OperationKv;
-use crate::PublishedWatermark;
-use crate::VersionedValue;
+use std::{marker::PhantomData, sync::Arc};
 
 pub struct Immutable<
     F: Family,
     H: Hasher,
     K: QmdbKey,
-    V: Codec + Send + Sync,
+    V,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > where
     immutable::Operation<F, K, E>: CodecRead,
@@ -48,7 +45,6 @@ where
     F: Family,
     H: Hasher,
     K: QmdbKey,
-    V: Codec + Send + Sync,
     E: ValueEncoding<Value = V>,
     immutable::Operation<F, K, E>: CodecRead,
 {
@@ -68,7 +64,6 @@ where
     F: Family,
     H: Hasher,
     K: QmdbKey,
-    V: Codec + Send + Sync,
     E: ValueEncoding<Value = V>,
     immutable::Operation<F, K, E>: CodecRead,
 {
@@ -82,9 +77,8 @@ where
     F: Graftable,
     H: Hasher,
     K: QmdbKey,
-    V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
-    immutable::Operation<F, K, E>: Encode + Decode + Clone,
+    immutable::Operation<F, K, E>: Decode,
 {
     /// Read client for the Store namespace.
     pub fn new(
@@ -100,11 +94,12 @@ where
         }
     }
 
-    pub(crate) fn extract_operation_kv(
+    pub(crate) fn inspect_operation_kv<T>(
         &self,
         location: Location<F>,
         bytes: &[u8],
-    ) -> Result<OperationKv, QmdbError>
+        inspect: impl FnOnce(Option<&[u8]>, Option<&[u8]>) -> T,
+    ) -> Result<T, QmdbError>
     where
         V: AsRef<[u8]>,
     {
@@ -114,13 +109,13 @@ where
                 "failed to decode immutable operation at location {location}: {e}"
             ))
         })?;
-        let key = op.key().map(|k| <K as AsRef<[u8]>>::as_ref(k).to_vec());
-        let value = match &op {
-            immutable::Operation::Set(_, value) => Some(value.as_ref().to_vec()),
-            immutable::Operation::Commit(Some(value), _) => Some(value.as_ref().to_vec()),
+        let key = op.key().map(<K as AsRef<[u8]>>::as_ref);
+        let value: Option<&[u8]> = match &op {
+            immutable::Operation::Set(_, value) => Some(value.as_ref()),
+            immutable::Operation::Commit(Some(value), _) => Some(value.as_ref()),
             immutable::Operation::Commit(None, _) => None,
         };
-        Ok(OperationKv { key, value })
+        Ok(inspect(key, value))
     }
 
     /// Refresh publication evidence and return the greatest watermark observed by this client.
@@ -276,7 +271,7 @@ where
             .map(|(offset, bytes)| {
                 let location = checkpoint.start_location + offset as u64;
                 immutable::Operation::<F, K, E>::decode_cfg(
-                    Copying(bytes.as_slice()),
+                    Copying(bytes.as_ref()),
                     &self.operation_cfg,
                 )
                 .map_err(|e| {
@@ -303,7 +298,6 @@ async fn inactive_peaks_at<F, K, V, E>(
 where
     F: Graftable,
     K: QmdbKey,
-    V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
     immutable::Operation<F, K, E>: Decode,
 {
@@ -321,9 +315,8 @@ fn inactive_peaks_from_operation<F, K, V, E>(
     operation: immutable::Operation<F, K, E>,
 ) -> Result<usize, QmdbError>
 where
-    F: Graftable,
+    F: Family,
     K: QmdbKey,
-    V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
 {
     let immutable::Operation::Commit(_, floor) = operation else {

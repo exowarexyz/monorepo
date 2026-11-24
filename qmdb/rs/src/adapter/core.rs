@@ -1,23 +1,26 @@
 #[cfg(test)]
 mod tests;
 
-use commonware_codec::{Codec, Copying, Decode};
-use commonware_cryptography::{Digest, Hasher};
+use crate::{
+    adapter::codec::{
+        decode_operation_location_key, decode_update_location, decode_watermark_location,
+        encode_node_key, encode_operation_key, encode_update_key, ensure_encoded_value_size,
+        merkle_size_for_watermark, op_count_for_watermark, WATERMARK_PREFIX,
+    },
+    decode_digest,
+    error::QmdbError,
+    PublishedWatermark, VersionedValue,
+};
+use bytes::Bytes;
+use commonware_codec::{Copying, Decode};
+use commonware_cryptography::Hasher;
+use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_storage::merkle::{
     hasher::Hasher as MerkleHasher, mem::Mem, Family, Location, Position,
 };
-use crossbeam_utils::atomic::AtomicCell;
-use exoware_sdk::keys::Key;
-use exoware_sdk::{RangeMode, ReadSession};
-
-use crate::adapter::codec::{
-    decode_operation_location_key, decode_update_location, decode_watermark_location,
-    encode_node_key, encode_operation_key, encode_update_key, ensure_encoded_value_size,
-    merkle_size_for_watermark, op_count_for_watermark, WATERMARK_PREFIX,
-};
-use crate::error::QmdbError;
-use crate::{decode_digest, PublishedWatermark, VersionedValue};
+use exoware_sdk::{keys::Key, RangeMode, ReadSession};
+use std::sync::Mutex;
 
 pub(crate) async fn read_latest_watermark_with_sequence<F: Family>(
     session: &ReadSession,
@@ -46,7 +49,7 @@ pub(crate) async fn read_latest_watermark_with_sequence<F: Family>(
 }
 
 /// Decodes a loaded operation and verifies that it matches the requested key.
-pub(crate) trait LatestValueResolver<F: Family, K: Codec, V: Codec> {
+pub(crate) trait LatestValueResolver<F: Family, K, V> {
     fn resolve_latest_value(
         &self,
         location: Location<F>,
@@ -55,61 +58,64 @@ pub(crate) trait LatestValueResolver<F: Family, K: Codec, V: Codec> {
     ) -> Result<VersionedValue<K, V, F>, QmdbError>;
 }
 
-/// Caches the greatest published QMDB watermark and the store sequence returned
-/// by the publication lookup that observed it.
+/// Caches the greatest published QMDB watermark it has seen and the lowest
+/// Store sequence known to include it. That sequence comes from a watermark
+/// lookup or from a subscription frame that carried the watermark row.
 ///
-/// Reads at that watermark or an earlier one can skip publication lookup, given
-/// their data and proof reads must require at least the cached sequence as `min_sequence_number`.
+/// Reads at that watermark or an earlier one can skip the watermark lookup,
+/// provided their data and proof reads require at least the cached sequence as
+/// `min_sequence_number`.
 ///
 /// Share a cache only between clients for the same store and namespace.
 #[derive(Debug)]
 pub(crate) struct PublicationCache<F: Family> {
-    published: AtomicCell<Option<PublishedWatermark<F>>>,
+    published: Mutex<Option<PublishedWatermark<F>>>,
+    // Serializes watermark lookups, so a `require` that waits here can use
+    // the result of the lookup it waited on. `published` has its own lock, so
+    // updating it doesn't need this gate.
     refresh_gate: tokio::sync::Mutex<()>,
 }
 
 impl<F: Family> Default for PublicationCache<F> {
     fn default() -> Self {
         Self {
-            published: AtomicCell::new(None),
+            published: Mutex::new(None),
             refresh_gate: tokio::sync::Mutex::new(()),
         }
     }
 }
 
 impl<F: Family> PublicationCache<F> {
-    // Callers must hold refresh_gate so concurrent refreshes cannot overwrite newer evidence.
     fn remember(&self, available: Option<Location<F>>, sequence: u64) {
         let Some(location) = available else {
             return;
         };
-        let published = self.published.load();
+        let mut published = self.published.lock().unwrap();
         if published.as_ref().is_none_or(|known| {
             location > known.location
                 || (location == known.location && sequence < known.sequence_number)
         }) {
-            self.published.store(Some(PublishedWatermark {
+            *published = Some(PublishedWatermark {
                 location,
                 sequence_number: sequence,
-            }));
+            });
         }
     }
 
+    fn published(&self) -> Option<PublishedWatermark<F>> {
+        *self.published.lock().unwrap()
+    }
+
     fn published_sequence(&self, watermark: Location<F>) -> Option<u64> {
-        self.published
-            .load()
+        self.published()
             .filter(|known| known.location >= watermark)
             .map(|known| known.sequence_number)
     }
 
     /// Record a watermark row seen in the Store batch log, at the sequence of
-    /// the batch that committed it. Skips the update while a refresh holds the
-    /// gate; that only leaves the cache colder, since both sources record
-    /// published watermarks.
+    /// the batch that committed it.
     pub(crate) fn observe(&self, location: Location<F>, sequence: u64) {
-        if let Ok(_gate) = self.refresh_gate.try_lock() {
-            self.remember(Some(location), sequence);
-        }
+        self.remember(Some(location), sequence);
     }
 
     pub(crate) async fn refresh(
@@ -119,7 +125,7 @@ impl<F: Family> PublicationCache<F> {
         let _gate = self.refresh_gate.lock().await;
         let (available, sequence) = read_latest_watermark_with_sequence(session).await?;
         self.remember(available, sequence);
-        Ok(self.published.load().map(|known| known.location))
+        Ok(self.published().map(|known| known.location))
     }
 
     pub(crate) async fn require(
@@ -144,7 +150,7 @@ impl<F: Family> PublicationCache<F> {
 
         let (available, sequence) = read_latest_watermark_with_sequence(session).await?;
         self.remember(available, sequence);
-        let published = self.published.load();
+        let published = self.published();
         match published.as_ref() {
             Some(known) if known.location >= watermark => Ok(PublishedWatermark {
                 location: watermark,
@@ -186,8 +192,6 @@ pub(crate) async fn query_many_at<F, K, V, Q, R>(
 ) -> Result<Vec<Option<VersionedValue<K, V, F>>>, QmdbError>
 where
     F: Family,
-    K: Codec,
-    V: Codec,
     Q: AsRef<[u8]>,
     R: LatestValueResolver<F, K, V>,
 {
@@ -297,11 +301,12 @@ pub(crate) async fn load_operation_bytes_at<F: Family>(
     Ok(bytes.to_vec())
 }
 
+#[boxed]
 pub(crate) async fn load_operation_bytes_range<F: Family>(
     session: &ReadSession,
     start_location: Location<F>,
     end_location_exclusive: Location<F>,
-) -> Result<Vec<Vec<u8>>, QmdbError> {
+) -> Result<Vec<Bytes>, QmdbError> {
     if start_location >= end_location_exclusive {
         return Ok(Vec::new());
     }
@@ -330,14 +335,14 @@ pub(crate) async fn load_operation_bytes_range<F: Family>(
                 "operation row order mismatch: expected {expected_location}, got {location}"
             )));
         }
-        encoded.push(value.to_vec());
+        encoded.push(value);
     }
     Ok(encoded)
 }
 
 /// Extend a pinned prefix with encoded operations, returning the root, frontier,
 /// and every new node needed to serve proofs.
-pub(crate) struct MerkleExtension<F: Family, D: Digest> {
+pub(crate) struct MerkleExtension<F: Family, D> {
     pub(crate) size: Position<F>,
     pub(crate) peaks: Vec<(Position<F>, u32, D)>,
     pub(crate) root: D,
@@ -355,7 +360,7 @@ where
     F: Family,
     H: Hasher,
     S: Strategy,
-    I: IntoIterator + Send,
+    I: IntoIterator,
     I::Item: AsRef<[u8]> + Send,
     I::IntoIter: Send,
 {
@@ -408,7 +413,7 @@ where
         })
         .collect::<Result<Vec<_>, QmdbError>>()?;
     let root = batch
-        .root(&mem, &hasher, inactive_peaks)
+        .root(&hasher, inactive_peaks)
         .map_err(|e| QmdbError::CommonwareMerkle(e.to_string()))?;
     Ok(MerkleExtension {
         size,

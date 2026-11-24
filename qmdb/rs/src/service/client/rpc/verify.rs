@@ -1,25 +1,25 @@
 //! Proof checks shared by the key lookup and key range clients.
 
-use commonware_codec::{Copying, Decode, DecodeExt, Encode, Read};
+use super::proof_digest_cap;
+use crate::{
+    proof::VerifiedKeyValue,
+    service::proto::qmdb::v1::{
+        CurrentKeyExclusionProof as ProtoCurrentKeyExclusionProof,
+        CurrentKeyValueProof as ProtoCurrentKeyValueProof,
+    },
+    QmdbError,
+};
+use commonware_codec::{Copying, Decode, Encode, Read};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::Graftable,
     qmdb::{
-        any::{ordered, value::ValueEncoding},
-        current::ordered::proof::constant::ExclusionProof,
-        current::proof::constant::OperationProof,
+        any::ordered,
+        current::{ordered::proof::constant::ExclusionProof, proof::constant::OperationProof},
         operation::{Key as QmdbKey, Operation},
+        value::ValueEncoding,
     },
 };
-
-use crate::proof::{verify_ordered_exclusion_proof, VerifiedKeyValue};
-use crate::service::proto::qmdb::v1::{
-    CurrentKeyExclusionProof as ProtoCurrentKeyExclusionProof,
-    CurrentKeyValueProof as ProtoCurrentKeyValueProof,
-};
-use crate::QmdbError;
-
-use super::proof_digest_cap;
 
 pub(crate) fn verify_key_value_from_proto<F, H, Op, const N: usize>(
     proto: &ProtoCurrentKeyValueProof,
@@ -29,7 +29,6 @@ pub(crate) fn verify_key_value_from_proto<F, H, Op, const N: usize>(
 where
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
     Op: commonware_codec::Codec + Clone + Operation<F>,
 {
     let operation =
@@ -73,14 +72,11 @@ pub(crate) fn verify_key_exclusion_from_proto<F, H, K, V, const N: usize, E>(
 where
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V: Decode,
     E: ValueEncoding<Value = V>,
-    ordered::Operation<F, K, E>: Decode + Encode + Read,
+    ordered::Operation<F, K, E>: Encode + Read,
     ordered::Update<K, E>: Read,
-    ExclusionProof<F, K, E, H::Digest, N>:
-        Read<Cfg = (usize, <ordered::Update<K, E> as Read>::Cfg, V::Cfg)>,
 {
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
     let proof = ExclusionProof::<F, K, E, H::Digest, N>::decode_cfg(
@@ -92,7 +88,7 @@ where
             "failed to decode current key-exclusion proof: {err}"
         ))
     })?;
-    if !verify_ordered_exclusion_proof::<F, H, K, E, N>(requested_key, &proof, root) {
+    if !proof.verify::<H>(requested_key, root) {
         return Err(QmdbError::ProofVerification {
             kind: crate::ProofKind::CurrentKeyExclusion,
         });

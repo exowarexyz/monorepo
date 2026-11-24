@@ -12,10 +12,9 @@
 //! Set `EXOWARE_WRITE_URL` as well to reach a deployment that serves its write path
 //! on a separate origin. It defaults to `EXOWARE_URL`.
 
-use std::process::ExitCode;
-
 use bytes::Bytes;
 use exoware_sdk::{Key, StoreClient, StoreKeyPrefix};
+use std::process::ExitCode;
 
 /// Everything written here lives under one prefix, so the demo stays separable
 /// from other keys in a shared store.

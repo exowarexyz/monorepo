@@ -202,9 +202,13 @@ function makeRetryInterceptor(config: RetryConfig): Interceptor {
 }
 
 export type ClientOptions = {
+    /** API key. In Node, omission uses `EXOWARE_API_KEY`; an empty string disables that fallback. */
     token?: string;
+    /** Retry attempt and backoff limits for retryable RPC failures. */
     retry?: RetryConfig;
+    /** Defaults to true (binary protobuf). Set false to use Connect JSON for services other than Put. */
     useBinaryFormat?: boolean;
+    /** Default limits on Put entry counts, encoded request size, and value size. */
     putLimits?: PutLimits;
 };
 
@@ -233,7 +237,7 @@ function transportFactory(opts: ClientOptions): {
     interceptors.push(makeRetryInterceptor(retryConfig));
     const fetch = fetchWithCookieJar(new CookieJar());
     return {
-        create: (baseUrl, useBinaryFormat) => createConnectTransport({
+        create: (baseUrl, useBinaryFormat = true) => createConnectTransport({
             baseUrl: baseUrl.replace(/\/$/, ''),
             useBinaryFormat,
             interceptors,
@@ -244,9 +248,11 @@ function transportFactory(opts: ClientOptions): {
 }
 
 /**
- * Takes the API key from `EXOWARE_API_KEY` when running under Node and no `token` is given, and
- * throws `InvalidApiKeyError` if either cannot be an HTTP header.
- * Custom ingest clients must pass `useBinaryFormat: true` because Put requires protobuf.
+ * Uses `EXOWARE_API_KEY` in Node when no `token` is provided. Throws `InvalidApiKeyError` if the
+ * selected API key cannot be sent in an HTTP header.
+ *
+ * Requests use binary protobuf by default. Set `useBinaryFormat` to `false` for JSON. Put requires
+ * protobuf, so keep binary enabled when creating an ingest client.
  */
 export function createTransport(baseUrl: string, tokenOrOptions?: string | ClientOptions) {
     const opts = normalizeClientOptions(tokenOrOptions);

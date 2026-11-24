@@ -1,120 +1,73 @@
-//! Ordered QMDB E2E: run a local Commonware ordered DB, upload its
-//! operations + current boundary state to a live store stack, then
-//! verify roots and proofs match.
+//! Current ordered QMDB E2E: run a local Commonware current ordered DB,
+//! upload each batch's publication to a live store stack, then verify
+//! roots and proofs match.
 
 mod common;
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::num::NonZeroU64;
-
 use commonware_cryptography::Sha256;
-use commonware_runtime::tokio as cw_tokio;
-use commonware_runtime::Runner as _;
-use commonware_storage::journal::contiguous::fixed::Config as FixedJournalConfig;
-use commonware_storage::merkle::{mmb, mmr, Family, Graftable, Location, Proof};
-use commonware_storage::qmdb::any::ordered::fixed::Operation as FixedQmdbOperation;
-use commonware_storage::qmdb::any::ordered::variable::Operation as QmdbOperation;
-use commonware_storage::qmdb::any::value::FixedEncoding;
-use commonware_storage::qmdb::current::ordered::fixed::Db as LocalFixedQmdbDb;
-use commonware_storage::qmdb::current::ordered::proof::constant::ExclusionProof;
-use commonware_storage::qmdb::current::ordered::variable::Db as LocalQmdbDb;
-use commonware_storage::qmdb::operation::Operation as _;
-use commonware_storage::translator::TwoCap;
+use commonware_macros::boxed;
+use commonware_parallel::Sequential;
+use commonware_runtime::{tokio as cw_tokio, Runner as _};
+use commonware_storage::{
+    journal::contiguous::fixed::Config as FixedJournalConfig,
+    merkle::{mmb, mmr, Family, Graftable, Location, Position, Proof},
+    qmdb::{
+        any::ordered::{
+            fixed::{Operation as FixedQmdbOperation, Update as FixedQmdbUpdate},
+            variable::{Operation as QmdbOperation, Update as QmdbUpdate},
+        },
+        current::{
+            batch::MerkleizedBatch,
+            ordered::{
+                fixed::Db as LocalFixedQmdbDb, proof::constant::ExclusionProof,
+                variable::Db as LocalQmdbDb,
+            },
+        },
+        operation::Operation as _,
+        value::FixedEncoding,
+    },
+    translator::TwoCap,
+};
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use exoware_qmdb::MAX_OPERATION_SIZE;
 use exoware_qmdb::{
-    adapter::upload::recover_boundary_state, proof::RawKeyLookupProof, CurrentBoundaryState,
+    adapter::upload::{
+        prepare_publication, stage_authenticated_range, stage_watermark, Publication,
+    },
+    proof::RawKeyLookupProof,
+    ProofKind, QmdbError, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::{PrefixedStoreClient, StoreClient};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroU64,
+    sync::Arc,
+};
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
 type BatchOperation<F> = QmdbOperation<F, Vec<u8>, Vec<u8>>;
 type FixedBatchOperation<F> = FixedQmdbOperation<F, Digest, Digest>;
+type BatchPublication<F, const M: usize> = Publication<F, Digest, QmdbUpdate<Vec<u8>, Vec<u8>>, M>;
+type FixedBatchPublication<F> = Publication<F, Digest, FixedQmdbUpdate<Digest, Digest>, N>;
 type VariableClient<F> = exoware_qmdb::adapter::Ordered<F, Sha256, Vec<u8>, Vec<u8>, N>;
 type FixedClient<F> =
     exoware_qmdb::adapter::Ordered<F, Sha256, Digest, Digest, N, FixedEncoding<Digest>>;
-type VariableDb<F> = LocalQmdbDb<
-    F,
-    cw_tokio::Context,
-    Vec<u8>,
-    Vec<u8>,
-    Sha256,
-    TwoCap,
-    N,
-    commonware_parallel::Sequential,
->;
+type VariableDb<F> =
+    LocalQmdbDb<F, cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N, Sequential>;
+type VariableBatch<F> = MerkleizedBatch<F, Digest, QmdbUpdate<Vec<u8>, Vec<u8>>, N, Sequential>;
 
-type FixedDb<F> = LocalFixedQmdbDb<
-    F,
-    cw_tokio::Context,
-    Digest,
-    Digest,
-    Sha256,
-    TwoCap,
-    N,
-    commonware_parallel::Sequential,
->;
-
-async fn boundary_from_source_db<F>(
-    db: &VariableDb<F>,
-    previous_operations: Option<&[BatchOperation<F>]>,
-    operations: &[BatchOperation<F>],
-) -> CurrentBoundaryState<Digest, N, F>
-where
-    F: Graftable,
-    BatchOperation<F>: commonware_codec::Codec,
-{
-    let ops_root_witness = db.ops_root_witness().await.expect("ops root witness");
-    recover_boundary_state::<F, Sha256, _, N, _, _>(
-        previous_operations,
-        operations,
-        db.root(),
-        0,
-        ops_root_witness,
-        |location| common::current_proof_chunk(db.range_proof(location, NZU64!(1))),
-    )
-    .await
-    .expect("recover_boundary_state")
-}
+type FixedDb<F> =
+    LocalFixedQmdbDb<F, cw_tokio::Context, Digest, Digest, Sha256, TwoCap, N, Sequential>;
 
 async fn upload_source<F>(store_client: &StoreClient, source: &VariableSource<F>)
 where
     F: Graftable,
-    BatchOperation<F>:
-        commonware_codec::Codec + commonware_codec::Encode + commonware_codec::Decode,
+    BatchOperation<F>: commonware_codec::Codec,
 {
     let upload_client = PrefixedStoreClient::empty(store_client.clone());
-    common::commit_current_operations(
-        &upload_client,
-        &source.operations,
-        &op_cfg::<F>(),
-        &source.current_boundary,
-    )
-    .await
-    .expect("commit upload");
-}
-
-async fn boundary_from_fixed_source_db<F>(
-    db: &FixedDb<F>,
-    previous_operations: Option<&[FixedBatchOperation<F>]>,
-    operations: &[FixedBatchOperation<F>],
-) -> CurrentBoundaryState<Digest, N, F>
-where
-    F: Graftable,
-    FixedBatchOperation<F>: commonware_codec::CodecFixed<Cfg = ()> + Send + Sync,
-{
-    let ops_root_witness = db.ops_root_witness().await.expect("fixed ops root witness");
-    recover_boundary_state::<F, Sha256, _, N, _, _>(
-        previous_operations,
-        operations,
-        db.root(),
-        0,
-        ops_root_witness,
-        |location| common::current_proof_chunk(db.range_proof(location, NZU64!(1))),
-    )
-    .await
-    .expect("recover fixed boundary state")
+    common::commit_publications(&upload_client, &source.publications)
+        .await
+        .expect("commit upload");
 }
 
 fn op_cfg<F: Family>() -> <BatchOperation<F> as commonware_codec::Read>::Cfg {
@@ -131,20 +84,21 @@ fn key_cfg() -> <Vec<u8> as commonware_codec::Read>::Cfg {
 struct VariableSource<F: Graftable> {
     latest_location: Location<F>,
     operations: Vec<BatchOperation<F>>,
-    current_boundary: CurrentBoundaryState<Digest, N, F>,
+    publications: Vec<BatchPublication<F, N>>,
     values: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 }
 
 struct ChunkSizedVariableSource<F: Graftable, const M: usize> {
     latest_location: Location<F>,
     operations: Vec<BatchOperation<F>>,
-    current_boundary: CurrentBoundaryState<Digest, M, F>,
+    root: Digest,
+    publications: Vec<BatchPublication<F, M>>,
 }
 
 struct FixedSource<F: Graftable> {
     latest_location: Location<F>,
     operations: Vec<FixedBatchOperation<F>>,
-    current_boundary: CurrentBoundaryState<Digest, N, F>,
+    publications: Vec<FixedBatchPublication<F>>,
     values: std::collections::BTreeMap<Vec<u8>, Option<Digest>>,
 }
 
@@ -156,7 +110,7 @@ where
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::current_variable_config(
                 "current_ordered_variable_source",
                 page_cache,
@@ -173,16 +127,13 @@ where
                     .new_batch()
                     .write(b"alpha".to_vec(), Some(b"one".to_vec()))
                     .write(b"beta".to_vec(), Some(b"two".to_vec()));
-                batch
-                    .merkleize(
-                        &db,
-                        None::<Vec<u8>>,
-                        &mut commonware_storage::qmdb::floor::Proportional,
-                    )
-                    .await
-                    .expect("merkleize")
+                batch.merkleize(&db).await.expect("merkleize")
             };
-            (db, _) = db.apply_batch(finalized).await.expect("apply");
+            let publications = vec![
+                Publication::initial(&db).expect("initial publication must be readable"),
+                Publication::from_batch(&finalized, &db).expect("publication must be readable"),
+            ];
+            db = db.apply_batch(finalized).await.expect("apply");
 
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -190,8 +141,6 @@ where
                 .ops_historical_proof(latest + 1, Location::<F>::new(0), n)
                 .await
                 .expect("proof");
-
-            let boundary = boundary_from_source_db(&db, None, &ops).await;
 
             let mut values = std::collections::BTreeMap::new();
             values.insert(
@@ -209,44 +158,13 @@ where
             VariableSource {
                 latest_location: latest,
                 operations: ops,
-                current_boundary: boundary,
+                publications,
                 values,
             }
         })
     })
     .await
     .expect("join")
-}
-
-async fn boundary_from_source_db_with_chunk_size<F, const M: usize>(
-    db: &LocalQmdbDb<
-        F,
-        cw_tokio::Context,
-        Vec<u8>,
-        Vec<u8>,
-        Sha256,
-        TwoCap,
-        M,
-        commonware_parallel::Sequential,
-    >,
-    previous_operations: Option<&[BatchOperation<F>]>,
-    operations: &[BatchOperation<F>],
-) -> CurrentBoundaryState<Digest, M, F>
-where
-    F: Graftable,
-    BatchOperation<F>: commonware_codec::Codec,
-{
-    let ops_root_witness = db.ops_root_witness().await.expect("ops root witness");
-    recover_boundary_state::<F, Sha256, _, M, _, _>(
-        previous_operations,
-        operations,
-        db.root(),
-        0,
-        ops_root_witness,
-        |location| common::current_proof_chunk(db.range_proof(location, NZU64!(1))),
-    )
-    .await
-    .expect("recover boundary state")
 }
 
 async fn build_variable_source_with_write_count<F, const M: usize>(
@@ -260,7 +178,7 @@ where
     tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::current_variable_config(
                 partition_prefix,
                 page_cache,
@@ -275,7 +193,7 @@ where
                 Sha256,
                 TwoCap,
                 M,
-                commonware_parallel::Sequential,
+                Sequential,
             > = LocalQmdbDb::init(context.child(partition_prefix), cfg, None)
                 .await
                 .expect("init");
@@ -288,17 +206,15 @@ where
                         Some(format!("v-{index:08}").into_bytes()),
                     );
                 }
-                batch
-                    .merkleize(
-                        &db,
-                        None::<Vec<u8>>,
-                        &mut commonware_storage::qmdb::floor::Proportional,
-                    )
-                    .await
-                    .expect("merkleize")
+                batch.merkleize(&db).await.expect("merkleize")
             };
-            (db, _) = db.apply_batch(finalized).await.expect("apply");
+            let publications = vec![
+                Publication::initial(&db).expect("initial publication must be readable"),
+                Publication::from_batch(&finalized, &db).expect("publication must be readable"),
+            ];
+            db = db.apply_batch(finalized).await.expect("apply");
 
+            let root = db.root();
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
             let (_proof, ops): (Proof<F, Digest>, Vec<BatchOperation<F>>) = db
@@ -306,15 +222,14 @@ where
                 .await
                 .expect("proof");
 
-            let boundary = boundary_from_source_db_with_chunk_size::<F, M>(&db, None, &ops).await;
-
             db = db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
 
             ChunkSizedVariableSource {
                 latest_location: latest,
                 operations: ops,
-                current_boundary: boundary,
+                root,
+                publications,
             }
         })
     })
@@ -330,13 +245,10 @@ where
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = commonware_storage::qmdb::current::Config {
-                merkle_config: common::merkle_config(
-                    "current_ordered_fixed_source",
-                    page_cache.clone(),
-                ),
-                journal_config: FixedJournalConfig {
+                merkle: common::merkle_config("current_ordered_fixed_source"),
+                log: FixedJournalConfig {
                     partition: "current_ordered_fixed_source-log".to_string(),
                     items_per_blob: NZU64!(8),
                     page_cache,
@@ -348,7 +260,7 @@ where
                 translator: TwoCap,
                 init_cache: None,
                 init_buffer: NZUsize!(1 << 21),
-                init_concurrency: (),
+                init_concurrency: NZUsize!(1),
             };
             let mut db: FixedDb<F> =
                 FixedDb::init(context.child("current_ordered_fixed_source"), cfg, None)
@@ -364,16 +276,13 @@ where
                     .new_batch()
                     .write(alpha, Some(one))
                     .write(beta, Some(two));
-                batch
-                    .merkleize(
-                        &db,
-                        None::<Digest>,
-                        &mut commonware_storage::qmdb::floor::Proportional,
-                    )
-                    .await
-                    .expect("fixed merkleize")
+                batch.merkleize(&db).await.expect("fixed merkleize")
             };
-            (db, _) = db.apply_batch(finalized).await.expect("apply fixed");
+            let publications = vec![
+                Publication::initial(&db).expect("initial publication must be readable"),
+                Publication::from_batch(&finalized, &db).expect("publication must be readable"),
+            ];
+            db = db.apply_batch(finalized).await.expect("apply fixed");
 
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -381,8 +290,6 @@ where
                 .ops_historical_proof(latest + 1, Location::<F>::new(0), n)
                 .await
                 .expect("fixed proof");
-
-            let boundary = boundary_from_fixed_source_db(&db, None, &ops).await;
 
             let mut values = std::collections::BTreeMap::new();
             values.insert(
@@ -400,7 +307,7 @@ where
             FixedSource {
                 latest_location: latest,
                 operations: ops,
-                current_boundary: boundary,
+                publications,
                 values,
             }
         })
@@ -517,19 +424,20 @@ async fn test_ordered_mmb_multi_peak_grafted_chunk_round_trip() {
     )
     .await;
     assert!(
-        source.current_boundary.grafted_nodes.len() >= 2,
+        source
+            .publications
+            .last()
+            .expect("source publications must not be empty")
+            .grafted_nodes
+            .len()
+            >= 2,
         "test must cross a grafted chunk boundary"
     );
 
     let upload_client = PrefixedStoreClient::empty(store_client.clone());
-    common::commit_current_operations(
-        &upload_client,
-        &source.operations,
-        &op_cfg::<mmb::Family>(),
-        &source.current_boundary,
-    )
-    .await
-    .expect("commit upload");
+    common::commit_publications(&upload_client, &source.publications)
+        .await
+        .expect("commit upload");
 
     let qmdb_client: exoware_qmdb::adapter::Ordered<mmb::Family, Sha256, Vec<u8>, Vec<u8>, N> =
         exoware_qmdb::adapter::Ordered::new(
@@ -553,7 +461,7 @@ async fn test_ordered_mmb_multi_peak_grafted_chunk_round_trip() {
         .get(source.latest_location, &key, None)
         .await
         .expect("get");
-    assert_eq!(key_proof.root, source.current_boundary.root);
+    assert_eq!(key_proof.root, source.root);
     match &key_proof.operation {
         QmdbOperation::Update(update) => {
             assert_eq!(update.key, key);
@@ -563,19 +471,24 @@ async fn test_ordered_mmb_multi_peak_grafted_chunk_round_trip() {
     }
 }
 
+/// After 80 batches are uploaded one publication at a time, key proofs at the last tip match the
+/// source root for the last batch's first fresh key and for a sample of active keys. A range read
+/// returns the first 10 active keys of its interval in order.
 async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
     partition_prefix: &'static str,
 ) where
     F: Graftable + Send + Sync + 'static,
-    BatchOperation<F>:
-        commonware_codec::Codec + commonware_codec::Encode + commonware_codec::Decode + Clone,
+    BatchOperation<F>: commonware_codec::Codec + Clone,
 {
     let store_client = common::local_store_client().await;
-    let (uploads, latest_location, latest_key, expected_root, expected_active) =
+
+    // Build 80 batches that write, rewrite, and delete keys. Track the expected active keys, and
+    // read each publication before applying its batch.
+    let (publications, latest_location, latest_key, expected_root, expected_active) =
         tokio::task::spawn_blocking(move || {
             cw_tokio::Runner::default().start(|context| async move {
                 use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-                let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+                let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
                 let cfg = common::current_variable_config(
                     partition_prefix,
                     page_cache,
@@ -587,9 +500,8 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
                         .await
                         .expect("init");
 
-                let mut previous_ops = Vec::<BatchOperation<F>>::new();
-                let mut uploads =
-                    Vec::<(Vec<BatchOperation<F>>, CurrentBoundaryState<Digest, N, F>)>::new();
+                let mut publications =
+                    vec![Publication::initial(&db).expect("initial publication must be readable")];
                 let mut expected_active = BTreeMap::<Vec<u8>, Vec<u8>>::new();
                 let mut counter = 0u64;
 
@@ -614,33 +526,13 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
                             batch = batch.write(delete_key, None);
                         }
                         counter += 3;
-                        batch
-                            .merkleize(
-                                &db,
-                                None::<Vec<u8>>,
-                                &mut commonware_storage::qmdb::floor::Proportional,
-                            )
-                            .await
-                            .expect("merkleize")
+                        batch.merkleize(&db).await.expect("merkleize")
                     };
-                    (db, _) = db.apply_batch(finalized).await.expect("apply");
-
-                    let latest = db.bounds().end - 1;
-                    let count = NonZeroU64::new(*latest + 1).expect("non-zero op count");
-                    let (_proof, cumulative_ops) = db
-                        .ops_historical_proof(latest + 1, Location::<F>::new(0), count)
-                        .await
-                        .expect("historical proof");
-                    let previous_slice = if previous_ops.is_empty() {
-                        None
-                    } else {
-                        Some(previous_ops.as_slice())
-                    };
-                    let boundary =
-                        boundary_from_source_db(&db, previous_slice, &cumulative_ops).await;
-                    let delta = cumulative_ops[previous_ops.len()..].to_vec();
-                    uploads.push((delta, boundary));
-                    previous_ops = cumulative_ops;
+                    publications.push(
+                        Publication::from_batch(&finalized, &db)
+                            .expect("publication must be readable"),
+                    );
+                    db = db.apply_batch(finalized).await.expect("apply");
                 }
 
                 let latest_location = db.bounds().end - 1;
@@ -648,7 +540,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
                 let expected_root = db.root();
                 db.destroy().await.expect("destroy");
                 (
-                    uploads,
+                    publications,
                     latest_location,
                     latest_key,
                     expected_root,
@@ -659,15 +551,15 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
         .await
         .expect("join");
 
+    // Upload each publication in its own Store batch, in order.
     let upload_client = PrefixedStoreClient::empty(store_client.clone());
-    let mut operations = Vec::new();
-    for (delta, boundary) in &uploads {
-        operations.extend_from_slice(delta);
-        common::commit_current_operations(&upload_client, &operations, &op_cfg::<F>(), boundary)
+    for publication in &publications {
+        common::commit_publications(&upload_client, std::slice::from_ref(publication))
             .await
             .expect("commit upload");
     }
 
+    // The last batch's first fresh key proves against the source root at the last tip.
     let qmdb_client: VariableClient<F> = exoware_qmdb::adapter::Ordered::new(
         PrefixedStoreClient::empty(store_client.clone()),
         op_cfg::<F>(),
@@ -685,6 +577,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
         _ => panic!("expected Update operation"),
     }
 
+    // The first 24 and last 8 active keys prove their expected values.
     let mut sample_keys = BTreeSet::new();
     sample_keys.extend(expected_active.keys().take(24).cloned());
     sample_keys.extend(expected_active.keys().rev().take(8).cloned());
@@ -706,6 +599,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
         }
     }
 
+    // A range read returns the first 10 active keys of its interval in order.
     let range = qmdb_client
         .get_range(
             latest_location,
@@ -735,6 +629,10 @@ async fn test_ordered_mmb_incremental_seed_batches_keep_current_proofs_verifiabl
     .await;
 }
 
+/// A publication read before its batch is applied can be uploaded after the batch is applied and
+/// synced. After two such batches from a persistent MMB source, the reader returns the source's
+/// current root and operation-log root at the last tip and verifies a current proof of
+/// `k-00000005`.
 #[tokio::test]
 async fn test_ordered_mmb_persistent_interleaved_seed_batches_keep_current_proofs_verifiable() {
     let store_client = common::local_store_client().await;
@@ -742,12 +640,15 @@ async fn test_ordered_mmb_persistent_interleaved_seed_batches_keep_current_proof
     let storage_path = storage_dir.path().to_owned();
     let store = store_client.clone();
 
+    // Open a persistent source and upload its initial publication. For each of two batches, read
+    // the publication before applying the batch and upload it after the batch is applied and
+    // synced.
     let (latest_location, expected_root, expected_ops_root) =
         tokio::task::spawn_blocking(move || {
             cw_tokio::Runner::new(cw_tokio::Config::new().with_storage_directory(storage_path))
                 .start(|context| async move {
                     use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-                    let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+                    let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
                     let cfg = common::current_variable_config(
                         "current_ordered_variable_mmb_persistent_seed_source",
                         page_cache,
@@ -762,7 +663,11 @@ async fn test_ordered_mmb_persistent_interleaved_seed_batches_keep_current_proof
                     .await
                     .expect("init");
                     let upload_client = PrefixedStoreClient::empty(store.clone());
-                    let mut previous_ops = Vec::<BatchOperation<mmb::Family>>::new();
+                    let initial =
+                        Publication::initial(&db).expect("initial publication must be readable");
+                    common::commit_publications(&upload_client, &[initial])
+                        .await
+                        .expect("initial upload must succeed");
                     let mut counter = 0u64;
 
                     for _ in 0..2 {
@@ -779,50 +684,15 @@ async fn test_ordered_mmb_persistent_interleaved_seed_batches_keep_current_proof
                                 batch = batch.write(rewrite_key, Some(rewrite_value));
                             }
                             counter += 3;
-                            batch
-                                .merkleize(
-                                    &db,
-                                    None::<Vec<u8>>,
-                                    &mut commonware_storage::qmdb::floor::Proportional,
-                                )
-                                .await
-                                .expect("merkleize")
+                            batch.merkleize(&db).await.expect("merkleize")
                         };
-                        (db, _) = db.apply_batch(finalized).await.expect("apply");
+                        let publication = Publication::from_batch(&finalized, &db)
+                            .expect("publication must be readable");
+                        db = db.apply_batch(finalized).await.expect("apply");
                         db = db.sync().await.expect("sync");
-
-                        let latest = db.bounds().end - 1;
-                        let count = NonZeroU64::new(*latest + 1).expect("non-zero op count");
-                        let (proof, cumulative_ops) = db
-                            .ops_historical_proof(
-                                latest + 1,
-                                Location::<mmb::Family>::new(0),
-                                count,
-                            )
+                        common::commit_publications(&upload_client, &[publication])
                             .await
-                            .expect("historical proof");
-                        assert!(commonware_storage::qmdb::verify_proof::<Sha256, _, _>(
-                            &proof,
-                            Location::<mmb::Family>::new(0),
-                            &cumulative_ops,
-                            &db.ops_root()
-                        ));
-                        let previous_slice = if previous_ops.is_empty() {
-                            None
-                        } else {
-                            Some(previous_ops.as_slice())
-                        };
-                        let boundary =
-                            boundary_from_source_db(&db, previous_slice, &cumulative_ops).await;
-                        common::commit_current_operations(
-                            &upload_client,
-                            &cumulative_ops,
-                            &op_cfg::<mmb::Family>(),
-                            &boundary,
-                        )
-                        .await
-                        .expect("commit upload");
-                        previous_ops = cumulative_ops;
+                            .expect("commit upload");
                     }
 
                     let latest_location = db.bounds().end - 1;
@@ -835,6 +705,8 @@ async fn test_ordered_mmb_persistent_interleaved_seed_batches_keep_current_proof
         .await
         .expect("join");
 
+    // At the last tip, the reader must return both source roots and a key proof against the current
+    // root.
     let qmdb_client: VariableClient<mmb::Family> = exoware_qmdb::adapter::Ordered::new(
         PrefixedStoreClient::empty(store_client.clone()),
         op_cfg::<mmb::Family>(),
@@ -875,14 +747,9 @@ async fn test_ordered_fixed_round_trip() {
     let source = build_fixed_source::<mmr::Family>().await;
 
     let upload_client = PrefixedStoreClient::empty(store_client.clone());
-    common::commit_current_operations(
-        &upload_client,
-        &source.operations,
-        &(),
-        &source.current_boundary,
-    )
-    .await
-    .expect("commit fixed upload");
+    common::commit_publications(&upload_client, &source.publications)
+        .await
+        .expect("commit fixed upload");
 
     let qmdb_client =
         FixedClient::<mmr::Family>::new(PrefixedStoreClient::empty(store_client.clone()), (), ());
@@ -957,7 +824,11 @@ async fn test_root_at_returns_current_root() {
         .root_at(source.latest_location)
         .await
         .expect("root_at");
-    assert!(!root.as_ref().iter().all(|&b| b == 0));
+    let publication = source
+        .publications
+        .last()
+        .expect("source must hold a publication");
+    assert_eq!(root, publication.root);
 }
 
 #[tokio::test]
@@ -1018,14 +889,9 @@ async fn assert_point_proof_reads_bounded_bitmap_chunks<F: Graftable>() {
     .await;
     assert!(source.operations.len() / (N * 8) > 3);
     let upload_client = PrefixedStoreClient::empty(store_client.clone());
-    common::commit_current_operations(
-        &upload_client,
-        &source.operations,
-        &op_cfg::<F>(),
-        &source.current_boundary,
-    )
-    .await
-    .unwrap();
+    common::commit_publications(&upload_client, &source.publications)
+        .await
+        .unwrap();
     let qmdb_client: VariableClient<F> = exoware_qmdb::adapter::Ordered::new(
         PrefixedStoreClient::empty(store_client),
         op_cfg::<F>(),
@@ -1036,7 +902,7 @@ async fn assert_point_proof_reads_bounded_bitmap_chunks<F: Graftable>() {
         .get(source.latest_location, &b"k-00000007".to_vec(), None)
         .await
         .unwrap();
-    assert_eq!(proof.root, source.current_boundary.root);
+    assert_eq!(proof.root, source.root);
     let chunks = query.bitmap_chunks.lock().unwrap().clone();
     assert!(
         chunks.len() <= 3,
@@ -1067,14 +933,9 @@ async fn test_ordered_mmr_exclusion_proof_reads_one_update_page() {
     )
     .await;
     let upload_client = PrefixedStoreClient::empty(store_client.clone());
-    common::commit_current_operations(
-        &upload_client,
-        &source.operations,
-        &op_cfg::<mmr::Family>(),
-        &source.current_boundary,
-    )
-    .await
-    .unwrap();
+    common::commit_publications(&upload_client, &source.publications)
+        .await
+        .unwrap();
     let qmdb_client: VariableClient<mmr::Family> = exoware_qmdb::adapter::Ordered::new(
         PrefixedStoreClient::empty(store_client),
         op_cfg::<mmr::Family>(),
@@ -1093,7 +954,7 @@ async fn test_ordered_mmr_exclusion_proof_reads_one_update_page() {
     let Some(RawKeyLookupProof::Miss(proof)) = lookups.pop() else {
         panic!("missing key should be a miss");
     };
-    assert_eq!(proof.root, source.current_boundary.root);
+    assert_eq!(proof.root, source.root);
     assert!(proof.verify::<Sha256>());
     let ExclusionProof::KeyValue(_, update) = &proof.proof else {
         panic!("missing key should be covered by an active key");
@@ -1111,24 +972,30 @@ async fn test_ordered_mmr_exclusion_proof_reads_one_update_page() {
     }
 }
 
+/// Two chained batches each cross a bitmap chunk boundary, and both publications are read before
+/// either batch is applied. After they are uploaded without a watermark, root reads at both batch
+/// tips fail. One watermark at the last tip then exposes the initial root and both batch roots, and
+/// each batch tip proves its own value of `alpha`.
 async fn assert_current_boundaries_survive_coalesced_publication<F>()
 where
     F: Graftable,
     BatchOperation<F>: commonware_codec::Codec + Clone,
 {
-    use commonware_codec::Encode as _;
-    use commonware_parallel::Sequential;
-    use exoware_qmdb::{
-        adapter::upload::prepare_authenticated_range, adapter::upload::stage_authenticated_range,
-        adapter::upload::stage_watermark, adapter::upload::AuthenticatedOperationRange,
-    };
     use exoware_sdk::StoreWriteBatch;
 
-    let prepared_boundaries = tokio::task::spawn_blocking(|| {
+    let (initial_root, prepared_initial, prepared) = tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
 
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            // Prepare each publication from its encoding, as a deferred writer would.
+            let prepare = |publication: &BatchPublication<F, N>| {
+                let decoded = common::round_trip_publication(publication, op_cfg::<F>());
+                prepare_publication::<F, Sha256, _, _, N>(&decoded, &publication.root, &Sequential)
+                    .expect("decoded publication must verify")
+            };
+
+            // Open an empty source database and prepare its initial publication.
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::current_variable_config(
                 "current_ordered_variable_coalesced_source",
                 page_cache,
@@ -1142,17 +1009,22 @@ where
             )
             .await
             .expect("init source current DB");
-            let mut previous_operations = Vec::<BatchOperation<F>>::new();
-            let mut prepared_boundaries = Vec::new();
+            let initial = Publication::initial(&db).expect("initial publication must be readable");
+            let prepared_initial = prepare(&initial);
+
+            // Merkleize two batches, the second as a child of the first, and read both publications
+            // before either batch is applied.
+            let mut batches: Vec<(Arc<VariableBatch<F>>, _, _)> = Vec::new();
             for (batch_index, value) in [b"one".to_vec(), b"updated".to_vec()]
                 .into_iter()
                 .enumerate()
             {
-                let start = Location::new(previous_operations.len() as u64);
-                let mut batch = db
-                    .new_batch()
-                    .write(b"alpha".to_vec(), Some(value.clone()))
-                    .write(b"beta".to_vec(), Some(b"stable".to_vec()));
+                let mut batch = match batches.last() {
+                    Some((parent, _, _)) => parent.new_batch::<Sha256>(),
+                    None => db.new_batch(),
+                }
+                .write(b"alpha".to_vec(), Some(value.clone()))
+                .write(b"beta".to_vec(), Some(b"stable".to_vec()));
                 for index in 0..300 {
                     let index = batch_index * 300 + index;
                     batch = batch.write(
@@ -1160,113 +1032,85 @@ where
                         Some(format!("v-{index:08}").into_bytes()),
                     );
                 }
-                let batch = batch
-                    .merkleize(
-                        &db,
-                        None::<Vec<u8>>,
-                        &mut commonware_storage::qmdb::floor::Proportional,
-                    )
-                    .await
-                    .expect("merkleize source batch");
-                (db, _) = db.apply_batch(batch).await.expect("apply source batch");
+                let batch = batch.merkleize(&db).await.expect("merkleize source batch");
+                let publication =
+                    Publication::from_batch(&batch, &db).expect("publication must be readable");
+                batches.push((batch, publication, value));
+            }
+
+            // Apply the batches in order and check each publication against the database its
+            // batch produces.
+            let mut prepared = Vec::new();
+            for (batch_index, (batch, publication, value)) in batches.into_iter().enumerate() {
+                db = db.apply_batch(batch).await.expect("apply source batch");
                 let end = db.bounds().end;
-                let latest = end - 1;
-                let expected_root = db.root();
-                let expected_ops_root = db.ops_root();
-                assert!(*end / (N * 8) as u64 > *start / (N * 8) as u64);
+                assert_eq!(publication.root, db.root());
+                assert!(*end / (N * 8) as u64 > *publication.start_location / (N * 8) as u64);
                 assert_eq!(
                     db.get(&b"alpha".to_vec()).await.unwrap(),
                     Some(value.clone())
                 );
-                let (proof, operations) = db
-                    .ops_historical_proof(
-                        end,
-                        start,
-                        NonZeroU64::new(*end - *start).expect("source has new operations"),
-                    )
-                    .await
-                    .expect("source operation proof");
-                let pinned_nodes = db
-                    .pinned_nodes_at(start)
-                    .await
-                    .expect("source pinned nodes");
-                let mut cumulative_operations = previous_operations.clone();
-                cumulative_operations.extend(operations.iter().cloned());
-                let previous = if previous_operations.is_empty() {
-                    None
-                } else {
-                    Some(previous_operations.as_slice())
-                };
-                let boundary = boundary_from_source_db(&db, previous, &cumulative_operations).await;
                 if batch_index == 1 {
-                    assert!(start > Location::new(0));
-                    assert!(!pinned_nodes.is_empty());
-                    assert!(!boundary.grafted_nodes.is_empty());
+                    assert!(!publication.pinned_nodes.is_empty());
+                    assert!(!publication.grafted_nodes.is_empty());
                 }
-
-                // Include bootstrap in the first range and use the native proof and pins for the continuation
-                let encoded = operations
-                    .iter()
-                    .map(|operation| operation.encode().to_vec())
-                    .collect::<Vec<_>>();
-                let authenticated = AuthenticatedOperationRange {
-                    start_location: start,
-                    end_location: proof.leaves,
-                    inactive_peaks: proof.inactive_peaks,
-                    pinned_nodes: &pinned_nodes,
-                    encoded_operations: &encoded,
-                };
-                let prepared = prepare_authenticated_range::<F, Sha256, BatchOperation<F>, _>(
-                    &authenticated,
-                    &expected_ops_root,
-                    &op_cfg::<F>(),
-                    &Sequential,
-                )
-                .expect("authenticate source operation range")
-                .with_current_boundary::<Sha256, N>(&boundary)
-                .expect("attach authenticated source current boundary");
-                prepared_boundaries.push((latest, expected_root, value, prepared));
-                previous_operations = cumulative_operations;
+                prepared.push((end - 1, publication.root, value, prepare(&publication)));
             }
+
+            // A database with applied batches has no initial publication.
+            assert!(matches!(
+                Publication::initial(&db),
+                Err(QmdbError::CorruptData(_))
+            ));
             db.destroy().await.expect("destroy source DB");
-            prepared_boundaries
+            (initial.root, prepared_initial, prepared)
         })
     })
     .await
     .expect("join source DB");
 
+    // Upload all three publications without a watermark. The reader must report no watermark and
+    // reject a root request at each batch tip.
     let store_client = common::local_store_client().await;
     let upload_client = PrefixedStoreClient::empty(store_client.clone());
     let qmdb_client: VariableClient<F> =
         exoware_qmdb::adapter::Ordered::new(upload_client.clone(), op_cfg::<F>(), key_cfg());
-    let mut expected_boundaries = Vec::new();
-    for (latest, root, value, prepared) in prepared_boundaries {
+    let mut batch = StoreWriteBatch::new();
+    stage_authenticated_range(&upload_client, prepared_initial, &mut batch)
+        .expect("initial publication must stage without publishing");
+    batch
+        .commit(&store_client)
+        .await
+        .expect("initial publication must persist");
+    let mut expected = Vec::new();
+    for (latest, root, value, range) in prepared {
         let mut batch = StoreWriteBatch::new();
-        stage_authenticated_range(&upload_client, prepared, &mut batch)
+        stage_authenticated_range(&upload_client, range, &mut batch)
             .expect("stage current range without publishing");
         batch
             .commit(&store_client)
             .await
             .expect("persist current range");
-        expected_boundaries.push((latest, root, value));
+        expected.push((latest, root, value));
     }
     assert_eq!(
         qmdb_client.latest_published_watermark().await.unwrap(),
         None
     );
-    for (boundary, _, _) in &expected_boundaries {
+    for (tip, _, _) in &expected {
         assert!(matches!(
-            qmdb_client.root_at(*boundary).await,
+            qmdb_client.root_at(*tip).await,
             Err(exoware_qmdb::QmdbError::WatermarkTooLow { requested, available: 0 })
-                if requested == boundary.as_u64()
+                if requested == tip.as_u64()
         ));
     }
 
-    // Publish once after both prefixes and their versioned current boundary rows are durable
-    let latest = expected_boundaries.last().unwrap().0;
-    let mut publication = StoreWriteBatch::new();
-    stage_watermark(&upload_client, latest, &mut publication).expect("stage final watermark");
-    publication
+    // Publish one watermark at the last tip once all three publications are durable. The reader
+    // must then report that watermark and return the initial root at location 0.
+    let latest = expected.last().unwrap().0;
+    let mut watermark = StoreWriteBatch::new();
+    stage_watermark(&upload_client, latest, &mut watermark).expect("stage final watermark");
+    watermark
         .commit(&store_client)
         .await
         .expect("publish final watermark");
@@ -1274,18 +1118,22 @@ where
         qmdb_client.latest_published_watermark().await.unwrap(),
         Some(latest)
     );
+    assert_eq!(
+        qmdb_client.root_at(Location::new(0)).await.unwrap(),
+        initial_root
+    );
 
-    for (boundary, expected_root, expected_value) in expected_boundaries {
-        let root = qmdb_client.root_at(boundary).await.unwrap_or_else(|error| {
-            panic!("current root at uploaded boundary {boundary}: {error}")
-        });
+    // Each batch tip serves its own root and its own value of `alpha`.
+    for (tip, expected_root, expected_value) in expected {
+        let root = qmdb_client
+            .root_at(tip)
+            .await
+            .unwrap_or_else(|error| panic!("uploaded tip {tip} must have a current root: {error}"));
         assert_eq!(root, expected_root);
         let proof = qmdb_client
-            .get(boundary, &b"alpha".to_vec(), None)
+            .get(tip, &b"alpha".to_vec(), None)
             .await
-            .unwrap_or_else(|error| {
-                panic!("current proof at uploaded boundary {boundary}: {error}")
-            });
+            .unwrap_or_else(|error| panic!("uploaded tip {tip} must prove alpha: {error}"));
         assert_eq!(proof.root, expected_root);
         match proof.operation {
             BatchOperation::Update(update) => {
@@ -1308,6 +1156,7 @@ async fn test_ordered_mmb_current_boundaries_survive_coalesced_publication() {
 }
 
 /// Store requests `operation` makes.
+#[boxed]
 async fn store_calls<T>(
     query: &common::CountingQuery,
     operation: impl std::future::Future<Output = Result<T, exoware_qmdb::QmdbError>>,
@@ -1325,11 +1174,9 @@ async fn test_ordered_current_proofs_store_calls() {
         300,
     )
     .await;
-    common::commit_current_operations(
+    common::commit_publications(
         &PrefixedStoreClient::empty(store_client.clone()),
-        &source.operations,
-        &op_cfg::<mmr::Family>(),
-        &source.current_boundary,
+        &source.publications,
     )
     .await
     .unwrap();
@@ -1416,11 +1263,9 @@ async fn test_ordered_current_proof_reads_overlap() {
         300,
     )
     .await;
-    common::commit_current_operations(
+    common::commit_publications(
         &PrefixedStoreClient::empty(store_client.clone()),
-        &source.operations,
-        &op_cfg::<mmr::Family>(),
-        &source.current_boundary,
+        &source.publications,
     )
     .await
     .unwrap();
@@ -1433,7 +1278,7 @@ async fn test_ordered_current_proof_reads_overlap() {
     let key = b"k-00000007".to_vec();
     // Load the tip first, so the gated reads are the proof's own
     let warm = client.get_raw(tip, &key, None).await.unwrap();
-    assert_eq!(warm.root, source.current_boundary.root);
+    assert_eq!(warm.root, source.root);
     let deadline = std::time::Duration::from_secs(10);
 
     // A key proof reads its operation row and nodes while reading its chunk
@@ -1457,4 +1302,154 @@ async fn test_ordered_current_proof_reads_overlap() {
     for server in servers {
         server.abort();
     }
+}
+
+/// `prepare_publication` accepts an unmodified publication, and the prepared range spans exactly
+/// the batch's operations. It rejects a publication that does not bind to the trusted root, that
+/// does not hold exactly one commit as its last operation, or that carries a grafted node below the
+/// grafting height or at the node limit.
+#[tokio::test]
+async fn test_prepare_publication_rejects_unbound_publications() {
+    // Read the initial publication and the publication of one source batch that is never
+    // applied.
+    let (initial, publication) = tokio::task::spawn_blocking(|| {
+        cw_tokio::Runner::default().start(|context| async move {
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
+            let cfg = common::current_variable_config(
+                "current_ordered_variable_publication_source",
+                page_cache,
+                op_cfg::<mmr::Family>(),
+                NZU64!(8),
+            );
+            let db: VariableDb<mmr::Family> = VariableDb::init(
+                context.child("current_ordered_variable_publication_source"),
+                cfg,
+                None,
+            )
+            .await
+            .expect("source database must initialize");
+            let initial = Publication::initial(&db).expect("initial publication must be readable");
+            let batch = db
+                .new_batch()
+                .write(b"alpha".to_vec(), Some(b"one".to_vec()))
+                .write(b"beta".to_vec(), Some(b"two".to_vec()))
+                .merkleize(&db)
+                .await
+                .expect("source batch must merkleize");
+            let publication =
+                Publication::from_batch(&batch, &db).expect("publication must be readable");
+            db.destroy().await.expect("source destroy must succeed");
+            (initial, publication)
+        })
+    })
+    .await
+    .expect("source task must complete");
+
+    // The unmodified publication prepares rows spanning exactly the batch's operations.
+    let root = publication.root;
+    let prepare = |publication: &_, root: &Digest| {
+        prepare_publication::<mmr::Family, Sha256, _, _, N>(publication, root, &Sequential)
+    };
+    let prepared = prepare(&publication, &root).expect("source publication must verify");
+    assert_eq!(prepared.start_location(), publication.start_location);
+    assert_eq!(
+        prepared.latest_location(),
+        publication.start_location + (publication.operations.len() as u64 - 1)
+    );
+
+    // A root other than the publication's is rejected.
+    assert!(matches!(
+        prepare(&publication, &Sha256::fill(0xEE)),
+        Err(QmdbError::ProofVerification {
+            kind: ProofKind::Publication
+        })
+    ));
+
+    // A publication whose root is not the trusted root is rejected, although its witness binds
+    // the rebuilt operation-log root to the trusted root.
+    let mut rerooted = publication.clone();
+    rerooted.root = Sha256::fill(0xEE);
+    assert!(matches!(
+        prepare(&rerooted, &root),
+        Err(QmdbError::ProofVerification {
+            kind: ProofKind::Publication
+        })
+    ));
+
+    // Swapping two operations changes the rebuilt operation-log root, and the witness cannot bind
+    // that root to the trusted current root.
+    let mut reordered = publication.clone();
+    let mut operations = reordered.operations.as_ref().clone();
+    operations.swap(0, 1);
+    reordered.operations = Arc::new(operations);
+    assert!(matches!(
+        prepare(&reordered, &root),
+        Err(QmdbError::ProofVerification {
+            kind: ProofKind::Publication
+        })
+    ));
+
+    // Prepending the initial commit would rebuild the batch's operation-log root from an empty
+    // frontier. Preparation rejects the publication because it holds two commits.
+    let mut glued = publication.clone();
+    glued.start_location = Location::new(0);
+    glued.pinned_nodes = Vec::new();
+    let mut operations = initial.operations.as_ref().clone();
+    operations.extend(publication.operations.iter().cloned());
+    glued.operations = Arc::new(operations);
+    assert!(matches!(
+        prepare(&glued, &root),
+        Err(QmdbError::CorruptData(message))
+            if message == "publication must not contain a commit before its last operation"
+    ));
+
+    // A publication that does not end at a commit is rejected, whether it holds operations or
+    // not.
+    let mut uncommitted = publication.clone();
+    let mut operations = uncommitted.operations.as_ref().clone();
+    operations.pop();
+    uncommitted.operations = Arc::new(operations);
+    let mut empty = publication.clone();
+    empty.operations = Arc::new(Vec::new());
+    for incomplete in [&uncommitted, &empty] {
+        assert!(matches!(
+            prepare(incomplete, &root),
+            Err(QmdbError::CorruptData(message)) if message == "publication must end at a commit"
+        ));
+    }
+
+    // A grafted node below the grafting height is rejected.
+    let mut low_graft = publication.clone();
+    low_graft.grafted_nodes = vec![(Position::new(0), root)];
+    assert!(matches!(
+        prepare(&low_graft, &root),
+        Err(QmdbError::CorruptData(_))
+    ));
+
+    // A decoded grafted node at the family's node limit is rejected. The limit is a node count, so
+    // no node sits at that position.
+    let mut high_graft = publication.clone();
+    high_graft.grafted_nodes = vec![(mmr::Family::MAX_NODES, root)];
+    let high_graft = common::round_trip_publication(&high_graft, op_cfg::<mmr::Family>());
+    assert!(matches!(
+        prepare(&high_graft, &root),
+        Err(QmdbError::CorruptData(message)) if message.contains("node limit")
+    ));
+
+    // The last position below the limit prepares.
+    let mut last_graft = publication.clone();
+    last_graft.grafted_nodes = vec![(Position::new(*mmr::Family::MAX_NODES - 1), root)];
+    let _ = prepare(&last_graft, &root).expect("the last node position must prepare");
+
+    // A witness that does not bind the rebuilt operation-log root to the publication's root
+    // fails publication verification.
+    let mut unbound = publication;
+    unbound.ops_root_witness.grafted_root = Sha256::fill(0xEE);
+    assert!(matches!(
+        prepare(&unbound, &root),
+        Err(QmdbError::ProofVerification {
+            kind: ProofKind::Publication
+        })
+    ));
 }

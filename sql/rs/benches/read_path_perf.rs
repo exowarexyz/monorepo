@@ -5,34 +5,41 @@
 //! and value bytes, while body counters measure encoded Connect traffic without HTTP headers.
 //! SQL RPC cases include protobuf response decoding, but not client-side result materialization.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::collections::BTreeMap;
-use std::ops::Bound::{Included, Unbounded};
-use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
-
-use axum::body::Body;
 use axum::{
+    body::Body,
     extract::{Request, State},
     middleware::Next,
     response::Response,
+    serve::{Listener, ListenerExt},
     Router,
 };
 use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use datafusion::arrow::datatypes::DataType;
-use datafusion::physical_plan::execution_plan::reset_plan_states;
-use datafusion::physical_plan::{collect, ExecutionPlan};
-use exoware_sdk::{StoreClient, StoreKeyPrefix};
+use datafusion::{
+    arrow::datatypes::DataType,
+    physical_plan::{collect, execution_plan::reset_plan_states, ExecutionPlan},
+};
+use exoware_sdk::{transport::set_tcp_nodelay, StoreClient, StoreKeyPrefix};
 use exoware_server::{
     Ingest, IngestState, PutError, PutInput, Query, QueryExtra, QueryResult, QueryState, RangeScan,
     RangeScanBatch, RangeScanResult, Sequence,
 };
-use exoware_sql::proto::sql::v1::{QueryRequest, ServiceClient};
-use exoware_sql::{CellValue, IndexSpec, KvSchema, SqlContext, TableColumnConfig};
+use exoware_sql::{
+    proto::sql::v1::{QueryRequest, ServiceClient},
+    CellValue, IndexSpec, KvSchema, SqlContext, TableColumnConfig,
+};
 use http_body::{Body as HttpBody, Frame, SizeHint};
+use std::{
+    alloc::{GlobalAlloc, Layout, System},
+    collections::BTreeMap,
+    ops::Bound::{Included, Unbounded},
+    pin::Pin,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+    task::{Context, Poll},
+};
 use tokio::runtime::Runtime;
 
 static ALLOC_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -43,23 +50,29 @@ struct CountingAllocator;
 #[global_allocator]
 static GLOBAL_ALLOCATOR: CountingAllocator = CountingAllocator;
 
+// SAFETY: Every method passes its arguments unchanged to `System`, which upholds the
+// `GlobalAlloc` contract. The bookkeeping only updates atomics and never allocates.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
         ALLOC_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        // SAFETY: The caller's guarantees for `layout` pass straight through.
         unsafe { System.alloc(layout) }
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
         ALLOC_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        // SAFETY: The caller's guarantees for `layout` pass straight through.
         unsafe { System.alloc_zeroed(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: The caller's guarantees for `ptr` and `layout` pass straight through.
         unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
         ALLOC_BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
+        // SAFETY: The caller's guarantees for `ptr`, `layout` and `new_size` pass straight through.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
 }
@@ -381,7 +394,8 @@ impl Fixture {
             ));
         let listener = runtime
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
-            .unwrap();
+            .unwrap()
+            .tap_io(set_tcp_nodelay);
         let url = format!("http://{}", listener.local_addr().unwrap());
         let server = runtime.spawn(async move { axum::serve(listener, app).await.unwrap() });
         let client = StoreClient::builder()
@@ -461,7 +475,8 @@ impl Fixture {
             ));
         let listener = runtime
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
-            .unwrap();
+            .unwrap()
+            .tap_io(set_tcp_nodelay);
         let sql_uri = format!("http://{}", listener.local_addr().unwrap());
         let sql_server = runtime.spawn(async move { axum::serve(listener, app).await.unwrap() });
         let sql_client = ServiceClient::new(

@@ -1,25 +1,21 @@
 //! `qmdb.v1.OrderedKeyRangeService`: current-state proofs for key ranges.
 
-use std::future::Future;
-use std::sync::Arc;
-
+use super::{encode, key_lookup::decode_key, qmdb_error_to_connect};
+use crate::{
+    proof::RawKeyRangeProof,
+    service::proto::qmdb::v1::{GetRangeRequest, GetRangeResponse, OrderedKeyRangeService},
+    QmdbError,
+};
 use commonware_codec::{Codec, Encode, Read};
 use commonware_storage::{
     merkle::{Graftable, Location},
     qmdb::{
-        any::{ordered, value::ValueEncoding},
-        current::ordered::proof::constant::ExclusionProof,
-        operation::Key as QmdbKey,
+        any::ordered, current::ordered::proof::constant::ExclusionProof, operation::Key as QmdbKey,
+        value::ValueEncoding,
     },
 };
 use connectrpc::{PreEncoded, RequestContext as Context, ServiceRequest};
-
-use crate::proof::RawKeyRangeProof;
-use crate::service::proto::qmdb::v1::{GetRangeRequest, GetRangeResponse, OrderedKeyRangeService};
-use crate::QmdbError;
-
-use super::key_lookup::decode_key;
-use super::{encode, qmdb_error_to_connect};
+use std::{future::Future, sync::Arc};
 
 /// Read capabilities needed by [`KeyRangeServer`].
 pub(crate) trait KeyRangeReader<const N: usize>: Send + Sync + 'static {
