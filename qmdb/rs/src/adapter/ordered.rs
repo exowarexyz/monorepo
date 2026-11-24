@@ -32,7 +32,8 @@ use commonware_storage::{
 };
 use commonware_utils::range::contains_cyclic;
 use exoware_sdk::{keys::Key, PrefixedStoreClient, RangeMode, ReadSession};
-use std::{collections::BTreeSet, marker::PhantomData, sync::Arc};
+use futures::FutureExt as _;
+use std::{marker::PhantomData, sync::Arc};
 
 /// Maximum number of entries in one key range proof request.
 const MAX_RANGE_LIMIT: u32 = 1000;
@@ -913,32 +914,25 @@ where
         keys: &[K],
         min_sequence_number: Option<u64>,
     ) -> Result<Vec<RawKeyLookupProof<H::Digest, K, V, N, F, E>>, QmdbError> {
-        if keys.is_empty() {
-            return Err(QmdbError::EmptyProofRequest);
-        }
+        core::validate_get_many_keys(keys)?;
 
         let watermark = self
             .resolve_watermark(watermark, min_sequence_number)
             .await?;
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
         let tip = self.current_tip(&session, watermark.location).await?;
-        let mut seen = BTreeSet::<Vec<u8>>::new();
-        let mut proofs = Vec::with_capacity(keys.len());
-        for key in keys {
-            let key_bytes = error_key(key);
-            if !seen.insert(key_bytes.clone()) {
-                return Err(QmdbError::DuplicateRequestedKey { key: key_bytes });
-            }
+        // Keys are independent at a fixed session and tip, so prove them together.
+        core::try_join_bounded(keys, core::PROOF_CONCURRENCY, async |key| {
             match self.key_value_proof_raw(&session, &tip, key.as_ref()).await {
-                Ok(proof) => proofs.push(RawKeyLookupProof::Hit(proof)),
-                Err(QmdbError::ProofKeyNotFound { .. } | QmdbError::KeyNotActive { .. }) => {
-                    let proof = self.key_exclusion_proof(&session, &tip, key).await?;
-                    proofs.push(RawKeyLookupProof::Miss(proof));
-                }
-                Err(err) => return Err(err),
+                Ok(proof) => Ok(RawKeyLookupProof::Hit(proof)),
+                Err(QmdbError::ProofKeyNotFound { .. } | QmdbError::KeyNotActive { .. }) => self
+                    .key_exclusion_proof(&session, &tip, key)
+                    .await
+                    .map(RawKeyLookupProof::Miss),
+                Err(err) => Err(err),
             }
-        }
-        Ok(proofs)
+        })
+        .await
     }
 
     /// Verified ordered current-state range proof for `[start_key, end_key)`.
@@ -1005,23 +999,29 @@ where
             },
         )
         .await?;
-        // The walk found each entry's location, so entries skip the key lookup.
-        let mut entries = Vec::with_capacity(active.len());
-        for (key, location) in &active {
-            let reads = self.proof_reads(&session, &tip, *location).await?;
-            let proof =
-                Self::active_key_proof(&self.op_cfg, &tip, reads, key.as_slice(), *location)?;
-            entries.push(proof);
-        }
-
-        let start_proof = if entries
-            .first()
-            .is_some_and(|entry| entry.operation.key() == Some(&start_key))
-        {
-            None
-        } else {
-            Some(self.key_exclusion_proof(&session, &tip, &start_key).await?)
+        // The walk found each entry's location, so entries skip the key lookup. The entry
+        // proofs and the start proof need only the session and tip, so they run together.
+        let entries =
+            core::try_join_bounded(&active, core::PROOF_CONCURRENCY, async |(key, location)| {
+                let reads = self.proof_reads(&session, &tip, *location).await?;
+                Self::active_key_proof(&self.op_cfg, &tip, reads, key.as_slice(), *location)
+            });
+        let start_proof = async {
+            // An entry's proof checks that its operation holds the walked key.
+            if active
+                .first()
+                .is_some_and(|(key, _)| key.as_slice() == start_key.as_ref())
+            {
+                return Ok(None);
+            }
+            self.key_exclusion_proof(&session, &tip, &start_key)
+                .await
+                .map(Some)
         };
+        // An entry error cancels the start proof. Report a start error only after all entries succeed.
+        let (entries, start_proof) =
+            futures::future::try_join(entries, start_proof.map(Ok)).await?;
+        let start_proof = start_proof?;
 
         Ok(RawKeyRangeProof {
             watermark: watermark.location,

@@ -25,7 +25,7 @@ use commonware_storage::{
     },
 };
 use exoware_sdk::{PrefixedStoreClient, ReadSession};
-use std::{collections::BTreeSet, marker::PhantomData, sync::Arc};
+use std::{marker::PhantomData, sync::Arc};
 
 pub struct Unordered<
     F: Family,
@@ -446,12 +446,11 @@ where
         location: Location<F>,
     ) -> Result<RawKeyValueProof<H::Digest, unordered::Operation<F, K, E>, N, F>, QmdbError> {
         let watermark = tip.watermark;
-        let key_bytes = error_key(&key);
         let operation = decode_operation::<F, K, E>(&self.op_cfg, location, &reads.operation)?;
         let unordered::Operation::Update(update) = &operation else {
             return Err(QmdbError::KeyNotActive {
                 watermark: watermark.as_u64(),
-                key: key_bytes,
+                key: error_key(&key),
             });
         };
         if update.0.as_ref() != key.as_ref() {
@@ -545,31 +544,26 @@ where
         min_sequence_number: Option<u64>,
     ) -> Result<Vec<RawKeyValueProof<H::Digest, unordered::Operation<F, K, E>, N, F>>, QmdbError>
     {
-        if keys.is_empty() {
-            return Err(QmdbError::EmptyProofRequest);
-        }
+        core::validate_get_many_keys(keys)?;
 
         let watermark = self
             .resolve_watermark(watermark, min_sequence_number)
             .await?;
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
         let tip = self.current_tip(&session, watermark.location).await?;
-        let mut seen = BTreeSet::<Vec<u8>>::new();
-        let mut proofs = Vec::with_capacity(keys.len());
-        for key in keys {
-            let key_bytes = error_key(key);
-            if !seen.insert(key_bytes.clone()) {
-                return Err(QmdbError::DuplicateRequestedKey { key: key_bytes });
-            }
-            match self.key_value_proof_raw(&session, &tip, key.as_ref()).await {
-                Ok(proof) => proofs.push(proof),
+        // Keys are independent at a fixed session and tip, so prove them together.
+        let proofs = core::try_join_bounded(keys, core::PROOF_CONCURRENCY, async |key| {
+            let result = self.key_value_proof_raw(&session, &tip, key.as_ref()).await;
+            match result {
+                Ok(proof) => Ok(Some(proof)),
                 Err(QmdbError::ProofKeyNotFound { .. } | QmdbError::KeyNotActive { .. }) => {
-                    continue;
+                    Ok(None)
                 }
-                Err(err) => return Err(err),
+                Err(err) => Err(err),
             }
-        }
-        Ok(proofs)
+        })
+        .await?;
+        Ok(proofs.into_iter().flatten().collect())
     }
 }
 

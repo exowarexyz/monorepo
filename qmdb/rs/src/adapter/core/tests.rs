@@ -714,3 +714,132 @@ async fn publication_cache_refresh_preserves_evidence_on_lagging_and_empty_repli
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test(start_paused = true)]
+async fn try_join_bounded_keeps_order_and_bound_and_earliest_error() {
+    use std::time::Duration;
+    const LIMIT: usize = 4;
+
+    // Later inputs finish first, no more than the bound run at once, and a future is
+    // built only when a slot opens.
+    let running = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let built = Arc::new(AtomicUsize::new(0));
+    let finished = Arc::new(AtomicUsize::new(0));
+    let peak_built = Arc::new(AtomicUsize::new(0));
+    let outputs = try_join_bounded(0..40u64, LIMIT, |index| {
+        let live = built.fetch_add(1, Ordering::SeqCst) + 1 - finished.load(Ordering::SeqCst);
+        peak_built.fetch_max(live, Ordering::SeqCst);
+        let (running, peak, finished) = (running.clone(), peak.clone(), finished.clone());
+        async move {
+            let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(40 - index)).await;
+            running.fetch_sub(1, Ordering::SeqCst);
+            finished.fetch_add(1, Ordering::SeqCst);
+            Ok(index)
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(outputs, (0..40).collect::<Vec<_>>());
+    assert_eq!(peak.load(Ordering::SeqCst), LIMIT);
+    assert_eq!(peak_built.load(Ordering::SeqCst), LIMIT);
+
+    // Input 3 fails first and input 1 fails later. Input 1's error is returned, and no
+    // input starts after the first failure.
+    let built = AtomicUsize::new(0);
+    let error = try_join_bounded(0..20u64, LIMIT, |index| {
+        built.fetch_add(1, Ordering::SeqCst);
+        async move {
+            match index {
+                3 => Err(QmdbError::CorruptData("3".to_string())),
+                1 => {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    Err(QmdbError::CorruptData("1".to_string()))
+                }
+                _ => {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    Ok(index)
+                }
+            }
+        }
+    })
+    .await
+    .unwrap_err();
+    assert!(matches!(error, QmdbError::CorruptData(message) if message == "1"));
+    assert_eq!(built.load(Ordering::SeqCst), LIMIT);
+}
+
+#[tokio::test(start_paused = true)]
+async fn try_join_bounded_refills_slots_while_the_first_input_is_pending() {
+    let input_count = 4 * PROOF_CONCURRENCY;
+    let completed = std::cell::Cell::new(0);
+    let outputs = try_join_bounded(0..input_count, PROOF_CONCURRENCY, async |index| {
+        if index == 0 {
+            // Paused time advances only after the other runnable proofs finish.
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            assert_eq!(completed.get(), input_count - 1);
+        }
+        completed.set(completed.get() + 1);
+        Ok(index)
+    })
+    .await
+    .unwrap();
+    assert_eq!(outputs, (0..input_count).collect::<Vec<_>>());
+}
+
+#[tokio::test(start_paused = true)]
+async fn try_join_bounded_returns_the_earliest_error_without_waiting_on_later_inputs() {
+    use std::time::Duration;
+
+    // Input 0 fails at once while input 1 never finishes.
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        try_join_bounded(0..2u64, PROOF_CONCURRENCY, |index| async move {
+            if index == 0 {
+                return Err(QmdbError::CorruptData("0".to_string()));
+            }
+            std::future::pending::<Result<u64, QmdbError>>().await
+        }),
+    )
+    .await
+    .expect("an error from the first input must not wait on later ones");
+    assert!(matches!(result, Err(QmdbError::CorruptData(message)) if message == "0"));
+
+    // Input 1 fails first, so the helper waits for input 0 but not for input 2.
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        try_join_bounded(0..3u64, PROOF_CONCURRENCY, |index| async move {
+            match index {
+                0 => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    Ok(index)
+                }
+                1 => Err(QmdbError::CorruptData("1".to_string())),
+                _ => std::future::pending().await,
+            }
+        }),
+    )
+    .await
+    .expect("the error must return once every earlier input finished");
+    assert!(matches!(result, Err(QmdbError::CorruptData(message)) if message == "1"));
+
+    // An earlier input that fails later still wins.
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        try_join_bounded(0..3u64, PROOF_CONCURRENCY, |index| async move {
+            match index {
+                0 => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    Err(QmdbError::CorruptData("0".to_string()))
+                }
+                1 => Err(QmdbError::CorruptData("1".to_string())),
+                _ => std::future::pending::<Result<u64, QmdbError>>().await,
+            }
+        }),
+    )
+    .await
+    .expect("the earliest error must return without waiting on input 2");
+    assert!(matches!(result, Err(QmdbError::CorruptData(message)) if message == "0"));
+}
