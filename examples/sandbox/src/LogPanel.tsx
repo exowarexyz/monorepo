@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { type StoreBatch, type StoreClient } from '@exowarexyz/sdk';
+import { type StoreBatch, type PrefixedStoreClient } from '@exowarexyz/sdk';
 import { isNetworkError } from './clientErrors';
 import { formatBytesValue, formatKeyPreview } from './format';
 
@@ -58,12 +58,12 @@ function renderBatch(batch: StoreBatch) {
 }
 
 export function LogPanel({
-  client,
+  store,
   showNotification,
   onConnectionLost,
   onConnectionRestored,
 }: {
-  client: StoreClient | null;
+  store: PrefixedStoreClient | null;
   showNotification: NotificationFn;
   onConnectionLost: () => void;
   onConnectionRestored: () => void;
@@ -87,7 +87,7 @@ export function LogPanel({
   }, []);
 
   const handleGetBatch = async () => {
-    if (!client || !batchSequenceNumber.trim()) {
+    if (!store || !batchSequenceNumber.trim()) {
       return;
     }
 
@@ -96,7 +96,7 @@ export function LogPanel({
     setBatchNotFound(false);
     try {
       const sequenceNumber = BigInt(batchSequenceNumber.trim());
-      const result = await client.getBatch(sequenceNumber);
+      const result = await store.getBatch(sequenceNumber);
       setBatchResult(result);
       setBatchNotFound(result === null);
       if (result) {
@@ -117,7 +117,7 @@ export function LogPanel({
   };
 
   const handleStartSubscription = () => {
-    if (!client) {
+    if (!store) {
       return;
     }
 
@@ -146,7 +146,7 @@ export function LogPanel({
 
       void (async () => {
         try {
-          for await (const batch of client.subscribe(
+          for await (const batch of store.subscribe(
             {
               selectors: [selector],
               valueFilters,
@@ -217,7 +217,7 @@ export function LogPanel({
         <button
           className={`btn-primary ${isGettingBatch ? 'loading' : ''}`}
           onClick={handleGetBatch}
-          disabled={!client || isGettingBatch || !batchSequenceNumber.trim()}
+          disabled={!store || isGettingBatch || !batchSequenceNumber.trim()}
         >
           {isGettingBatch ? 'Loading...' : 'Get Batch'}
         </button>
@@ -286,7 +286,7 @@ export function LogPanel({
           <button
             className={`btn-primary ${isSubscribing ? 'loading' : ''}`}
             onClick={handleStartSubscription}
-            disabled={!client || isSubscribing}
+            disabled={!store || isSubscribing}
           >
             {isSubscribing ? 'Streaming...' : 'Start Subscription'}
           </button>

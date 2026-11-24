@@ -44,7 +44,7 @@ use exoware_sdk::{
         KvFieldKind, KvFieldRef, KvPredicate, KvReducedValue,
     },
     proto::to_proto_reduced_value,
-    RangeReduceOp, RangeReduceRequest,
+    RangeReduceOp, RangeReduceParams,
 };
 use futures::StreamExt;
 use std::{
@@ -104,7 +104,7 @@ struct ExtractedReductionRow {
 
 #[derive(Debug)]
 struct ReducePlan {
-    request: Arc<RangeReduceRequest>,
+    request: Arc<RangeReduceParams>,
     needs_value: bool,
     fields: Vec<KvFieldRef>,
     field_copies: Vec<usize>,
@@ -124,7 +124,7 @@ pub(crate) enum ResultKind {
 }
 
 impl ReducePlan {
-    fn new(request: Arc<RangeReduceRequest>, context: &TaskContext) -> Result<Self, RangeError> {
+    fn new(request: Arc<RangeReduceParams>, context: &TaskContext) -> Result<Self, RangeError> {
         validate_reduce_request(&request)?;
         let mut fields = Vec::new();
         let mut columns = HashMap::new();
@@ -393,7 +393,7 @@ pub(crate) async fn execute_reduce<Q: Query>(
     query: Arc<Q>,
     start: Key,
     end: Key,
-    request: RangeReduceRequest,
+    request: RangeReduceParams,
     context: Arc<TaskContext>,
 ) -> Result<ReduceExecution, RangeError> {
     let plan = Arc::new(ReducePlan::new(Arc::new(request), &context)?);
@@ -863,7 +863,7 @@ fn scalar_to_reduced(value: ScalarValue) -> DfResult<Option<KvReducedValue>> {
     }))
 }
 
-fn validate_reduce_request(request: &RangeReduceRequest) -> Result<(), RangeError> {
+fn validate_reduce_request(request: &RangeReduceParams) -> Result<(), RangeError> {
     if request.reducers.is_empty() && request.group_by.is_empty() {
         return Err(RangeError::Reduce(
             "range reduction request requires at least one reducer or group-by field".to_string(),
@@ -942,7 +942,7 @@ mod tests {
             KvExpr, KvFieldKind, KvFieldRef, KvPredicate, KvPredicateCheck, KvPredicateConstraint,
             KvReducedValue, StoredRow, StoredValue,
         },
-        RangeReduceGroup, RangeReduceOp, RangeReduceRequest, RangeReduceResponse, RangeReducerSpec,
+        RangeReduceGroup, RangeReduceOp, RangeReduceParams, RangeReduceResponse, RangeReducerSpec,
     };
     use futures::{StreamExt, TryStreamExt};
 
@@ -1001,8 +1001,8 @@ mod tests {
         })
     }
 
-    fn scalar_request(reducers: Vec<RangeReducerSpec>) -> RangeReduceRequest {
-        RangeReduceRequest {
+    fn scalar_request(reducers: Vec<RangeReducerSpec>) -> RangeReduceParams {
+        RangeReduceParams {
             reducers,
             group_by: Vec::new(),
             filter: None,
@@ -1039,7 +1039,7 @@ mod tests {
 
     fn reduce(
         rows: &[(Key, Bytes)],
-        request: &RangeReduceRequest,
+        request: &RangeReduceParams,
     ) -> Result<RangeReduceResponse, RangeError> {
         futures::executor::block_on(async {
             let plan = ReducePlan::new(Arc::new(request.clone()), &TaskContext::default())?;
@@ -1443,7 +1443,7 @@ mod tests {
             kind: KvFieldKind::Int64,
         });
         let expr = KvExpr::Add(Box::new(field.clone()), Box::new(field));
-        let request = RangeReduceRequest {
+        let request = RangeReduceParams {
             group_by: vec![expr.clone()],
             reducers: vec![
                 reducer(RangeReduceOp::SumField, Some(expr.clone())),
@@ -1826,7 +1826,7 @@ mod tests {
             (vec![KvExpr::Literal(KvReducedValue::Int64(0))], 1024),
             (Vec::new(), 32),
         ] {
-            let request = RangeReduceRequest {
+            let request = RangeReduceParams {
                 reducers: vec![reducer(RangeReduceOp::CountAll, None); count],
                 group_by,
                 filter: None,
@@ -1962,7 +1962,7 @@ mod tests {
             make_row(b"d", vec![Some(StoredValue::Utf8("y".into()))]),
             make_row(b"e", vec![Some(StoredValue::Utf8("x".into()))]),
         ];
-        let request = RangeReduceRequest {
+        let request = RangeReduceParams {
             reducers: vec![reducer(RangeReduceOp::CountAll, None)],
             group_by: vec![utf8_value_field(0)],
             filter: None,
@@ -1998,7 +1998,7 @@ mod tests {
 
     #[test]
     fn validates_empty_request() {
-        let request = RangeReduceRequest {
+        let request = RangeReduceParams {
             reducers: Vec::new(),
             group_by: Vec::new(),
             filter: None,
@@ -2049,7 +2049,7 @@ mod tests {
             make_row(b"b", vec![Some(StoredValue::Int64(20))]),
             make_row(b"c", vec![Some(StoredValue::Int64(30))]),
         ];
-        let request = RangeReduceRequest {
+        let request = RangeReduceParams {
             reducers: vec![reducer(RangeReduceOp::SumField, Some(int64_value_field(0)))],
             group_by: Vec::new(),
             filter: Some(KvPredicate {
@@ -2129,7 +2129,7 @@ mod tests {
                 ],
             ),
         ];
-        let request = RangeReduceRequest {
+        let request = RangeReduceParams {
             reducers: vec![reducer(RangeReduceOp::SumField, Some(int64_value_field(1)))],
             group_by: vec![utf8_value_field(0)],
             filter: None,
@@ -2170,7 +2170,7 @@ mod tests {
             make_row(b"b", vec![Some(StoredValue::Int64(20))]),
             make_row(b"c", vec![Some(StoredValue::Int64(30))]),
         ];
-        let request = RangeReduceRequest {
+        let request = RangeReduceParams {
             reducers: vec![reducer(RangeReduceOp::CountAll, None)],
             group_by: Vec::new(),
             filter: Some(KvPredicate {
@@ -2222,7 +2222,7 @@ mod tests {
             .enumerate()
             .map(|(i, value)| make_row(&i.to_be_bytes(), vec![value.map(StoredValue::Float64)]))
             .collect::<Vec<_>>();
-        let request = RangeReduceRequest {
+        let request = RangeReduceParams {
             reducers: vec![reducer(RangeReduceOp::CountAll, None)],
             group_by: vec![float64_value_field(0)],
             filter: None,
@@ -2339,7 +2339,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                let request = RangeReduceRequest {
+                let request = RangeReduceParams {
                     reducers: vec![
                         reducer(RangeReduceOp::MinField, Some(float64_value_field(0))),
                         reducer(RangeReduceOp::MaxField, Some(float64_value_field(0))),
@@ -2406,7 +2406,7 @@ mod tests {
         let decimal128 = field(1, KvFieldKind::Decimal128);
         let decimal256 = field(2, KvFieldKind::Decimal256);
         let float = float64_value_field(3);
-        let request = RangeReduceRequest {
+        let request = RangeReduceParams {
             reducers: vec![
                 reducer(RangeReduceOp::CountAll, None),
                 reducer(RangeReduceOp::SumField, Some(decimal128.clone())),

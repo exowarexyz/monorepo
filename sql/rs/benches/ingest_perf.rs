@@ -19,7 +19,7 @@ use datafusion::{
     },
     datasource::MemTable,
 };
-use exoware_sdk::{StoreClient, StoreKeyPrefix};
+use exoware_sdk::StoreClient;
 use exoware_server::{Ingest, IngestState, PutError, PutInput};
 use exoware_sql::{CellValue, IndexSpec, KvSchema, SqlContext, TableColumnConfig};
 use std::{
@@ -121,7 +121,7 @@ fn columns() -> Vec<TableColumnConfig> {
 }
 
 fn schema(client: StoreClient) -> KvSchema {
-    KvSchema::new(client.prefixed(StoreKeyPrefix::identity()))
+    KvSchema::new(client.unprefixed())
         .table(
             "events",
             columns(),
@@ -257,7 +257,7 @@ fn sql_insert(c: &mut Criterion) {
         .client_transport(connectrpc::client::HttpClient::plaintext_http2_only())
         .build()
         .unwrap();
-    let ctx = SqlContext::new(client.prefixed(StoreKeyPrefix::identity()));
+    let ctx = SqlContext::new(client.unprefixed());
     ctx.register_schema(schema(client)).unwrap();
     let (src_schema, batches) = record_batches();
     ctx.register_table(

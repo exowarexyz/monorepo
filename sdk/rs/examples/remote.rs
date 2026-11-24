@@ -60,7 +60,7 @@ async fn round_trip(url: &str, write_url: &str) -> Result<(), Box<dyn std::error
     let batch: Vec<(&Key, &[u8])> = entries.iter().map(|(k, v)| (k, *v)).collect();
 
     // One commit for the whole batch, sequenced by the store.
-    let sequence = store.ingest().put(&batch).await?;
+    let sequence = store.ingest().put_many(&batch).await?;
     println!("\ncommitted {} entries at sequence {sequence}", batch.len());
 
     // Query replicas trail the write path, so pin each read to the sequence just

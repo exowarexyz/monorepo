@@ -17,7 +17,7 @@ async fn spawn_client() -> PrefixedStoreClient {
         .retry_config(RetryConfig::disabled())
         .build()
         .expect("build client");
-    PrefixedStoreClient::empty(client)
+    client.unprefixed()
 }
 
 fn key(family: u8, payload: &[u8]) -> Key {
@@ -59,7 +59,7 @@ async fn live_subscribe_delivers_matching_entries() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let k = key(1, b"hello");
-    let seq = client.ingest().put(&[(&k, b"world")]).await.expect("put");
+    let seq = client.ingest().put(&k, b"world").await.expect("put");
 
     let frame = next_with_timeout(&mut sub, 1_000)
         .await
@@ -82,7 +82,7 @@ async fn non_matching_put_yields_no_frame() {
 
     client
         .ingest()
-        .put(&[(&key(2, b"miss"), b"v")])
+        .put(&key(2, b"miss"), b"v")
         .await
         .expect("put");
 
@@ -115,7 +115,7 @@ async fn multiple_selectors_delivered_once_per_put() {
     let kb = key(2, b"b");
     client
         .ingest()
-        .put(&[(&ka, b"1"), (&kb, b"2")])
+        .put_many(&[(&ka, b"1"), (&kb, b"2")])
         .await
         .expect("put");
 
@@ -141,12 +141,12 @@ async fn two_puts_yield_two_distinct_frames() {
 
     let seq1 = client
         .ingest()
-        .put(&[(&key(1, b"a"), b"1")])
+        .put(&key(1, b"a"), b"1")
         .await
         .expect("put1");
     let seq2 = client
         .ingest()
-        .put(&[(&key(1, b"b"), b"2")])
+        .put(&key(1, b"b"), b"2")
         .await
         .expect("put2");
 
@@ -166,7 +166,7 @@ async fn replay_since_delivers_retained_batches_then_live() {
     for i in 0..5u8 {
         let seq = client
             .ingest()
-            .put(&[(&key(1, &[b'a' + i]), &[b'v', i])])
+            .put(&key(1, &[b'a' + i]), &[b'v', i])
             .await
             .expect("put");
         seen_seqs.push(seq);
@@ -193,7 +193,7 @@ async fn replay_since_delivers_retained_batches_then_live() {
     // Now live: a new PUT should arrive with its actual seq.
     let live_seq = client
         .ingest()
-        .put(&[(&key(1, b"live"), b"hot")])
+        .put(&key(1, b"live"), b"hot")
         .await
         .expect("put live");
     let live = next_with_timeout(&mut sub, 1_000)
@@ -208,7 +208,7 @@ async fn replay_past_end_starts_at_the_cursor() {
     let client = spawn_client().await;
     let current = client
         .ingest()
-        .put(&[(&key(1, b"seed"), b"v")])
+        .put(&key(1, b"seed"), b"v")
         .await
         .expect("put");
 
@@ -222,12 +222,12 @@ async fn replay_past_end_starts_at_the_cursor() {
     // sits below the cursor, so it is not delivered.
     let skipped_seq = client
         .ingest()
-        .put(&[(&key(1, b"skipped"), b"s")])
+        .put(&key(1, b"skipped"), b"s")
         .await
         .expect("put skipped");
     let live_seq = client
         .ingest()
-        .put(&[(&key(1, b"next"), b"n")])
+        .put(&key(1, b"next"), b"n")
         .await
         .expect("put next");
     assert_eq!(skipped_seq, current + 1);
@@ -240,12 +240,50 @@ async fn replay_past_end_starts_at_the_cursor() {
 }
 
 #[tokio::test]
+async fn clear_retention_removes_the_rule() {
+    let client = spawn_client().await;
+    for i in 0..4u8 {
+        client
+            .ingest()
+            .put(&key(1, &[i]), &[b'v', i])
+            .await
+            .expect("put");
+    }
+    let oldest = client
+        .retention()
+        .set_retention(RetentionPolicy::KeepLatest { count: 2 })
+        .await
+        .expect("set_retention keep_latest");
+    assert_eq!(oldest, Some(3));
+    let oldest = client
+        .retention()
+        .clear_retention()
+        .await
+        .expect("clear_retention");
+    assert_eq!(oldest, Some(3));
+
+    for i in 4..8u8 {
+        client
+            .ingest()
+            .put(&key(1, &[i]), &[b'v', i])
+            .await
+            .expect("put");
+    }
+    assert!(client
+        .stream()
+        .get_batch(3)
+        .await
+        .expect("get_batch")
+        .is_some());
+}
+
+#[tokio::test]
 async fn replay_miss_after_retention_returns_batch_evicted() {
     let client = spawn_client().await;
     for i in 0..20u8 {
         client
             .ingest()
-            .put(&[(&key(1, &[i]), &[b'v', i])])
+            .put(&key(1, &[i]), &[b'v', i])
             .await
             .expect("put");
     }
@@ -253,7 +291,7 @@ async fn replay_miss_after_retention_returns_batch_evicted() {
     // enforcement reports 11 as the oldest retained sequence.
     let oldest = client
         .retention()
-        .set_retention(Some(RetentionPolicy::KeepLatest { count: 10 }))
+        .set_retention(RetentionPolicy::KeepLatest { count: 10 })
         .await
         .expect("set_retention keep_latest");
     assert_eq!(oldest, Some(11));
@@ -284,13 +322,13 @@ async fn get_batch_returns_whole_batch_unfiltered() {
     let kb = key(2, b"b");
     let seq = client
         .ingest()
-        .put(&[(&ka, b"1"), (&kb, b"2")])
+        .put_many(&[(&ka, b"1"), (&kb, b"2")])
         .await
         .expect("put");
 
     let got = client
         .stream()
-        .get(seq)
+        .get_batch(seq)
         .await
         .expect("get_batch")
         .expect("some");
@@ -306,14 +344,10 @@ async fn get_batch_returns_whole_batch_unfiltered() {
 #[tokio::test]
 async fn get_batch_missing_seq_returns_none() {
     let client = spawn_client().await;
-    client
-        .ingest()
-        .put(&[(&key(1, b"a"), b"1")])
-        .await
-        .expect("put");
+    client.ingest().put(&key(1, b"a"), b"1").await.expect("put");
     let got = client
         .stream()
-        .get(10_000)
+        .get_batch(10_000)
         .await
         .expect("get_batch should not error");
     assert!(got.is_none());
@@ -322,20 +356,16 @@ async fn get_batch_missing_seq_returns_none() {
 #[tokio::test]
 async fn get_batch_after_drop_all_returns_none() {
     let client = spawn_client().await;
-    let seq = client
-        .ingest()
-        .put(&[(&key(1, b"a"), b"1")])
-        .await
-        .expect("put");
+    let seq = client.ingest().put(&key(1, b"a"), b"1").await.expect("put");
     // drop_all evicts up to the live frontier, so nothing is retained.
     let oldest = client
         .retention()
-        .set_retention(Some(RetentionPolicy::DropAll))
+        .set_retention(RetentionPolicy::DropAll)
         .await
         .expect("set_retention drop_all");
     assert_eq!(oldest, None);
 
-    let got = client.stream().get(seq).await.expect("get_batch");
+    let got = client.stream().get_batch(seq).await.expect("get_batch");
     assert!(got.is_none(), "evicted batch should return None");
 }
 
@@ -346,24 +376,29 @@ async fn get_batch_after_keep_latest_evicts_old_but_keeps_new() {
     for i in 0..20u8 {
         let s = client
             .ingest()
-            .put(&[(&key(1, &[i]), &[b'v', i])])
+            .put(&key(1, &[i]), &[b'v', i])
             .await
             .expect("put");
         seqs.push(s);
     }
     let oldest = client
         .retention()
-        .set_retention(Some(RetentionPolicy::KeepLatest { count: 10 }))
+        .set_retention(RetentionPolicy::KeepLatest { count: 10 })
         .await
         .expect("set_retention keep_latest");
     assert_eq!(oldest, Some(*seqs.last().unwrap() - 9));
 
     // Earliest seq should be evicted.
-    assert!(client.stream().get(seqs[0]).await.expect("get").is_none());
+    assert!(client
+        .stream()
+        .get_batch(seqs[0])
+        .await
+        .expect("get")
+        .is_none());
     // Latest seq should survive.
     let last = client
         .stream()
-        .get(*seqs.last().unwrap())
+        .get_batch(*seqs.last().unwrap())
         .await
         .expect("get last")
         .expect("some");
@@ -391,7 +426,7 @@ async fn slow_subscriber_drops_without_blocking_ingest() {
     let started = std::time::Instant::now();
     for i in 0..512u16 {
         let k = key(1, &i.to_be_bytes());
-        client.ingest().put(&[(&k, b"x")]).await.expect("put");
+        client.ingest().put(&k, b"x").await.expect("put");
     }
     let elapsed = started.elapsed();
     assert!(
@@ -429,7 +464,7 @@ async fn value_filter_restricts_to_matching_values() {
     let kb = key(1, b"b");
     client
         .ingest()
-        .put(&[(&ka, b"keep-alpha"), (&kb, b"drop-beta")])
+        .put_many(&[(&ka, b"keep-alpha"), (&kb, b"drop-beta")])
         .await
         .expect("put");
 

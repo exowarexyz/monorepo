@@ -148,7 +148,7 @@ async fn balanced_h2c_supports_unary_and_long_lived_streaming_calls() {
     let store = prefixed(balanced_client(&url, request_timeout));
     let key = Key::from(b"middle".to_vec());
 
-    store.ingest().put(&[(&key, b"value")]).await.unwrap();
+    store.ingest().put(&key, b"value").await.unwrap();
     assert_eq!(
         store.query().get(&key).await.unwrap().as_deref(),
         Some(&b"value"[..])
@@ -169,7 +169,7 @@ async fn balanced_h2c_supports_unary_and_long_lived_streaming_calls() {
 
     tokio::time::sleep(request_timeout + Duration::from_secs(1)).await;
     let key = Key::from(b"late".to_vec());
-    store.ingest().put(&[(&key, b"value")]).await.unwrap();
+    store.ingest().put(&key, b"value").await.unwrap();
 
     let frame = tokio::time::timeout(Duration::from_secs(2), subscription.next())
         .await
@@ -218,7 +218,7 @@ async fn custom_transport_routes_real_requests_across_origins() {
     let store = prefixed(client);
     let key = Key::from(b"split".to_vec());
 
-    store.ingest().put(&[(&key, b"ingest")]).await.unwrap();
+    store.ingest().put(&key, b"ingest").await.unwrap();
     assert_eq!(store.query().get(&key).await.unwrap(), None);
 
     let mut stream = store
@@ -243,7 +243,7 @@ async fn balanced_https_uses_custom_roots_client_identity_and_h2_alpn() {
     let store = prefixed(tls_client(&url, Arc::new(client_config)));
     let key = Key::from(b"tls".to_vec());
 
-    store.ingest().put(&[(&key, b"h2")]).await.unwrap();
+    store.ingest().put(&key, b"h2").await.unwrap();
     assert_eq!(
         store.query().get(&key).await.unwrap().as_deref(),
         Some(&b"h2"[..])

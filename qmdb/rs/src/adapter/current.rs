@@ -94,7 +94,6 @@ async fn load_current_tip<F: Graftable, H: Hasher, const N: usize>(
         .into_iter()
         .chain(&peak_keys)
         .collect::<Vec<_>>();
-    let batch_size = u32::try_from(keys.len()).expect("peak count fits u32");
 
     // Tail chunks lie beyond the graftable prefix, so pruning cannot change
     // their indices. Their reads can run alongside the metadata read.
@@ -106,7 +105,7 @@ async fn load_current_tip<F: Graftable, H: Hasher, const N: usize>(
         Ok::<_, QmdbError>((index, chunk))
     }));
     let (mut rows, tail) = futures::try_join!(
-        async { Ok::<_, QmdbError>(session.get_many(&keys, batch_size).await?.collect().await?) },
+        async { Ok::<_, QmdbError>(session.get_many(&keys, keys.len()).await?.collect().await?) },
         load_tail,
     )?;
 

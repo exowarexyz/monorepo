@@ -7,7 +7,9 @@ use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_consensus::Block;
 use commonware_cryptography::{certificate, Digest};
-use exoware_sdk::{keys::Key, ClientError, PrefixedStoreClient, StoreBatchUpload, StoreWriteBatch};
+use exoware_sdk::{
+    keys::Key, ClientError, PrefixedStoreClient, StoreWriteBatch, StoreWriteBatchUpload,
+};
 use futures::future::BoxFuture;
 
 #[derive(Clone, Debug)]
@@ -206,12 +208,12 @@ impl SimplexWriter {
     }
 }
 
-impl StoreBatchUpload for SimplexWriter {
+impl StoreWriteBatchUpload for SimplexWriter {
     type Prepared = PreparedUpload;
     type Receipt = UploadReceipt;
     type Error = SimplexError;
 
-    fn store_client(&self) -> &PrefixedStoreClient {
+    fn store(&self) -> &PrefixedStoreClient {
         &self.client
     }
 

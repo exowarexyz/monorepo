@@ -13,7 +13,7 @@ use exoware_sdk::{
     },
     prune_policy,
     selector::Selector as DomainSelector,
-    PreferZstdHttpClient, PrefixedStoreClient, RangeMode, RangeReduceOp, RangeReduceRequest,
+    PreferZstdHttpClient, PrefixedStoreClient, RangeMode, RangeReduceOp, RangeReduceParams,
     RangeReducerSpec, RetryConfig, StoreClient,
 };
 use futures::StreamExt;
@@ -26,7 +26,7 @@ async fn spawn_client() -> (PrefixedStoreClient, String) {
         .retry_config(RetryConfig::disabled())
         .build()
         .expect("build client");
-    (PrefixedStoreClient::empty(client), url)
+    (client.unprefixed(), url)
 }
 
 fn key(b: &[u8]) -> Key {
@@ -40,7 +40,7 @@ async fn put_and_get_round_trip() {
     let (client, _url) = spawn_client().await;
     let k = key(b"hello");
     let v = b"world";
-    let seq = client.ingest().put(&[(&k, v)]).await.expect("put");
+    let seq = client.ingest().put(&k, v).await.expect("put");
     assert!(seq > 0);
 
     let got = client.query().get(&k).await.expect("get");
@@ -91,8 +91,8 @@ async fn get_missing_key_returns_none() {
 async fn put_overwrites_value() {
     let (client, _url) = spawn_client().await;
     let k = key(b"k");
-    client.ingest().put(&[(&k, b"v1")]).await.expect("put1");
-    let seq2 = client.ingest().put(&[(&k, b"v2")]).await.expect("put2");
+    client.ingest().put(&k, b"v1").await.expect("put1");
+    let seq2 = client.ingest().put(&k, b"v2").await.expect("put2");
     let got = client
         .query()
         .get_with_min_sequence_number(&k, seq2)
@@ -161,7 +161,7 @@ async fn responses_use_zstd_only_when_the_client_accepts_it() {
     let (client, url) = spawn_client().await;
     let key = key(b"compressed");
     let value = vec![b'x'; 4096];
-    let sequence = client.ingest().put(&[(&key, &value)]).await.unwrap();
+    let sequence = client.ingest().put(&key, &value).await.unwrap();
     let config = |registry: CompressionRegistry| {
         ClientConfig::new(url.parse().unwrap()).with_compression(registry)
     };
@@ -191,7 +191,7 @@ async fn get_many_returns_found_and_missing() {
     let kc = key(b"c");
     client
         .ingest()
-        .put(&[(&ka, b"1"), (&kc, b"3")])
+        .put_many(&[(&ka, b"1"), (&kc, b"3")])
         .await
         .expect("put");
 
@@ -216,7 +216,7 @@ async fn range_forward() {
     let kc = key(b"rc");
     client
         .ingest()
-        .put(&[(&ka, b"1"), (&kb, b"2"), (&kc, b"3")])
+        .put_many(&[(&ka, b"1"), (&kb, b"2"), (&kc, b"3")])
         .await
         .expect("put");
 
@@ -237,7 +237,7 @@ async fn range_reverse() {
     let kc = key(b"sc");
     client
         .ingest()
-        .put(&[(&ka, b"1"), (&kb, b"2"), (&kc, b"3")])
+        .put_many(&[(&ka, b"1"), (&kb, b"2"), (&kc, b"3")])
         .await
         .expect("put");
 
@@ -258,7 +258,7 @@ async fn range_with_limit() {
     let kc = key(b"lc");
     client
         .ingest()
-        .put(&[(&ka, b"1"), (&kb, b"2"), (&kc, b"3")])
+        .put_many(&[(&ka, b"1"), (&kb, b"2"), (&kc, b"3")])
         .await
         .expect("put");
 
@@ -293,11 +293,11 @@ async fn reduce_count_all() {
     let kc = key(b"cc");
     client
         .ingest()
-        .put(&[(&ka, b"1"), (&kb, b"2"), (&kc, b"3")])
+        .put_many(&[(&ka, b"1"), (&kb, b"2"), (&kc, b"3")])
         .await
         .expect("put");
 
-    let request = RangeReduceRequest {
+    let request = RangeReduceParams {
         reducers: vec![RangeReducerSpec {
             filter: None,
             op: RangeReduceOp::CountAll,
@@ -332,7 +332,7 @@ async fn reduce_sum_int64() {
     };
     client
         .ingest()
-        .put(&[
+        .put_many(&[
             (&ka, encode_row(10).as_slice()),
             (&kb, encode_row(20).as_slice()),
             (&kc, encode_row(30).as_slice()),
@@ -340,7 +340,7 @@ async fn reduce_sum_int64() {
         .await
         .expect("put");
 
-    let request = RangeReduceRequest {
+    let request = RangeReduceParams {
         reducers: vec![RangeReducerSpec {
             filter: None,
             op: RangeReduceOp::SumField,
@@ -374,7 +374,7 @@ async fn prune_drop_all_removes_keys() {
     let kc = prefix.encode(b"ccc").expect("encode key c");
     client
         .ingest()
-        .put(&[(&ka, b"va"), (&kb, b"vb"), (&kc, b"vc")])
+        .put_many(&[(&ka, b"va"), (&kb, b"vb"), (&kc, b"vc")])
         .await
         .expect("put");
 
@@ -424,15 +424,15 @@ async fn prune_drop_all_removes_keys() {
 // -- explicit sequence reads --
 
 #[tokio::test]
-async fn create_session_with_sequence_reads_at_or_above_floor() {
+async fn create_session_with_min_sequence_number_reads_at_or_above_floor() {
     let (client, _url) = spawn_client().await;
     let k1 = key(b"s1");
     let k2 = key(b"s2");
-    let seq1 = client.ingest().put(&[(&k1, b"v1")]).await.expect("put1");
-    let seq2 = client.ingest().put(&[(&k2, b"v2")]).await.expect("put2");
+    let seq1 = client.ingest().put(&k1, b"v1").await.expect("put1");
+    let seq2 = client.ingest().put(&k2, b"v2").await.expect("put2");
     assert!(seq2 > seq1);
 
-    let session = client.create_session_with_sequence(seq2);
+    let session = client.create_session_with_min_sequence_number(seq2);
     let got = session.get(&k2).await.expect("session get");
     assert_eq!(got.as_deref(), Some(b"v2".as_slice()));
 }
@@ -455,7 +455,7 @@ async fn put_batch_multiple_keys() {
     let kc = key(b"bc");
     client
         .ingest()
-        .put(&[(&ka, b"1"), (&kb, b"2"), (&kc, b"3")])
+        .put_many(&[(&ka, b"1"), (&kb, b"2"), (&kc, b"3")])
         .await
         .expect("put batch");
 
@@ -484,7 +484,7 @@ async fn range_stream_collects_all() {
     let kd = key(b"xd");
     client
         .ingest()
-        .put(&[(&ka, b"1"), (&kb, b"2"), (&kc, b"3"), (&kd, b"4")])
+        .put_many(&[(&ka, b"1"), (&kb, b"2"), (&kc, b"3"), (&kd, b"4")])
         .await
         .expect("put");
 
@@ -505,7 +505,7 @@ async fn range_stream_collects_all() {
 async fn get_with_min_sequence_number() {
     let (client, _url) = spawn_client().await;
     let k = key(b"msn");
-    let seq = client.ingest().put(&[(&k, b"val")]).await.expect("put");
+    let seq = client.ingest().put(&k, b"val").await.expect("put");
     let got = client
         .query()
         .get_with_min_sequence_number(&k, seq)
@@ -538,7 +538,7 @@ async fn prune_keep_latest_retains_newest() {
 
     client
         .ingest()
-        .put(&[
+        .put_many(&[
             (&k_a1, b"a-v1"),
             (&k_a2, b"a-v2"),
             (&k_a3, b"a-v3"),
@@ -620,7 +620,7 @@ async fn reduce_count_min_max_field() {
     };
     client
         .ingest()
-        .put(&[
+        .put_many(&[
             (&key(b"fa"), encode_row(10).as_slice()),
             (&key(b"fb"), encode_row(30).as_slice()),
             (&key(b"fc"), encode_row(20).as_slice()),
@@ -633,7 +633,7 @@ async fn reduce_count_min_max_field() {
         kind: KvFieldKind::Int64,
         nullable: true,
     });
-    let request = RangeReduceRequest {
+    let request = RangeReduceParams {
         reducers: vec![
             RangeReducerSpec {
                 filter: None,
@@ -684,7 +684,7 @@ async fn reduce_grouped_count() {
 
     let sequence = client
         .ingest()
-        .put(&[
+        .put_many(&[
             (&ka1, encode_row(1).as_slice()),
             (&ka2, encode_row(2).as_slice()),
             (&kb1, encode_row(3).as_slice()),
@@ -692,7 +692,7 @@ async fn reduce_grouped_count() {
         .await
         .expect("put");
 
-    let request = RangeReduceRequest {
+    let request = RangeReduceParams {
         reducers: vec![RangeReducerSpec {
             filter: None,
             op: RangeReduceOp::CountAll,
@@ -739,7 +739,7 @@ async fn store_client_prune_drop_all() {
     let kb = prefix.encode(b"pb").expect("encode");
     client
         .ingest()
-        .put(&[(&ka, b"v1"), (&kb, b"v2")])
+        .put_many(&[(&ka, b"v1"), (&kb, b"v2")])
         .await
         .expect("put");
     assert!(client.query().get(&ka).await.expect("get").is_some());
@@ -784,7 +784,7 @@ async fn prune_greater_than_retains_above_threshold() {
 
     client
         .ingest()
-        .put(&[(&k_a10, b"v10"), (&k_a20, b"v20"), (&k_a30, b"v30")])
+        .put_many(&[(&k_a10, b"v10"), (&k_a20, b"v20"), (&k_a30, b"v30")])
         .await
         .expect("put");
 

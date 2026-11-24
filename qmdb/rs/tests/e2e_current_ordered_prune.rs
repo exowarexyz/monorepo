@@ -17,7 +17,6 @@ use commonware_storage::{
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{adapter::upload::Publication, MAX_OPERATION_SIZE};
-use exoware_sdk::PrefixedStoreClient;
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
@@ -158,10 +157,10 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
         .expect("join");
 
     // Upload through one client and read back through an ordered reader of the same store.
-    let upload_client = PrefixedStoreClient::empty(store_client.clone());
+    let upload_client = store_client.unprefixed();
     let qmdb_client: exoware_qmdb::adapter::Ordered<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
         exoware_qmdb::adapter::Ordered::new(
-            PrefixedStoreClient::empty(store_client.clone()),
+            store_client.unprefixed(),
             (
                 ((0..=MAX_OPERATION_SIZE).into(), ()),
                 ((0..=MAX_OPERATION_SIZE).into(), ()),

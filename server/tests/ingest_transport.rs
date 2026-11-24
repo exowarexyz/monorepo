@@ -1882,7 +1882,7 @@ async fn rust_sdk_receives_admission_hints_and_retries_without_backend_replay() 
     let key = Bytes::from_static(b"a");
     let value = vec![42; 256 * 1024];
     let no_retry = make_client(RetryConfig::disabled());
-    let error = no_retry.ingest().put(&[(&key, &value)]).await.unwrap_err();
+    let error = no_retry.ingest().put(&key, &value).await.unwrap_err();
     assert_admission_hint(error.rpc_error().unwrap());
     assert_eq!(backend.0.load(Ordering::SeqCst), 0);
     assert_eq!(server.stats.request_polls.load(Ordering::SeqCst), 0);
@@ -1890,7 +1890,7 @@ async fn rust_sdk_receives_admission_hints_and_retries_without_backend_replay() 
     let retrying = make_client(RetryConfig::standard());
     let baseline = server.stats.response_drops.load(Ordering::SeqCst);
     let started = Instant::now();
-    let put = tokio::spawn(async move { retrying.ingest().put(&[(&key, &value)]).await });
+    let put = tokio::spawn(async move { retrying.ingest().put(&key, &value).await });
     timeout(Duration::from_secs(2), async {
         while server.stats.response_drops.load(Ordering::SeqCst) == baseline {
             tokio::task::yield_now().await;

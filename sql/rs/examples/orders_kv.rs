@@ -1,5 +1,5 @@
 use datafusion::{arrow::util::pretty::print_batches, common::Result as DataFusionResult};
-use exoware_sdk::{StoreClient, StoreKeyPrefix};
+use exoware_sdk::StoreClient;
 use exoware_sql::{default_orders_index_specs, KvSchema, SqlContext};
 
 #[tokio::main]
@@ -7,10 +7,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let base_url =
         std::env::var("EXOWARE_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
     let client = StoreClient::new(&base_url);
-    let ctx = SqlContext::new(client.prefixed(StoreKeyPrefix::identity()));
+    let ctx = SqlContext::new(client.unprefixed());
     let index_specs = default_orders_index_specs();
 
-    let schema = KvSchema::new(client.prefixed(StoreKeyPrefix::identity()))
+    let schema = KvSchema::new(client.unprefixed())
         .orders_table("orders_kv", index_specs)
         .map_err(datafusion::common::DataFusionError::Execution)?;
     ctx.register_schema(schema)?;

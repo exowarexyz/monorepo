@@ -110,7 +110,7 @@ impl MockStore {
             axum::serve(listener, app).await.expect("serve mock Store");
         });
         Self {
-            client: PrefixedStoreClient::empty(StoreClient::new(&url)),
+            client: StoreClient::new(&url).unprefixed(),
             requested_floors,
             server,
         }
@@ -308,7 +308,7 @@ async fn store_free_sql_does_not_create_an_observation() {
 
 #[test]
 fn context_override_preserves_optional_store_sequence_floor() {
-    let store = PrefixedStoreClient::empty(StoreClient::new("http://localhost:8080"));
+    let store = StoreClient::new("http://localhost:8080").unprefixed();
     let ctx = SqlContext::new(store.clone());
     for floor in [None, Some(0), Some(41)] {
         let query_ctx = ctx.with_read_session(ReadSession::monotonic(store.clone(), floor));

@@ -41,7 +41,7 @@ use datafusion::{
     physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner},
 };
 use exoware_proto::{
-    query, to_domain_reduced_value_from_view, RangeReduceOp, RangeReduceRequest, RangeReducerSpec,
+    query, to_domain_reduced_value_from_view, RangeReduceOp, RangeReduceParams, RangeReducerSpec,
 };
 use exoware_sdk as exoware_proto;
 use exoware_sdk::{
@@ -190,7 +190,7 @@ pub(crate) struct AggregateReduceJob {
     /// Reducers, group keys, and row filter, all compiled against the job's access path.
     /// Each range returns partial results per group, or one scalar result when `group_by` is
     /// empty.
-    pub(crate) request: RangeReduceRequest,
+    pub(crate) request: RangeReduceParams,
     /// Primary key or secondary index key ranges to reduce, each sent as its own request.
     /// The ranges may cover more rows than the filters accept, and `request.filter` enforces
     /// the rest. Empty when the predicate yields no range, so the job reduces nothing.
@@ -1148,7 +1148,7 @@ pub(crate) fn build_aggregate_reduce_job(
     );
     Ok(Some((
         AggregateReduceJob {
-            request: RangeReduceRequest {
+            request: RangeReduceParams {
                 reducers,
                 group_by,
                 filter,
@@ -2146,7 +2146,7 @@ mod tests {
                 .tap_io(set_tcp_nodelay);
             let url = format!("http://{}", listener.local_addr().unwrap());
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-            let client = PrefixedStoreClient::empty(StoreClient::new(&url));
+            let client = StoreClient::new(&url).unprefixed();
             let store = crate::SqlContext::new(client.clone());
             let schema = crate::KvSchema::new(client.clone())
                 .table(
@@ -2765,7 +2765,7 @@ mod tests {
                 ] {
                     fixture.check(&sql, requests).await;
                     for request in fixture.rows.reductions.lock().unwrap().iter() {
-                        let request = exoware_sdk::to_domain_reduce_request(&request.params).unwrap();
+                        let request = exoware_sdk::to_domain_reduce_params(&request.params).unwrap();
                         if grouped {
                             assert!(matches!(request.group_by[0], KvExpr::CastFloat64(_)), "{sql}: {request:?}");
                         }
@@ -2777,7 +2777,7 @@ mod tests {
                 .check("SELECT SUM(value * 2.0) FROM numbers", 1)
                 .await;
             let requests = fixture.rows.reductions.lock().unwrap();
-            let request = exoware_sdk::to_domain_reduce_request(&requests[0].params).unwrap();
+            let request = exoware_sdk::to_domain_reduce_params(&requests[0].params).unwrap();
             assert!(
                 matches!(request.reducers[0].expr, Some(KvExpr::Mul(_, _))),
                 "{request:?}"
@@ -3999,7 +3999,7 @@ mod tests {
             .build()
             .unwrap();
         let fixture = Fixture::new().await;
-        let schema = crate::KvSchema::new(PrefixedStoreClient::empty(client))
+        let schema = crate::KvSchema::new(client.unprefixed())
             .table(
                 "pending_ranges",
                 vec![
@@ -4241,7 +4241,7 @@ mod tests {
             .create_session();
         let start = Bytes::from_static(&[0]);
         let end = Bytes::from_static(&[1]);
-        let invalid = RangeReduceRequest {
+        let invalid = RangeReduceParams {
             reducers: vec![RangeReducerSpec {
                 op: RangeReduceOp::CountAll,
                 expr: Some(KvExpr::Literal(KvReducedValue::Int64(1))),
@@ -4269,7 +4269,7 @@ mod tests {
             .first_entry()
             .unwrap()
             .get_mut() = Bytes::from_static(b"invalid row");
-        let request = RangeReduceRequest {
+        let request = RangeReduceParams {
             reducers: vec![RangeReducerSpec {
                 op: RangeReduceOp::SumField,
                 expr: Some(KvExpr::Field(KvFieldRef::Value {

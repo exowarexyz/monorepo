@@ -1237,7 +1237,7 @@ mod tests {
             // Merge the staged batches out of order. Their union must equal the rows staged without
             // omission and hold no watermark for location 12. That watermark is staged after every
             // batch is merged.
-            let client = PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:1"));
+            let client = StoreClient::new("http://127.0.0.1:1").unprefixed();
             let latest = Location::<F>::new(12);
             let mut durable = BTreeMap::new();
             for index in [2, 3, 1, 0] {
