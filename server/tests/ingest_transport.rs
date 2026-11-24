@@ -2,7 +2,9 @@ use axum::{body::Body, serve::Listener};
 use bytes::Bytes;
 use exoware_server::{
     ingest::{
-        transport::{serve, terminate_unfinished_response, ConnectionControl},
+        transport::{
+            serve, serve_with_config, terminate_unfinished_response, ConnectionControl, ServeConfig,
+        },
         DecodeBuffers, PutConfig, PutMiddleware,
     },
     ingest_service, Ingest, IngestState, PutError, PutInput,
@@ -1720,10 +1722,20 @@ async fn http1_host_timeout_releases_stalled_uploads_during_shutdown() -> Result
         ));
         let (shutdown, receive) = oneshot::channel();
         let (started, shutdown_started) = oneshot::channel();
-        let mut server = tokio::spawn(serve(listener, service, async {
-            let _ = receive.await;
-            let _ = started.send(());
-        }));
+
+        // The shutdown timeout outlasts the host timeout, so only the latter can release uploads.
+        let config = ServeConfig {
+            shutdown_timeout: cap * 2,
+        };
+        let mut server = tokio::spawn(serve_with_config(
+            listener,
+            service,
+            async {
+                let _ = receive.await;
+                let _ = started.send(());
+            },
+            config,
+        ));
         let first = Instant::now();
         let mut clients = Vec::new();
         for _ in 0..count {

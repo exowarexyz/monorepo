@@ -1,4 +1,4 @@
-import { create, type MessageInitShape } from '@bufbuild/protobuf';
+import { clone, create, type MessageInitShape } from '@bufbuild/protobuf';
 import { Code, ConnectError } from '@connectrpc/connect';
 import type { CallOptions } from '@connectrpc/connect';
 import type { Client } from './client.js';
@@ -43,6 +43,7 @@ import {
     GetRequestSchema as StreamGetRequestSchema,
     SubscribeRequestSchema,
 } from './gen/ts/log/v1/stream_pb.js';
+import { resumeSubscription } from './subscription.js';
 
 type DetailObserver = (detail: Detail) => void;
 
@@ -684,17 +685,23 @@ async function* performSubscribe(
     prefix?: StoreKeyPrefix,
     options?: CallOptions,
 ): AsyncIterable<StoreBatch> {
+    // Reconnects reuse this request, so it is a copy that later caller mutations cannot reach.
     const prefixed = prefixSubscribeFilters(filters, prefix);
-    const req = create(SubscribeRequestSchema, {
+    const req = clone(SubscribeRequestSchema, create(SubscribeRequestSchema, {
         selectors: prefixed.selectors,
         valueFilters: prefixed.valueFilters ?? [],
         ...(prefixed.sinceSequenceNumber !== undefined
             ? { sinceSequenceNumber: prefixed.sinceSequenceNumber }
             : {}),
-    });
+    }));
+    const frames = resumeSubscription(
+        (request, callOptions) => client.stream.subscribe(request, callOptions),
+        req,
+        client.subscriptionRetry,
+        options,
+    );
     try {
-        const stream = client.stream.subscribe(req, options);
-        for await (const frame of stream) {
+        for await (const frame of frames) {
             const batch = toStoreBatch(frame, prefix);
             if (batch.entries.length === 0) {
                 continue;
@@ -901,7 +908,11 @@ export class ReadSession {
         return batch;
     }
 
-    /** Subscribe to log batches, recording each batch's sequence before delivery. */
+    /**
+     * Subscribe to log batches, recording each batch's sequence before delivery.
+     *
+     * The subscription resumes after disconnects as configured by `ClientOptions.subscriptionRetry`.
+     */
     async *subscribe(
         filters: SubscribeFilters,
         options?: CallOptions,
@@ -1061,6 +1072,11 @@ export class StoreClient {
         return performGetBatch(this.client, sequenceNumber, this.keyPrefix, options);
     }
 
+    /**
+     * Subscribe to log batches.
+     *
+     * The subscription resumes after disconnects as configured by `ClientOptions.subscriptionRetry`.
+     */
     async *subscribe(
         filters: SubscribeFilters,
         options?: CallOptions,

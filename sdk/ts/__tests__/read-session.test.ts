@@ -1,5 +1,5 @@
 import { create } from '@bufbuild/protobuf';
-import { Code, ConnectError } from '@connectrpc/connect';
+import { Code, ConnectError, type CallOptions } from '@connectrpc/connect';
 import { Client } from '../src/client';
 import { SelectorSchema } from '../src/gen/ts/common/v1/kv_pb';
 import {
@@ -20,12 +20,19 @@ import {
     type ReduceRequest,
 } from '../src/gen/ts/store/v1/query_pb';
 import { ReadSession, StoreClient, StoreKeyPrefix } from '../src/store';
+import { normalizeSubscriptionRetry, type SubscriptionRetryConfig } from '../src/subscription';
 
 function mockClient(
     query: Partial<Client['query']>,
     stream: Partial<Client['stream']> = {},
+    subscriptionRetry: Partial<SubscriptionRetryConfig> = {},
 ): Client {
-    return { query, stream, credential: 'absent' } as unknown as Client;
+    return {
+        query,
+        stream,
+        credential: 'absent',
+        subscriptionRetry: normalizeSubscriptionRetry(subscriptionRetry),
+    } as unknown as Client;
 }
 
 const key = new Uint8Array([3]);
@@ -616,7 +623,7 @@ test('subscribe observes emitted batches before yielding and ignores omitted fra
                         entries: [{ key: new Uint8Array([2, 3]), value: key }],
                     });
                     yield create(SubscribeResponseSchema, {
-                        sequenceNumber: 9n,
+                        sequenceNumber: 22n,
                         entries: [{ key: physicalKey, value: key }],
                     });
                 })();
@@ -634,20 +641,21 @@ test('subscribe observes emitted batches before yielding and ignores omitted fra
     const first = await stream.next();
 
     expect(first.value).toEqual({
-        sequenceNumber: 9n,
+        sequenceNumber: 22n,
         entries: [{ key, value: key }],
     });
     expect(requests[0].sinceSequenceNumber).toBe(2n);
-    expect(clone.evaluatedSequence()).toBe(9n);
-    expect(clone.minSequenceNumber()).toBe(9n);
+    expect(clone.evaluatedSequence()).toBe(22n);
+    expect(clone.minSequenceNumber()).toBe(22n);
     await clone.get(key);
-    expect(getFloors).toEqual([9n]);
+    expect(getFloors).toEqual([22n]);
     await stream.return?.();
 });
 
 test('subscribe forwards cancellation options and cleans up when the consumer stops', async () => {
-    const options = { signal: new AbortController().signal };
-    let seenOptions: unknown;
+    const controller = new AbortController();
+    const options = { signal: controller.signal, headers: { 'x-trace': 'abc' } };
+    let seenOptions: CallOptions | undefined;
     let cleanedUp = false;
     const client = mockClient({}, {
         subscribe: (_request, callOptions) => {
@@ -673,7 +681,10 @@ test('subscribe forwards cancellation options and cleans up when the consumer st
     expect((await stream.next()).value?.sequenceNumber).toBe(6n);
     expect(session.evaluatedSequence()).toBe(6n);
     expect(session.minSequenceNumber()).toBe(4n);
-    expect(seenOptions).toBe(options);
+    expect(seenOptions?.headers).toBe(options.headers);
+    expect(seenOptions?.signal?.aborted).toBe(false);
+    controller.abort();
+    expect(seenOptions?.signal?.aborted).toBe(true);
     await stream.return?.();
     expect(cleanedUp).toBe(true);
 });
@@ -692,7 +703,7 @@ test('subscribe preserves prior observations when the stream ends with an error'
                 cleanedUp = true;
             }
         })(),
-    });
+    }, { enabled: false });
     const session = ReadSession.monotonic(new StoreClient(client));
     const stream = session.subscribe({ selectors: [create(SelectorSchema)] })[
         Symbol.asyncIterator

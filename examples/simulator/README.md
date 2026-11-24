@@ -26,6 +26,16 @@ open-file limit above it, for example `ulimit -n 65536`. A long session adds
 files for as long as it is written, and a cap below the state files a read
 probes makes reads reopen tables.
 
+SIGINT or SIGTERM stops the server gracefully. Open log subscriptions end
+with a resumable `UNAVAILABLE` error, and other requests get
+`--shutdown-timeout-secs` seconds (default 30) to finish before their
+connections are closed. A second signal stops the process without waiting
+for them. Pass `--subscription-max-duration-ms`
+to also end each subscription within that many milliseconds, and
+`--subscription-lifetime-jitter` to set the fraction of that maximum that
+jitter may remove (default 0.2). Resuming SDK subscribers reconnect without
+losing batches.
+
 Connect with the [Rust SDK](../../sdk/rs/README.md) or [TypeScript
 SDK](../../sdk/ts/README.md). The simulator accepts requests without
 credentials and enables permissive CORS for local browser development. To
