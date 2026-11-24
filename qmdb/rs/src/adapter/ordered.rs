@@ -32,7 +32,7 @@ use commonware_storage::{
 };
 use commonware_utils::range::contains_cyclic;
 use exoware_sdk::{keys::Key, PrefixedStoreClient, RangeMode, ReadSession};
-use std::{collections::BTreeSet, marker::PhantomData, sync::Arc};
+use std::{collections::BTreeSet, sync::Arc};
 
 /// Maximum number of entries in one key range proof request.
 const MAX_RANGE_LIMIT: u32 = 1000;
@@ -66,7 +66,6 @@ pub struct Ordered<
     op_cfg: <ordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
     key_cfg: K::Cfg,
     read_cache: Arc<ReadCache<F, H::Digest>>,
-    _marker: PhantomData<(F, H, K, E)>,
 }
 
 impl<F: Family, H: Hasher, K: QmdbKey, V, const N: usize, E: ValueEncoding<Value = V>> Clone
@@ -81,7 +80,6 @@ where
             op_cfg: self.op_cfg.clone(),
             key_cfg: self.key_cfg.clone(),
             read_cache: self.read_cache.clone(),
-            _marker: PhantomData,
         }
     }
 }
@@ -154,7 +152,6 @@ where
             op_cfg,
             key_cfg,
             read_cache: Arc::new(ReadCache::new()),
-            _marker: PhantomData,
         }
     }
 }

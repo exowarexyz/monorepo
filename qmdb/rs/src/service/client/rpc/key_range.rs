@@ -42,7 +42,7 @@ pub struct KeyRangeClient<
     update_cfg: Arc<<ordered::Update<K, E> as Read>::Cfg>,
     key_cfg: Arc<K::Cfg>,
     value_cfg: Arc<V::Cfg>,
-    _marker: PhantomData<(F, H, K, V, E)>,
+    _marker: PhantomData<H>,
 }
 
 impl<T, F, H, K, V, const N: usize, E> Clone for KeyRangeClient<T, F, H, K, V, N, E>

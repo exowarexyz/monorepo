@@ -66,7 +66,7 @@ where
 pub struct OperationLogSubscription<B, F, H, Op: Read> {
     stream: ServerStream<B, SubscribeResponseView<'static>>,
     op_cfg: Arc<Op::Cfg>,
-    _marker: PhantomData<(F, H, Op)>,
+    _marker: PhantomData<(F, H)>,
 }
 
 impl<B, F, H, Op> OperationLogSubscription<B, F, H, Op>
@@ -122,7 +122,7 @@ where
 pub struct OperationLogClient<T, F, H, Op: Read> {
     rpc: OperationLogServiceClient<T>,
     op_cfg: Arc<Op::Cfg>,
-    _marker: PhantomData<(F, H, Op)>,
+    _marker: PhantomData<(F, H)>,
 }
 
 impl<T, F, H, Op> Clone for OperationLogClient<T, F, H, Op>
