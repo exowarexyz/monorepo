@@ -4103,6 +4103,15 @@ mod tests {
             .collect()
     }
 
+    /// Waits until `ready` holds, and panics with `what` if thirty seconds pass first.
+    fn wait_until(ready: impl Fn() -> bool, what: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !ready() {
+            assert!(std::time::Instant::now() < deadline, "{what}");
+            thread::yield_now();
+        }
+    }
+
     #[test]
     fn prune_request_merges_by_prefix() {
         let prefixes = |policies: &[PrunePolicy]| -> Vec<(Vec<u8>, RetainPolicy)> {
@@ -4145,6 +4154,77 @@ mod tests {
             policies: merged,
         })
         .expect("merged document validates");
+    }
+
+    #[test]
+    fn prune_requests_for_separate_prefixes_survive_reopen() {
+        let dir = tempdir().expect("tempdir");
+        {
+            let store = RocksStore::open(dir.path(), None).expect("open db");
+            install(&store, vec![versioned_policy(&[1], RetainPolicy::DropAll)]);
+            install(&store, vec![versioned_policy(&[2], RetainPolicy::DropAll)]);
+        }
+
+        // The stored document holds both requests, so both policies decide after a reopen.
+        let store = RocksStore::open(dir.path(), None).expect("reopen db");
+        let mut filter = filter_over(&store.prune);
+        assert!(removes(&mut filter, &versioned_key(&[1], b"row", 1)));
+        assert!(removes(&mut filter, &versioned_key(&[2], b"row", 1)));
+        assert!(!removes(&mut filter, &versioned_key(&[3], b"row", 1)));
+    }
+
+    #[test]
+    fn prune_install_syncs_the_wal() {
+        let dir = tempdir().expect("tempdir");
+        let mut config = RocksConfig::default();
+        config.db_options.enable_statistics();
+
+        // The clone shares the database's statistics.
+        let statistics = config.db_options.clone();
+        let store = RocksStore::open(dir.path(), Some(config)).expect("open db");
+        let synced = || statistics.get_ticker_count(rocksdb::statistics::Ticker::WalFileSynced);
+
+        // The meta row is the only write of an install.
+        let before = synced();
+        install(&store, vec![versioned_policy(&[1], RetainPolicy::DropAll)]);
+        assert!(
+            synced() > before,
+            "the policy row must be synced before the request is answered"
+        );
+    }
+
+    #[test]
+    fn prune_install_holds_its_lock_until_the_swap() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        install(&store, vec![versioned_policy(&[1], RetainPolicy::DropAll)]);
+        let stored = || -> Vec<Vec<u8>> {
+            read_prune_policies(&store.db)
+                .expect("read row")
+                .iter()
+                .map(|policy| policy.scope.selector.prefix.to_vec())
+                .collect()
+        };
+
+        // The test holds the compiled list, so a second install writes its row and then waits
+        // at the swap. It still holds the install lock there, which keeps a third install from
+        // reading the row and swapping ahead of it.
+        let compiled = store.prune.compiled.lock();
+        thread::scope(|scope| {
+            let second = scope
+                .spawn(|| install(&store, vec![versioned_policy(&[2], RetainPolicy::DropAll)]));
+            wait_until(
+                || stored() == [[1], [2]],
+                "the second install must write its row",
+            );
+            assert!(store.prune.install.is_locked());
+            drop(compiled);
+            second.join().expect("install");
+        });
+        assert_eq!(stored(), [[1], [2]]);
+        let mut filter = filter_over(&store.prune);
+        assert!(removes(&mut filter, &versioned_key(&[1], b"row", 1)));
+        assert!(removes(&mut filter, &versioned_key(&[2], b"row", 1)));
     }
 
     #[test]
@@ -4727,14 +4807,7 @@ mod tests {
         let db = Arc::downgrade(&store.db.db);
         let removed = thread::scope(|scope| {
             let shown = scope.spawn(|| removes(&mut filter, &only));
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-            while db.strong_count() < 2 {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "the filter must reach the gate"
-                );
-                thread::yield_now();
-            }
+            wait_until(|| db.strong_count() >= 2, "the filter must reach the gate");
             install(
                 &store,
                 vec![versioned_policy(
@@ -4840,6 +4913,128 @@ mod tests {
     }
 
     #[test]
+    fn keep_latest_keeps_count_rows_while_compactions_overlap() {
+        const COUNT: usize = 3;
+        const GROUPS: usize = 8;
+        for seed in [1u64, 2, 3] {
+            let dir = tempdir().expect("tempdir");
+
+            // The default of two background jobs runs one compaction at a time. Four let RocksDB
+            // run a second beside the first once thirty-two sorted runs wait.
+            let mut config = RocksConfig::default();
+            config.db_options.set_max_background_jobs(4);
+            let store = RocksStore::open(dir.path(), Some(config)).expect("open db");
+            install(
+                &store,
+                vec![versioned_policy(
+                    &[1],
+                    RetainPolicy::KeepLatest { count: COUNT },
+                )],
+            );
+            let key = |group: usize, version: u64| {
+                Bytes::from(versioned_key(&[1], &[b'a' + group as u8], version))
+            };
+            let row = Bytes::from_static(b"row");
+            let mut state = seed;
+            let mut random = |below: u64| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state % below
+            };
+
+            // The first commit is large enough to be staged as a file, and the file spans every
+            // key, so that each later commit is staged as a file too.
+            let mut sequence = 0;
+            let mut commit = |rows: Vec<(Bytes, Bytes)>| {
+                commit_and_apply(&store, prepared_write(&store, sequence, rows));
+                sequence += 1;
+            };
+            commit(vec![
+                (
+                    Bytes::from_static(&[0]),
+                    Bytes::from(vec![0; STATE_BATCH_MAX_BYTES + 1]),
+                ),
+                (Bytes::from_static(&[255]), row.clone()),
+            ]);
+
+            // Every version ever written, by group, and how many of them are gone.
+            let mut written = vec![BTreeSet::new(); GROUPS];
+            let mut pruned = 0;
+            let anchor = Bytes::from_static(&[0, 1]);
+            let db = Arc::downgrade(&store.db.db);
+            for _ in 0..3 {
+                // Sixteen files start a compaction, and the gate holds its filter before its
+                // first read. Sixteen more start a second compaction beside it, held the same
+                // way. Both are under way when the gate opens, so the rows one of them counts
+                // can be rows the other removes.
+                let gate = store.prune.read_ahead_gate.lock();
+                for holders in [2, 3] {
+                    for _ in 0..16 {
+                        // Each file rewrites one key, so it overlaps every other file and
+                        // makes a sorted run of its own. It adds up to three versions, most of
+                        // them the newest of their group.
+                        let mut rows = BTreeMap::from([(anchor.clone(), row.clone())]);
+                        for _ in 0..3 {
+                            let group = random(GROUPS as u64) as usize;
+                            let newest = written[group].last().copied().unwrap_or(0);
+                            let version = if random(4) == 0 {
+                                1 + random(newest + 1)
+                            } else {
+                                newest + 1
+                            };
+                            written[group].insert(version);
+                            rows.insert(key(group, version), row.clone());
+                        }
+                        commit(rows.into_iter().collect());
+                    }
+                    wait_until(
+                        || db.strong_count() >= holders,
+                        "a compaction must reach the gate",
+                    );
+                }
+                drop(gate);
+                store
+                    .db
+                    .wait_for_compact(&rocksdb::WaitForCompactOptions::default())
+                    .expect("wait for compaction");
+
+                // The two compactions pruned, and the latest of every group are still there.
+                let live = |group: usize, version: &u64| {
+                    store.get_raw(&key(group, *version)).expect("get").is_some()
+                };
+                let mut gone = 0;
+                for (group, versions) in written.iter().enumerate() {
+                    gone += versions
+                        .iter()
+                        .filter(|version| !live(group, version))
+                        .count();
+                    for version in versions.iter().rev().take(COUNT) {
+                        assert!(
+                            live(group, version),
+                            "seed {seed}: group {group} lost version {version} of {versions:?}"
+                        );
+                    }
+                }
+                assert!(gone > pruned, "seed {seed}: the compactions must prune");
+                pruned = gone;
+            }
+
+            // A compaction of every file leaves exactly the latest of each group.
+            store.compact_state();
+            for (group, versions) in written.iter().enumerate() {
+                let live: Vec<u64> = versions
+                    .iter()
+                    .copied()
+                    .filter(|version| store.get_raw(&key(group, *version)).expect("get").is_some())
+                    .collect();
+                let latest: Vec<u64> = versions.iter().rev().take(COUNT).rev().copied().collect();
+                assert_eq!(live, latest, "seed {seed}: group {group}");
+            }
+        }
+    }
+
+    #[test]
     fn store_closes_while_a_filter_reads_ahead() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
@@ -4859,15 +5054,8 @@ mod tests {
             let rows = version_rows(0..32, version, 4096);
             commit_and_apply(&store, prepared_write(&store, version - 1, rows));
         }
-        let poll = |ready: &dyn Fn() -> bool, what: &str| {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-            while !ready() {
-                assert!(std::time::Instant::now() < deadline, "{what}");
-                thread::yield_now();
-            }
-        };
         let db = Arc::downgrade(&store.db.db);
-        poll(&|| db.strong_count() == 2, "a filter must open a cursor");
+        wait_until(|| db.strong_count() == 2, "a filter must open a cursor");
 
         // The last handle to the store drops while the filter still holds the database.
         let database = Arc::downgrade(&store.db);
@@ -4876,8 +5064,8 @@ mod tests {
             drop(store);
             closed_sender.send(()).expect("closed");
         });
-        poll(
-            &|| database.strong_count() == 0,
+        wait_until(
+            || database.strong_count() == 0,
             "the store must start to close",
         );
         drop(gate);
