@@ -38,17 +38,17 @@
 //!   a crash here     8 never existed  |  open replays row 8   |  8 is complete
 //! ```
 //!
-//! The durable log row alone defines a group. Each ingestion and each batch is atomic, and
-//! `commit` applies a group's state before it ingests the next group's log row. A crash can
-//! therefore leave only the newest group with a log row and no state, never a partial row or a
-//! partial state. `open` re-applies the newest row above the state floor whether or not its
-//! state was complete (see `replay_newest_log_row`).
+//! The durable log row alone defines a group. Each ingestion is atomic, and `commit` applies a
+//! group's state before it ingests the next group's log row. A crash can therefore leave only
+//! the newest group with a log row and no state, never a partial row or a partial state. `open`
+//! re-applies the newest row above the state floor whether or not its state was complete (see
+//! `replay_newest_log_row`).
 //!
 //! Any write failure in the pipeline is fatal. The writer panics and the next open rolls the
 //! store forward (see `commit_group`).
 //!
-//! Ingestion bypasses the WAL and the memtables. The state is either ingested as a file or
-//! written through both as one synced batch (see `writes_state_as_batch`).
+//! The state rows are a second staged file, and `commit` applies them by ingesting it (see
+//! `stage_state_file`). Ingestion bypasses the WAL and the memtables.
 //!
 //! # Log files
 //!
@@ -203,12 +203,6 @@ const LOG_MERGE_PASS_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// down the file count that every state ingestion pays for. The value is four times RocksDB's
 /// default target file size.
 const STATE_TARGET_FILE_BYTES: u64 = 256 * 1024 * 1024;
-
-/// Largest state payload, in key and value bytes, that [`writes_state_as_batch`] lets a
-/// commit group write as a batch through the WAL and memtable. A larger payload is staged as
-/// a file and ingested, where a batch is written to the WAL and again at the flush. The value
-/// is a round number.
-const STATE_BATCH_MAX_BYTES: usize = 64 * 1024;
 
 /// Threads in the bottom-priority pool of RocksDB's default environment. A store on that
 /// environment runs compactions into a family's last level there, so its log merge does not
@@ -539,17 +533,14 @@ struct Frontiers {
     /// up ahead of compaction. Starts at zero; open's one-shot enforcement re-seeds it
     /// when a rule is installed.
     trimmed: AtomicU64,
-    /// Smallest and largest state key found at open, widened by each state file ingested since.
-    state_file_span: Mutex<Option<(Bytes, Bytes)>>,
 }
 
 impl Frontiers {
-    const fn new(published: u64, state_file_span: Option<(Bytes, Bytes)>) -> Self {
+    const fn new(published: u64) -> Self {
         Self {
             published: AtomicU64::new(published),
             persist: Mutex::new(()),
             trimmed: AtomicU64::new(0),
-            state_file_span: Mutex::new(state_file_span),
         }
     }
 }
@@ -609,27 +600,14 @@ struct QueuedWave {
     _leases: Vec<Arc<WriteLease>>,
 }
 
-/// A commit group's current-state rows as staged for `commit`.
-enum StagedState {
-    /// SST of the rows sorted by key, last write per key, ready for ingestion.
-    File {
-        /// Path of the staged SST.
-        path: PathBuf,
-        /// Smallest and largest key in the file.
-        span: (Bytes, Bytes),
-    },
-    /// The rows in arrival order, to be written as one batch.
-    Batch(Vec<(Bytes, Bytes)>),
-}
-
 /// One staged commit group: every coalesced request shares a single sequence number, whose log
 /// row carries all their rows in arrival order.
 struct PreparedWrite {
     sequence: u64,
     /// Staged log SST (the group's encoded batch and its sentinel keys), ready for ingestion.
     log: PathBuf,
-    /// The group's state rows, staged as a file or kept for a batch.
-    state: StagedState,
+    /// Staged current-state SST (sorted by key, last write per key), ready for ingestion.
+    state: PathBuf,
     /// Combined payload bytes staged, for debug logging.
     staged_bytes: usize,
     requests: Vec<WriteRequest>,
@@ -678,18 +656,15 @@ impl Writer {
 
         let commit = thread::Builder::new()
             .name(format!("{WRITER_THREAD_PREFIX}commit"))
-            .spawn({
-                let frontiers = frontiers.clone();
-                move || {
-                    run_commit(
-                        db,
-                        frontiers,
-                        staged_receiver,
-                        next,
-                        merge_sender,
-                        log_merge_files,
-                    )
-                }
+            .spawn(move || {
+                run_commit(
+                    db,
+                    frontiers,
+                    staged_receiver,
+                    next,
+                    merge_sender,
+                    log_merge_files,
+                )
             })
             .expect("failed to spawn RocksDB commit worker");
 
@@ -702,11 +677,10 @@ impl Writer {
             let ingest_dir = ingest_dir.clone();
             let staged_sender = staged_sender.clone();
             let wave_receiver = wave_receiver.clone();
-            let frontiers = frontiers.clone();
             handles.push(
                 thread::Builder::new()
                     .name(format!("{WRITER_THREAD_PREFIX}stage-{worker}"))
-                    .spawn(move || run_stage(ingest_dir, frontiers, wave_receiver, staged_sender))
+                    .spawn(move || run_stage(ingest_dir, wave_receiver, staged_sender))
                     .expect("failed to spawn RocksDB stage worker"),
             );
         }
@@ -846,7 +820,6 @@ fn run_prepare(
 /// happens on a fatal write error.
 fn run_stage(
     ingest_dir: PathBuf,
-    frontiers: Arc<Frontiers>,
     receiver: Arc<Mutex<mpsc::Receiver<QueuedWave>>>,
     sender: mpsc::SyncSender<PreparedWrite>,
 ) {
@@ -854,14 +827,14 @@ fn run_stage(
         let Ok(wave) = receiver.lock().recv() else {
             break;
         };
-        let group = stage_wave(&ingest_dir, &frontiers, wave);
+        let group = stage_wave(&ingest_dir, wave);
         if sender.send(group).is_err() {
             panic!("rocks commit worker died");
         }
     }
 }
 
-/// Commits staged groups strictly in sequence order (log ingestion, state application, publish,
+/// Commits staged groups strictly in sequence order (log ingestion, state ingestion, publish,
 /// ack), buffering groups whose predecessors are still staging, until the group channel closes
 /// (store drop). Any write failure panics inside `commit_group`. Wakes the merge worker after
 /// every `log_merge_files` groups, since each adds one log file.
@@ -1136,92 +1109,28 @@ fn coalesce_queued_write(
     )
 }
 
-/// Whether a wave's state rows (`payload` bytes of keys and values) are written as one batch
-/// or staged as a file.
-///
-/// ```text
-///   state keys          |<------------ `file_span` ------------>|       written as
-///
-///   large           [==========================]                        ingested file
-///   small, inside                         * *                           ingested file
-///   small, below  * *                                                   synced batch
-///   small, above                                                   * *  synced batch
-///   small, both    *                                                *   ingested file
-///
-///   * one key of the group      small: at most `STATE_BATCH_MAX_BYTES`
-/// ```
-///
-/// `file_span` is the smallest and largest state key found at open, widened by each state file
-/// ingested since. Its two ends count as inside, and without a span every small wave is a
-/// batch.
-//
-// A file of keys beyond the span (rows keyed by the next block height, say) usually overlaps
-// no other file and would be ingested into the bottom level. Universal compaction rewrites
-// that level as a whole, so such files would pile up there, one per commit, until it does.
-// Written as batches, the rows collect in the memtable and flush together.
-//
-// RocksDB flushes the memtable before it ingests a file whose key range covers rows in it. The
-// flush keeps the newer write on top but costs time, and keeping batch rows outside the span
-// avoids it for every file that stays inside the span. It still happens when a file widens the
-// span over batch rows, and when a file covers the rows of a batch that was staged before the
-// span widened over its keys.
-//
-// A small wave inside the span is staged as a file like a large one. In the memtable its rows
-// would force a flush before the next file that covers them. As a file it usually lands above
-// the bottom level, where compaction merges it.
-fn writes_state_as_batch(
-    rows: &[(Bytes, Bytes)],
-    payload: usize,
-    file_span: Option<&(Bytes, Bytes)>,
-) -> bool {
-    if payload > STATE_BATCH_MAX_BYTES {
-        return false;
-    }
-    let Some((first, last)) = file_span else {
-        return true;
-    };
-    rows.iter().all(|(key, _)| key < first) || rows.iter().all(|(key, _)| key > last)
-}
-
-/// Stages one wave's SST files in parallel, the log SST on this thread and the sorted state SST
-/// on a scoped thread. A wave that [`writes_state_as_batch`] gets the log SST alone and keeps
-/// its rows for `commit`. A staging failure is fatal, and the next open removes leftover files.
-fn stage_wave(ingest_dir: &Path, frontiers: &Frontiers, wave: QueuedWave) -> PreparedWrite {
+/// Stages one wave's two SST files in parallel, the log SST on this thread and the sorted state
+/// SST on a scoped thread. A staging failure is fatal, and the next open removes leftover files.
+fn stage_wave(ingest_dir: &Path, wave: QueuedWave) -> PreparedWrite {
     let sequence = wave.sequence;
+    let rows = &wave.rows;
     let log = ingest_dir.join(format!("log-{sequence:020}.sst"));
-    let payload = wave
-        .rows
-        .iter()
-        .map(|(key, value)| key.len() + value.len())
-        .sum();
-    let as_batch = writes_state_as_batch(
-        &wave.rows,
-        payload,
-        frontiers.state_file_span.lock().as_ref(),
-    );
-    let (log_result, state_bytes, state) = if as_batch {
-        let log_result = stage_log_file(&log, sequence, &wave.rows);
-        (log_result, payload, StagedState::Batch(wave.rows))
-    } else {
-        let rows = &wave.rows;
-        let state = ingest_dir.join(format!("state-{sequence:020}.sst"));
-        let (log_result, state_result) = thread::scope(|scope| {
-            let state_task = thread::Builder::new()
-                .name(format!("{WRITER_THREAD_PREFIX}stage"))
-                .spawn_scoped(scope, || stage_state_file(&state, rows))
-                .expect("failed to spawn SST staging thread");
-            let log_result = stage_log_file(&log, sequence, rows);
-            (
-                log_result,
-                state_task.join().expect("state staging thread panicked"),
-            )
-        });
-        let (state_bytes, span) =
-            state_result.unwrap_or_else(|error| panic!("failed to stage state SST: {error}"));
-        let state = StagedState::File { path: state, span };
-        (log_result, state_bytes, state)
-    };
+    let state = ingest_dir.join(format!("state-{sequence:020}.sst"));
+    let (log_result, state_result) = thread::scope(|scope| {
+        let state_task = thread::Builder::new()
+            .name(format!("{WRITER_THREAD_PREFIX}stage"))
+            .spawn_scoped(scope, || stage_state_file(&state, rows))
+            .expect("failed to spawn SST staging thread");
+        let log_result = stage_log_file(&log, sequence, rows);
+        (
+            log_result,
+            state_task.join().expect("state staging thread panicked"),
+        )
+    });
     let log_bytes = log_result.unwrap_or_else(|error| panic!("failed to stage log SST: {error}"));
+    let state_bytes =
+        state_result.unwrap_or_else(|error| panic!("failed to stage state SST: {error}"));
+    drop(wave.rows);
     PreparedWrite {
         sequence,
         requests: wave.requests,
@@ -1299,10 +1208,7 @@ fn log_tail_sentinel(sequence: u64) -> [u8; LOG_BATCH_KEY_LEN + 1] {
 /// Stages the current-state SST: the group's rows sorted by key, with the last write per key
 /// winning (in arrival order across coalesced requests). Built with [`state_cf_options`], so
 /// it is uncompressed and carries the key filter that compaction writes.
-fn stage_state_file(
-    path: &Path,
-    rows: &[(Bytes, Bytes)],
-) -> Result<(usize, (Bytes, Bytes)), String> {
+fn stage_state_file(path: &Path, rows: &[(Bytes, Bytes)]) -> Result<usize, String> {
     let mut order: Vec<usize> = (0..rows.len()).collect();
 
     // Arrival indices preserve the newest duplicate without a sorting workspace.
@@ -1331,16 +1237,13 @@ fn stage_state_file(
 
     // `finish` syncs the file before it is linked into the DB.
     writer.finish().map_err(|e| e.to_string())?;
-
-    // The sorted order starts at the file's smallest key and ends at its largest.
-    let (first, last) = (order[0], order[order.len() - 1]);
-    Ok((bytes, (rows[first].0.clone(), rows[last].0.clone())))
+    Ok(bytes)
 }
 
-/// Commits one group: ingests its log row (durability), then applies its state rows
-/// (visibility), then publishes the frontier and resolves the requests. Any write failure
-/// panics. A durable log row cannot be rolled back, because its sequence number must never be
-/// re-issued, so the next open rolls the group forward from it.
+/// Commits one group: ingests its log row (durability), then its state file (visibility), then
+/// publishes the frontier and resolves the requests. Any write failure panics. A durable log
+/// row cannot be rolled back, because its sequence number must never be re-issued, so the next
+/// open rolls the group forward from it.
 ///
 /// ```text
 ///   commit    --[ ingest log 8 ]--[####### apply state 8, publish 8 #######]--[ reply ]-->
@@ -1373,12 +1276,11 @@ fn commit_group(db: &DB, frontiers: &Frontiers, group: PreparedWrite) {
     // published frontier until publish.
     ingest_staged_file(db, LOG_CF, &group.log);
 
-    // Apply and publish under the floor lock. A prune loads the published frontier as its state
+    // Ingest and publish under the floor lock. A prune loads the published frontier as its state
     // floor under the same lock, so no scan-visible state row can outrun the frontier covering
-    // it (a key prune must never delete a row the floor does not cover). A state batch that
-    // waits on a write stall holds the lock, so snapshot capture waits with it.
+    // it (a key prune must never delete a row the floor does not cover).
     let publish_guard = frontiers.persist.lock();
-    apply_staged_state(db, frontiers, &group.state);
+    ingest_staged_file(db, STATE_CF, &group.state);
 
     // Release so `current_sequence` readers only observe frontiers whose rows are readable.
     frontiers.published.store(sequence, Ordering::Release);
@@ -1396,32 +1298,6 @@ fn commit_group(db: &DB, frontiers: &Frontiers, group: PreparedWrite) {
     }
     for request in group.requests {
         let _ = request.response.send(Ok(sequence));
-    }
-}
-
-/// Applies one group's state rows by ingesting the staged SST and widening the state file span,
-/// or by writing one synced batch. The rows are durable and readable once this returns, and any
-/// failure panics.
-fn apply_staged_state(db: &DB, frontiers: &Frontiers, state: &StagedState) {
-    match state {
-        StagedState::File { path, span } => {
-            ingest_staged_file(db, STATE_CF, path);
-            let mut file_span = frontiers.state_file_span.lock();
-            *file_span = Some(match file_span.take() {
-                Some((first, last)) => (first.min(span.0.clone()), last.max(span.1.clone())),
-                None => span.clone(),
-            });
-        }
-        StagedState::Batch(rows) => {
-            // Arrival order lets the last write per key win, as it does in a staged file. The
-            // batch goes through RocksDB's write path, so it can wait on a write stall.
-            let mut batch = rocksdb::WriteBatch::default();
-            for (key, value) in rows {
-                batch.put(key, value);
-            }
-            write_synced_batch(db, batch)
-                .unwrap_or_else(|error| panic!("state batch write must succeed: {error}"));
-        }
     }
 }
 
@@ -1483,55 +1359,6 @@ fn sequence_from_log_key(key: &[u8]) -> Result<u64, String> {
     let mut raw = [0u8; 8];
     raw.copy_from_slice(&key[..8]);
     Ok(u64::from_be_bytes(raw))
-}
-
-/// Fails when the database at `path` was opened with `best_efforts_recovery` or
-/// `avoid_flush_during_recovery`. State rows written as batches are durable only through the
-/// WAL until their memtable flushes, and a store running with either option can lose them.
-//
-// `best_efforts_recovery` opens from the SST files and skips the WAL, so the store would serve
-// without the rows only the WAL holds. `avoid_flush_during_recovery` can leave recovered rows
-// in their old WAL, and later synced writes do not sync that WAL. A power loss can then tear
-// its unsynced tail, and point-in-time recovery, the default, can stop there and skip the
-// newer WAL with its acknowledged rows.
-//
-// The options are read from the options file RocksDB writes at open, because the Rust bindings
-// can neither read nor clear them on `Options`.
-fn reject_wal_unsafe_options(path: &Path) -> Result<(), String> {
-    let newest = std::fs::read_dir(path)
-        .map_err(|e| format!("failed to read store directory: {e}"))?
-        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
-        .filter_map(|name| Some((name.strip_prefix("OPTIONS-")?.parse::<u64>().ok()?, name)))
-        .max();
-    let Some((_, name)) = newest else {
-        return Err("RocksDB wrote no options file at open".to_string());
-    };
-    let options = std::fs::read_to_string(path.join(name))
-        .map_err(|e| format!("failed to read RocksDB options file: {e}"))?;
-    for option in ["best_efforts_recovery", "avoid_flush_during_recovery"] {
-        let enabled = format!("{option}=true");
-        if options.lines().any(|line| line.trim() == enabled) {
-            return Err(format!(
-                "{option} is not supported, because state rows written as batches depend on \
-                 WAL recovery"
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Smallest and largest state key, or `None` when the state column family is empty.
-fn state_key_span(db: &DB) -> Result<Option<(Bytes, Bytes)>, String> {
-    let mut it = db.raw_iterator();
-    it.seek_to_first();
-    let Some(first) = it.key().map(Bytes::copy_from_slice) else {
-        it.status().map_err(|e| e.to_string())?;
-        return Ok(None);
-    };
-    it.seek_to_last();
-    let last = it.key().map(Bytes::copy_from_slice);
-    it.status().map_err(|e| e.to_string())?;
-    Ok(last.map(|last| (first, last)))
 }
 
 /// Reads the state-floor meta row, defaulting to zero when no prune has written it yet. A
@@ -1688,10 +1515,8 @@ impl Default for RocksWritePipelineConfig {
 /// RocksDB engine and application-level write pipeline options used by [`RocksStore::open`].
 #[derive(Default)]
 pub struct RocksConfig {
-    /// Database-wide options. `open` turns `paranoid_checks` on and rejects
-    /// `best_efforts_recovery` and `avoid_flush_during_recovery`, because the state rows of small
-    /// commit groups are durable only through the WAL until they flush. It also sizes the
-    /// bottom-priority thread pool of the process-wide default environment, where log merges run.
+    /// Database-wide options. `open` sizes the bottom-priority thread pool of the process-wide
+    /// default environment, where log merges run.
     ///
     /// `max_background_jobs` bounds the flushes and automatic compactions that run at once. A
     /// running log merge takes one of those slots but does not wait for one. `max_open_files`
@@ -1710,8 +1535,8 @@ pub struct RocksConfig {
 /// Options for the state column family. Ingested state SSTs overlap one another, so compaction
 /// has to merge them. Universal compaction merges whole sorted runs, and compression stays off
 /// to match the staged files. The raised level-zero triggers let a larger compaction backlog
-/// build before RocksDB slows or stops writes such as state batches and prunes. A ribbon filter
-/// lets a point read skip the runs that lack its key in fewer bytes than a bloom filter.
+/// build before RocksDB slows or stops writes such as prunes. A ribbon filter lets a point read
+/// skip the runs that lack its key in fewer bytes than a bloom filter.
 fn state_cf_options() -> Options {
     let mut opts = Options::default();
     opts.set_compression_type(DBCompressionType::None);
@@ -1808,11 +1633,6 @@ impl RocksStore {
         db_options.create_if_missing(true);
         db_options.create_missing_column_families(true);
 
-        // A failed WAL write has to stop the store. A later synced write would otherwise land
-        // behind the damaged record and be lost with it at recovery. Paranoid checks turn the
-        // failure into a background error that fails later writes.
-        db_options.set_paranoid_checks(true);
-
         // The bottom-priority pool belongs to the process-wide default environment, so this
         // sizes it for every store that uses that environment.
         let mut env = rocksdb::Env::new().map_err(|e| e.to_string())?;
@@ -1823,7 +1643,6 @@ impl RocksStore {
         let cf_log = ColumnFamilyDescriptor::new(LOG_CF, log_cf_options());
         let db = DB::open_cf_descriptors(&db_options, path, vec![cf_state, cf_meta, cf_log])
             .map_err(|e| e.to_string())?;
-        reject_wal_unsafe_options(path)?;
         let db = Arc::new(Database {
             db,
             _closer: closer,
@@ -1838,7 +1657,7 @@ impl RocksStore {
         // Restore the retention rule so the ingest path keeps enforcing it after a reopen.
         let retention = Arc::new(Mutex::new(read_retention_policy(&db)?));
 
-        let frontiers = Arc::new(Frontiers::new(seq, state_key_span(&db)?));
+        let frontiers = Arc::new(Frontiers::new(seq));
         let writer = Arc::new(Writer::start(
             db.clone(),
             ingest_dir,
@@ -3042,7 +2861,7 @@ mod tests {
             from,
             DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES,
         );
-        stage_wave(&ingest_dir, &store.frontiers, wave)
+        stage_wave(&ingest_dir, wave)
     }
 
     #[test]
@@ -3056,7 +2875,7 @@ mod tests {
         );
         ingest_staged_file(&store.db, LOG_CF, &group.log);
         let guard = store.frontiers.persist.lock();
-        apply_staged_state(&store.db, &store.frontiers, &group.state);
+        ingest_staged_file(&store.db, STATE_CF, &group.state);
         assert_eq!(store.current_sequence(), 0);
         assert_eq!(
             store.db.get(b"a").expect("visible state"),
@@ -3216,11 +3035,11 @@ mod tests {
             receiver.try_recv(),
             Err(mpsc::TryRecvError::Disconnected)
         ));
-        let group = stage_wave(dir.path(), &Frontiers::new(0, None), wave);
+        let group = stage_wave(dir.path(), wave);
         assert_eq!(group.sequence, 1);
         assert_eq!(group.requests.len(), 3);
         assert!(group.log.exists());
-        assert!(matches!(&group.state, StagedState::Batch(rows) if rows.len() == 3));
+        assert!(group.state.exists());
         assert!(group.staged_bytes > 0);
     }
 
@@ -3505,11 +3324,12 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
 
-        let group = prepared_write(&store, 0, large_batch(1));
-        let StagedState::File { path, .. } = &group.state else {
-            panic!("a large group must stage a state file");
-        };
-        std::fs::remove_file(path).expect("sabotage staged state file");
+        let group = prepared_write(
+            &store,
+            0,
+            vec![(Bytes::from_static(b"a"), Bytes::from_static(b"1"))],
+        );
+        std::fs::remove_file(&group.state).expect("sabotage staged state file");
         commit_and_apply(&store, group);
     }
 
@@ -3986,189 +3806,51 @@ mod tests {
         }
     }
 
-    /// Live SST files of the state column family.
-    fn state_files(store: &RocksStore) -> usize {
-        store
-            .db
-            .live_files()
-            .expect("live files")
-            .into_iter()
-            .filter(|file| file.column_family_name == STATE_CF)
-            .count()
-    }
-
     #[tokio::test]
-    async fn small_groups_beyond_the_stored_keys_add_no_state_files() {
-        // Staged as files, sixty-four groups would leave sixty-four state files.
-        const BATCHES: u64 = 64;
-        let dir = tempdir().expect("tempdir");
-        {
-            let store = RocksStore::open(dir.path(), None).expect("open db");
-
-            // Each batch is one row under a key above every stored key. As a file, it would
-            // ingest straight into the bottom level beside the files of the batches before it.
-            for sequence in 1..=BATCHES {
-                store.put_batch(small_batch(sequence)).await.expect("put");
-            }
-            assert_eq!(state_files(&store), 0);
-
-            // A large group ingests a state file. Its keys sort below the batch rows in the
-            // memtable, so the ingestion leaves them there, and the next small group above its
-            // range is a batch too.
-            store.put_batch(large_batch(1)).await.expect("put");
-            assert_eq!(state_files(&store), 1);
-            store
-                .put_batch(small_batch(BATCHES + 2))
-                .await
-                .expect("put");
-            assert_eq!(state_files(&store), 1);
-
-            // A small group inside the range of the files is ingested as a file. Written to the
-            // memtable, it would force a flush before the next file that spans it.
-            let mut inside = large_batch(1).remove(5).0.to_vec();
-            inside.push(0);
-            store
-                .put_batch(vec![(Bytes::from(inside), Bytes::from_static(b"inside"))])
-                .await
-                .expect("put");
-            assert_eq!(state_files(&store), 2);
-        }
-
-        // The reopened store recovers the batch rows from the WAL, and a later group beyond the
-        // stored keys adds no state file either.
-        let store = RocksStore::open(dir.path(), None).expect("reopen db");
-        assert_eq!(store.current_sequence(), BATCHES + 3);
-        for sequence in (1..=BATCHES).chain([BATCHES + 2]) {
-            let (key, value) = small_batch(sequence).remove(0);
-            assert_eq!(
-                store.get_raw(&key).expect("get").as_deref(),
-                Some(&value[..])
-            );
-        }
-        let reopened = state_files(&store);
-        store
-            .put_batch(small_batch(BATCHES + 4))
-            .await
-            .expect("put");
-        assert_eq!(state_files(&store), reopened);
-
-        // Open rebuilds the span from the stored keys, so a small group inside it is staged as a
-        // file.
-        store.put_batch(small_batch(1)).await.expect("put");
-        assert_eq!(state_files(&store), reopened + 1);
-    }
-
-    #[tokio::test]
-    async fn newest_write_wins_across_batch_and_file_groups() {
+    async fn newest_write_wins_across_overlapping_state_files() {
         let dir = tempdir().expect("tempdir");
         let key = large_batch(7).remove(3).0;
         let small = |value: &'static [u8]| vec![(key.clone(), Bytes::from_static(value))];
         {
             let store = RocksStore::open(dir.path(), None).expect("open db");
 
-            // With no state file yet, the first write is a batch in the memtable.
+            // The first write is a file of one key.
             store.put_batch(small(b"first")).await.expect("put");
             assert_eq!(
                 store.get_raw(&key).expect("get").as_deref(),
                 Some(&b"first"[..])
             );
 
-            // The file covers a key still in the memtable and must land above it.
+            // A file whose key range covers that key must land above it.
             store.put_batch(large_batch(7)).await.expect("put");
             assert_eq!(
                 store.get_raw(&key).expect("get").as_deref(),
                 Some(&[7u8; 4096][..])
             );
 
-            // A small write inside the file's range is staged as a file and lands above it.
+            // A file of one key inside that range must land above it in turn.
             store.put_batch(small(b"last")).await.expect("put");
             assert_eq!(
                 store.get_raw(&key).expect("get").as_deref(),
                 Some(&b"last"[..])
             );
+
+            // A group with another key becomes the newest log row, so the reopen replays no
+            // write of this key.
+            store.put_batch(small_batch(4)).await.expect("put");
         }
 
         // The newest write survives a reopen.
         let store = RocksStore::open(dir.path(), None).expect("reopen db");
-        assert_eq!(store.current_sequence(), 3);
+        assert_eq!(store.current_sequence(), 4);
         assert_eq!(
             store.get_raw(&key).expect("get").as_deref(),
             Some(&b"last"[..])
         );
     }
 
-    #[tokio::test]
-    async fn small_group_state_batch_syncs_the_wal() {
-        let dir = tempdir().expect("tempdir");
-        let mut config = RocksConfig::default();
-        config.db_options.enable_statistics();
-
-        // The clone shares the database's statistics.
-        let statistics = config.db_options.clone();
-        let store = RocksStore::open(dir.path(), Some(config)).expect("open db");
-        let synced = || statistics.get_ticker_count(rocksdb::statistics::Ticker::WalFileSynced);
-
-        // The log row is ingested as a file and nothing else writes, so the state batch is
-        // the only WAL write of this Put.
-        let before = synced();
-        store.put_batch(small_batch(1)).await.expect("put");
-        assert_eq!(state_files(&store), 0);
-        assert!(
-            synced() > before,
-            "the state batch must sync the WAL before the Put is acknowledged"
-        );
-    }
-
     #[test]
-    fn open_rejects_options_that_break_wal_recovery() {
-        // A fresh store's options file is the template for the edited ones.
-        let source = tempdir().expect("tempdir");
-        drop(RocksStore::open(source.path(), None).expect("open db"));
-        let (name, options) = std::fs::read_dir(source.path())
-            .expect("read store directory")
-            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
-            .filter(|name| name.starts_with("OPTIONS-"))
-            .map(|name| {
-                let options = std::fs::read_to_string(source.path().join(&name)).expect("read");
-                (name, options)
-            })
-            .next()
-            .expect("options file");
-
-        // Neither option has a setter in the Rust bindings. They can only arrive in options
-        // loaded from a file.
-        for option in ["best_efforts_recovery", "avoid_flush_during_recovery"] {
-            let off = format!("{option}=false");
-            assert!(options.contains(&off), "{option}");
-            let edited = tempdir().expect("tempdir");
-            std::fs::write(
-                edited.path().join(&name),
-                options.replace(&off, &format!("{option}=true")),
-            )
-            .expect("write options file");
-            let (db_options, _) = Options::load_latest(
-                edited.path(),
-                rocksdb::Env::new().expect("env"),
-                true,
-                rocksdb::Cache::new_lru_cache(1 << 20),
-            )
-            .expect("load options");
-
-            // Opening a store with the edited options must fail and name the option.
-            let dir = tempdir().expect("tempdir");
-            let config = RocksConfig {
-                db_options,
-                ..Default::default()
-            };
-            let Err(error) = RocksStore::open(dir.path(), Some(config)) else {
-                panic!("{option} must fail open");
-            };
-            assert!(error.contains(option), "{error}");
-        }
-    }
-
-    #[test]
-    fn stale_batch_and_overlapping_file_keep_the_newest_write_and_old_snapshots() {
+    fn overlapping_state_files_keep_the_newest_write_and_old_snapshots() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
         let key = large_batch(7).remove(3).0;
@@ -4180,12 +3862,11 @@ mod tests {
                 .map(|value| value[..5].to_vec())
         };
 
-        // The overwrite is staged while no state file exists, so it is a batch even though
-        // the file committed before it covers its key.
+        // The stage workers can stage both groups before either commits. The overwrite commits
+        // after the file that covers its key.
         let file = prepared_write(&store, 0, large_batch(7));
         let overwrite =
             prepared_write(&store, 1, vec![(key.clone(), Bytes::from_static(b"newer"))]);
-        assert!(matches!(overwrite.state, StagedState::Batch(_)));
         assert_eq!(commit_and_apply(&store, file), 1);
         let after_file = OwnedRocksSnapshot::capture(store.db.clone(), &store.frontiers);
         assert_eq!(commit_and_apply(&store, overwrite), 2);
@@ -4194,10 +3875,9 @@ mod tests {
             Some(&b"newer"[..])
         );
 
-        // A file ingested over the key while it is still in the memtable lands above it.
-        let after_batch = OwnedRocksSnapshot::capture(store.db.clone(), &store.frontiers);
+        // Another file that covers the key lands above the overwrite.
+        let after_overwrite = OwnedRocksSnapshot::capture(store.db.clone(), &store.frontiers);
         let again = prepared_write(&store, 2, large_batch(7));
-        assert!(matches!(again.state, StagedState::File { .. }));
         assert_eq!(commit_and_apply(&store, again), 3);
         assert_eq!(
             store.get_raw(&key).expect("get").as_deref(),
@@ -4208,8 +3888,8 @@ mod tests {
         // writes.
         assert_eq!(after_file.sequence_number, 1);
         assert_eq!(read(&after_file), Some(vec![7u8; 5]));
-        assert_eq!(after_batch.sequence_number, 2);
-        assert_eq!(read(&after_batch), Some(b"newer".to_vec()));
+        assert_eq!(after_overwrite.sequence_number, 2);
+        assert_eq!(read(&after_overwrite), Some(b"newer".to_vec()));
     }
 
     #[tokio::test]
@@ -4284,8 +3964,8 @@ mod tests {
                 .expect("put");
 
             // Seed only sequence 2's durable log row, as a crash between its log ingestion and
-            // its state application would leave it. The reopened store must re-derive the
-            // frontier from the retained rows alone and replay the row into the state.
+            // its state ingestion would leave it. The reopened store must re-derive the frontier
+            // from the retained rows alone and replay the row into the state.
             let payload = StreamGetResponse {
                 sequence_number: 2,
                 entries: vec![
@@ -4431,7 +4111,11 @@ mod tests {
     fn staged_state_file_carries_key_filter() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
-        let group = prepared_write(&store, 0, large_batch(1));
+        let group = prepared_write(
+            &store,
+            0,
+            vec![(Bytes::from_static(b"a"), Bytes::from_static(b"value"))],
+        );
         assert_eq!(commit_and_apply(&store, group), 1);
 
         // The state CF holds only the one ingested file, since nothing has flushed or compacted.
