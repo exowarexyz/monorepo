@@ -620,6 +620,14 @@ struct PrunePolicies {
     /// its read-ahead cursor.
     #[cfg(test)]
     read_ahead_gate: Mutex<()>,
+    /// Held by a test to stop a filter right after it has dropped its read-ahead cursor for
+    /// age, with the keys before that one decided and its compaction not yet finished.
+    #[cfg(test)]
+    aged_gate: Mutex<()>,
+    /// Held by a test to stop an install right before it writes the meta row. While its flag
+    /// is set, that write fails without reaching RocksDB.
+    #[cfg(test)]
+    write_gate: Mutex<bool>,
 }
 
 impl PrunePolicies {
@@ -711,6 +719,8 @@ impl CompactionFilter for PruneFilter {
         // dropped here. A key that needs one opens the next.
         if self.ahead.as_mut().is_some_and(ReadAhead::aged) {
             self.ahead = None;
+            #[cfg(test)]
+            drop(self.shared.aged_gate.lock());
         }
 
         // Policy prefixes never nest, so at most one policy selects a key.
@@ -2434,6 +2444,10 @@ impl RocksStore {
     // A single put reports a value that RocksDB refuses to store. A put into a write batch
     // does not report that through the binding.
     fn write_prune_row(&self, row: Vec<u8>) -> Result<(), String> {
+        #[cfg(test)]
+        if *self.prune.write_gate.lock() {
+            return Err("the write of the prune policy row failed".to_string());
+        }
         let mut synced = WriteOptions::default();
         synced.set_sync(true);
         self.db
@@ -4189,6 +4203,102 @@ mod tests {
     }
 
     #[test]
+    fn prune_install_that_fails_its_write_changes_nothing() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        let document = |prefix: &[u8]| PrunePolicyDocument {
+            version: PRUNE_POLICY_DOCUMENT_VERSION,
+            policies: vec![versioned_policy(prefix, RetainPolicy::DropAll)],
+        };
+        store
+            .install_prune_policies(document(&[1]))
+            .expect("install policies");
+        let (generation, compiled) = store.prune.current();
+
+        // The write of the second request's row fails. The request gets the error, and the
+        // row, the compiled list and the generation stay as the first request left them.
+        *store.prune.write_gate.lock() = true;
+        let error = store
+            .install_prune_policies(document(&[2]))
+            .expect_err("a failed write");
+        assert_eq!(error, "the write of the prune policy row failed");
+        assert_eq!(stored_prefixes(&store), [[1]]);
+        let (generation_after, compiled_after) = store.prune.current();
+        assert_eq!(generation_after, generation);
+        assert!(Arc::ptr_eq(&compiled_after, &compiled));
+
+        // The failed install released its lock, and the request succeeds when it is sent again.
+        *store.prune.write_gate.lock() = false;
+        store
+            .install_prune_policies(document(&[2]))
+            .expect("install policies");
+        assert_eq!(stored_prefixes(&store), [[2]]);
+    }
+
+    // A value this long needs a 64-bit address space.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn prune_row_write_reports_a_value_rocksdb_refuses() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        install(&store, vec![versioned_policy(&[1], RetainPolicy::DropAll)]);
+
+        // The value is one byte longer than the longest that RocksDB stores. RocksDB refuses it
+        // by its length, so its zeroed pages are never read or written.
+        let refused = vec![0u8; u32::MAX as usize + 1];
+        let error = store
+            .write_prune_row(refused)
+            .expect_err("a value RocksDB refuses");
+        assert!(error.contains("value is too large"), "{error}");
+        assert_eq!(stored_prefixes(&store), [[1]]);
+    }
+
+    #[test]
+    fn filter_does_not_wait_for_an_install_that_waits_on_its_write() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        install(&store, vec![versioned_policy(&[1], RetainPolicy::DropAll)]);
+        let keys = [
+            versioned_key(&[1], b"row", 1),
+            versioned_key(&[2], b"row", 1),
+        ];
+
+        // The test holds the write gate, so a second install stops right before its write with
+        // the install lock held, as it would while RocksDB stalls writes.
+        let gate = store.prune.write_gate.lock();
+        thread::scope(|scope| {
+            let second = scope
+                .spawn(|| install(&store, vec![versioned_policy(&[2], RetainPolicy::DropAll)]));
+            wait_until(
+                || store.prune.install.is_locked(),
+                "the second install must reach its write",
+            );
+
+            // A filter is built meanwhile, as a compaction that could end the stall builds one.
+            // It does not wait for the install, and it decides under the list still in force.
+            let (sender, decided) = mpsc::channel();
+            let (prune, keys) = (&store.prune, &keys);
+            scope.spawn(move || {
+                let mut filter = filter_over(prune);
+                sender
+                    .send(removed(&mut filter, keys))
+                    .expect("the test waits for the keys");
+            });
+            let gone = decided
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("a filter must not wait for an install");
+            assert_eq!(gone, [keys[0].clone()]);
+            assert_eq!(stored_prefixes(&store), [[1]]);
+            drop(gate);
+            second.join().expect("install");
+        });
+
+        // The install has finished, and a filter decides under its list.
+        let mut filter = filter_over(&store.prune);
+        assert_eq!(removed(&mut filter, &keys), [keys[1].clone()]);
+    }
+
+    #[test]
     fn prune_rules_decide_from_one_key() {
         let filter = |policy| {
             let shared = Arc::new(PrunePolicies::default());
@@ -4982,6 +5092,99 @@ mod tests {
                 assert_eq!(live, latest, "seed {seed}: group {group}");
             }
         }
+    }
+
+    #[test]
+    fn keep_latest_counts_rows_that_another_compaction_is_removing() {
+        let dir = tempdir().expect("tempdir");
+
+        // The default of two background jobs runs one compaction at a time. Four let RocksDB
+        // run a second beside the first once thirty-two sorted runs wait.
+        let mut config = RocksConfig::default();
+        config.db_options.set_max_background_jobs(4);
+        let store = RocksStore::open(dir.path(), Some(config)).expect("open db");
+        install(
+            &store,
+            vec![versioned_policy(
+                &[1],
+                RetainPolicy::KeepLatest { count: 2 },
+            )],
+        );
+        let key = |version: u64| Bytes::from(versioned_key(&[1], b"a", version));
+        let live = || -> Vec<u64> {
+            (1..=7)
+                .filter(|version| store.get_raw(&key(*version)).expect("get").is_some())
+                .collect()
+        };
+        let row = Bytes::from_static(b"row");
+        let mut sequence = 0;
+        let mut commit = |rows: Vec<(Bytes, Bytes)>| {
+            commit_and_apply(&store, prepared_write(&store, sequence, rows));
+            sequence += 1;
+        };
+
+        // The first file holds versions 3 to 7 of group a. Behind them it holds as many keys
+        // that the policy does not select as it takes for a filter to drop its cursor for age.
+        // The file spans every key, so that each later commit is staged as a file too.
+        let mut rows = vec![
+            (Bytes::from_static(&[0]), row.clone()),
+            (Bytes::from_static(&[255]), row.clone()),
+        ];
+        rows.extend((3..=7).map(|version| (key(version), row.clone())));
+        rows.extend((0..READ_AHEAD_REFRESH_KEYS as u32).map(|unselected| {
+            let key = [&[1, b'b'][..], &unselected.to_be_bytes()].concat();
+            (Bytes::from(key), Bytes::from(vec![0; 16]))
+        }));
+        let read_gate = store.prune.read_ahead_gate.lock();
+        let aged_gate = store.prune.aged_gate.lock();
+        commit(rows);
+
+        // Fifteen files that rewrite one key make sixteen sorted runs with the first, large
+        // enough together for RocksDB to compact them all. The gate holds that compaction's
+        // filter at version 3, before its first read.
+        let rewrite = (Bytes::from_static(&[0, 1]), Bytes::from(vec![0; 32 * 1024]));
+        for _ in 0..15 {
+            commit(vec![rewrite.clone()]);
+        }
+        let db = Arc::downgrade(&store.db.db);
+        wait_until(
+            || db.strong_count() == 2,
+            "the first compaction must reach the read-ahead gate",
+        );
+
+        // Let through, it decides that versions 3, 4 and 5 go, each with two newer versions
+        // behind it. Then it drops its cursor for age and stops, with nothing installed.
+        drop(read_gate);
+        wait_until(
+            || db.strong_count() == 1,
+            "the first compaction must drop its cursor",
+        );
+        assert_eq!(live(), [3, 4, 5, 6, 7]);
+
+        // Versions 1 and 2 arrive late, and sixteen more files start a second compaction
+        // beside the first. It counts versions 3 and 4, which the first is removing, as the
+        // rows behind versions 1 and 2. It removes those two and installs first.
+        commit(vec![
+            rewrite.clone(),
+            (key(1), row.clone()),
+            (key(2), row.clone()),
+        ]);
+        assert_eq!(live(), [1, 2, 3, 4, 5, 6, 7]);
+        for _ in 0..15 {
+            commit(vec![rewrite.clone()]);
+        }
+        wait_until(
+            || live() == [3, 4, 5, 6, 7],
+            "the second compaction must remove versions 1 and 2",
+        );
+
+        // The first compaction installs, and the group holds its latest two rows.
+        drop(aged_gate);
+        store
+            .db
+            .wait_for_compact(&rocksdb::WaitForCompactOptions::default())
+            .expect("wait for compaction");
+        assert_eq!(live(), [6, 7]);
     }
 
     #[test]
