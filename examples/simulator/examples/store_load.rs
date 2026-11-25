@@ -337,6 +337,7 @@ async fn run_mixed(
     let blocks = (commits as u64).div_ceil(3);
     let next = Arc::new(AtomicU64::new(0));
     let (sender, mut latencies) = mpsc::unbounded_channel();
+    let mut tasks = tokio::task::JoinSet::new();
 
     // A 90-byte row is a 33-byte key and a 57-byte value.
     let value_len = 90 - 33;
@@ -346,7 +347,7 @@ async fn run_mixed(
         let store = store.clone();
         let next = next.clone();
         let sender = sender.clone();
-        tokio::spawn(async move {
+        tasks.spawn(async move {
             loop {
                 let height = next.fetch_add(1, Ordering::Relaxed);
                 if height >= blocks {
@@ -373,8 +374,15 @@ async fn run_mixed(
     while let Some(latency) = latencies.recv().await {
         if !report.record(latency) {
             eprintln!("disk cap reached after {} commits", report.commits);
-            return;
+            break;
         }
+    }
+
+    // Closing the channel stops each writer at its next Put. A writer that panicked fails the
+    // run, because the Puts of its unfinished block are missing from the report.
+    drop(latencies);
+    while let Some(writer) = tasks.join_next().await {
+        writer.expect("every writer must finish without a panic");
     }
 }
 
