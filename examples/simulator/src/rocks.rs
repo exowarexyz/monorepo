@@ -192,8 +192,8 @@ const LOG_MERGE_TARGET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const LOG_MERGE_SMALL_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Most bytes of bottom-level files one merge selects. This bounds a merge's temporary disk use
-/// and the size of the merge a closing store waits for, unless a retention tombstone overlaps the
-/// run and widens the compaction to every file it covers. The value is a round number.
+/// and the size of each merge a closing store waits for, unless a retention tombstone overlaps
+/// the run and widens the compaction to every file it covers. The value is a round number.
 const LOG_MERGE_PASS_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 /// Most files one merge selects. RocksDB picks a manual compaction's files within one level in
@@ -965,7 +965,8 @@ fn plan_log_merge(files: &[LogFile], trigger: usize) -> Option<Range<usize>> {
 // RocksDB swaps a compaction's output files for its inputs in one manifest edit, so a reader or
 // a crash sees either the old files or the new ones, and every row stays readable by key. The
 // compaction copies every row and sentinel except those under a retention tombstone. Files
-// ingested meanwhile sort above the range and are untouched.
+// ingested meanwhile sort above the range, and the compaction takes one only when a retention
+// tombstone written meanwhile covers it.
 fn merge_log_run(db: &DB, trigger: usize) -> Result<bool, String> {
     let files = bottom_log_files(db)?;
     let Some(run) = plan_log_merge(&files, trigger) else {
@@ -1007,7 +1008,8 @@ fn merge_log_run(db: &DB, trigger: usize) -> Result<bool, String> {
 }
 
 /// Merges runs until none is left or a merge fails, at start for files an earlier process left and
-/// again on each wake-up from `commit`. Exits when the wake-up channel closes (store drop).
+/// again on each wake-up from `commit`. Exits when the wake-up channel closes (store drop). A
+/// merge in flight at that point finishes first, and a wake-up still queued can start one more.
 ///
 /// ```text
 ///   groups            1,024           2,048           3,072
@@ -1032,7 +1034,9 @@ fn run_log_merge(db: Arc<Database>, wake: mpsc::Receiver<()>, trigger: usize) {
             Ok(true) => continue,
             Ok(false) => {}
 
-            // A failed merge is not fatal. No row depends on it, and the next wake-up retries.
+            // A failed merge loses no row, and the next wake-up retries it. RocksDB records some
+            // compaction failures, a corrupt block among them, as a background error. It then
+            // fails the next commit's ingestion, which is fatal to the store.
             Err(error) => {
                 tracing::warn!(error = %error, "log file merge failed and will be retried after more commits");
             }
@@ -1523,11 +1527,13 @@ pub struct RocksWritePipelineConfig {
     /// `commit` for an earlier sequence are not counted. Defaults to one queued wave per default
     /// worker.
     pub max_queued_waves: NonZeroUsize,
-    /// Commit groups between wake-ups of the log merge. The merge compacts the newest run of log
-    /// files once it holds this many, so a smaller value leaves fewer files for every commit to
-    /// pay for, and rewrites the previous merge's last, partly filled file more often. A value
-    /// above `LOG_MERGE_PASS_FILES` only leaves more files, since one merge takes at most that
-    /// many.
+    /// Commit groups between wake-ups of the log merge, counted from `open`. At each wake-up, and
+    /// once at `open`, the merge compacts the newest run of small log files if the run holds this
+    /// many files, so a shorter run waits for a later wake-up. For that test a value of one counts
+    /// as two and a value above `LOG_MERGE_PASS_FILES` as that bound, the fewest and the most
+    /// files one merge takes. A smaller value leaves fewer files for every commit to pay for, and
+    /// rewrites the previous merge's last, partly filled file more often. A value above the bound
+    /// only leaves more files.
     pub log_merge_files: NonZeroUsize,
 }
 
@@ -1549,18 +1555,23 @@ impl Default for RocksWritePipelineConfig {
 /// RocksDB engine and application-level write pipeline options used by [`RocksStore::open`].
 #[derive(Default)]
 pub struct RocksConfig {
-    /// Database-wide options. `open` sizes the bottom-priority thread pool of the process-wide
-    /// default environment, where a store on that environment runs its log merges.
+    /// Database-wide options. `open` sets the bottom-priority thread pool of the process-wide
+    /// default environment to `BOTTOM_POOL_THREADS` threads, whatever its size was. A store on
+    /// that environment runs its log merges there.
     ///
-    /// `max_background_jobs` bounds the flushes and automatic compactions that run at once. A
-    /// running log merge takes one of those slots but does not wait for one. `max_open_files`
-    /// can be lower than the number of SST files, because the log files are rarely read back and
-    /// are the ones RocksDB closes first, but it has to stay above the number of state files in
-    /// level zero, since every point read consults them.
+    /// RocksDB derives from `max_background_jobs` how many flushes and automatic compactions run
+    /// at once. A running log merge counts as one of those compactions but does not wait for a
+    /// slot. `max_open_files` can be lower than the number of SST files. RocksDB closes the files
+    /// read least recently, and the log files are rarely read back. Below the number of state
+    /// files that reads probe, those reads reopen tables.
     ///
     /// A rate limiter throttles flushes and compactions, log merges included, but not the files a
     /// commit stages. It spreads a compaction over more time without reducing what it writes, so
-    /// it has to stay above the store's average compaction rate.
+    /// under a limit below the store's average compaction rate the backlog only grows.
+    ///
+    /// `open` relies on RocksDB replaying its WAL, where the store's meta rows stay until a
+    /// flush. An option that skips the WAL at open (`best_efforts_recovery`) can bring the store
+    /// up without the newest of them, even at a frontier below sequences it has issued.
     pub db_options: Options,
     /// Options for the application-level ingest write pipeline.
     pub write_pipeline: RocksWritePipelineConfig,
