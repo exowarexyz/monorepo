@@ -11,16 +11,19 @@
 //!   blocks. Each block is three Puts: twelve SQL and QMDB rows, a certificate, and a publication
 //!   barrier.
 //! - `mixed` makes the first Put of each block `LOAD_BLOCK_ROWS` rows of 90 bytes (default
-//!   14,000, or 1.26 MB) and issues blocks from `LOAD_WRITERS` tasks at once (default 4).
+//!   14,000, or 1.26 MB) and issues blocks from `LOAD_WRITERS` tasks at once (default 4). It
+//!   issues whole blocks, so it rounds `LOAD_COMMITS` up to a multiple of three.
 //! - `verify` issues no Puts. It opens a store that a `small` run filled, checks that every
 //!   sequence is in the log and in the state exactly as that run wrote it, and prints the SST
-//!   file count before and after the checks.
+//!   file count before and after the checks. It fails on a store that holds no sequence.
 //!
 //! The other settings are:
 //!
 //! - `LOAD_COMMITS`, the number of Puts (default 100,000).
-//! - `LOAD_WINDOW`, the number of Puts per output row (default 1,000).
-//! - `LOAD_MAX_GIB`, the on-disk size at which the run stops (default 15).
+//! - `LOAD_WINDOW`, the number of Puts per output row (default 1,000). Puts after the last full
+//!   window get no row.
+//! - `LOAD_MAX_GIB`, the on-disk size at which the run stops (default 15), checked at each
+//!   output row.
 //! - `LOAD_MERGE_FILES`, the store's `log_merge_files` (default 1,024).
 //! - `LOAD_SLOW_MS`, when set, reports every Put slower than that many milliseconds on stderr
 //!   with a wall-clock timestamp, to line up with the RocksDB info log.
@@ -121,7 +124,7 @@ fn block_rows(height: u64, rows: u64, value_len: usize) -> Vec<(Bytes, Bytes)> {
         .collect()
 }
 
-/// A block's certificate, one 400-byte row.
+/// A block's certificate, one row with a 400-byte value.
 fn certificate(height: u64) -> Vec<(Bytes, Bytes)> {
     vec![(ordered_key(NS_SIMPLEX, height, 0), value(!height, 400))]
 }
@@ -302,6 +305,7 @@ async fn run_small(store: RocksStore, commits: usize, mut report: Report) {
 /// Checks every sequence of a `small` run against the rows that run wrote.
 async fn run_verify(store: RocksStore, dir: &Path) {
     let newest = store.current_sequence();
+    assert!(newest > 0, "LOAD_DIR must hold the store of a small run");
     eprintln!(
         "verifying {newest} sequences, {} sst files",
         disk_usage(dir).0
