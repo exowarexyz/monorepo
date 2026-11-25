@@ -351,6 +351,9 @@ async fn run_mixed(
     rows_per_block: u64,
     mut report: Report,
 ) {
+    // Without a writer the run would issue no Put and still end like a complete one.
+    assert!(writers > 0, "LOAD_WRITERS must be nonzero");
+
     let blocks = (commits as u64).div_ceil(3);
     let next = Arc::new(AtomicU64::new(0));
     let (sender, mut latencies) = mpsc::unbounded_channel();
