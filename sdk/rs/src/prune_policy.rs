@@ -6,8 +6,8 @@ use crate::{
 use anyhow::{ensure, Context};
 use bytes::BufMut;
 use commonware_codec::{
-    Buf, Copying, Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt,
-    Write,
+    Buf, Copying, DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read,
+    ReadExt, Write,
 };
 use std::collections::HashSet;
 
@@ -131,7 +131,9 @@ impl Read for RetainPolicy {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         match u8::read(buf)? {
             0 => Ok(Self::KeepLatest {
-                count: u64::read(buf)? as usize,
+                count: usize::try_from(u64::read(buf)?).map_err(|_| {
+                    CodecError::Invalid("RetainPolicy", "keep_latest count does not fit in usize")
+                })?,
             }),
             1 => Ok(Self::GreaterThan {
                 threshold: u64::read(buf)?,
@@ -353,7 +355,7 @@ pub fn decode_policy_document(raw: &[u8]) -> anyhow::Result<PrunePolicyDocument>
             policies: Vec::new(),
         });
     }
-    let document = PrunePolicyDocument::read_cfg(&mut Copying(raw), &())
+    let document = PrunePolicyDocument::decode(Copying(raw))
         .context("failed to decode prune policy document")?;
     validate_policy_document(&document)?;
     Ok(document)
@@ -387,9 +389,9 @@ fn capture_groups_are_unique(groups: &[Utf8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_policy_document, encode_policy_document, GroupBy, KeysScope, OrderBy, OrderEncoding,
-        PrunePolicy, PrunePolicyDocument, RetainPolicy, Selector, PRUNE_POLICY_CONTROL_KEY,
-        PRUNE_POLICY_DOCUMENT_VERSION,
+        decode_policy_document, encode_policy_document, CodecError, GroupBy, KeysScope, OrderBy,
+        OrderEncoding, PrunePolicy, PrunePolicyDocument, RetainPolicy, Selector,
+        PRUNE_POLICY_CONTROL_KEY, PRUNE_POLICY_DOCUMENT_VERSION,
     };
     use crate::kv_codec::Utf8;
     use bytes::Bytes;
@@ -441,6 +443,20 @@ mod tests {
         let encoded = encode_policy_document(&sample_document()).expect("encode");
         let decoded = decode_policy_document(&encoded).expect("decode");
         assert_eq!(decoded, sample_document());
+    }
+
+    #[test]
+    fn trailing_bytes_are_rejected() {
+        let mut encoded = encode_policy_document(&sample_document()).expect("encode");
+        encoded.push(0);
+        let err = decode_policy_document(&encoded).expect_err("a byte after the document");
+        assert!(
+            matches!(
+                err.downcast_ref::<CodecError>(),
+                Some(CodecError::ExtraData(1))
+            ),
+            "{err:#}"
+        );
     }
 
     #[test]
