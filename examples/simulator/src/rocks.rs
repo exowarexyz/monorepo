@@ -93,8 +93,6 @@
 //! `PruneFilter`). The rows a policy removes leave later, when RocksDB compacts the files that
 //! hold them, and nothing schedules a compaction for that.
 //!
-//! An install refuses a `KeepLatest` count above `MAX_KEEP_LATEST_COUNT`.
-//!
 //! ```text
 //!   Prune call   -----------[ write row ][ swap ]--> reply
 //!                                       |       |
@@ -211,12 +209,6 @@ const DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
 /// Most entries in one sequence, the protocol's limit for one put. A wave stops coalescing at
 /// the limits of a single put, so every sequence fits in one response.
 const MAX_SEQUENCE_ENTRIES: usize = MAX_PUT_ENTRIES;
-
-/// Largest `count` of a `KeepLatest` policy. A filter holds up to `count` keys in its window
-/// and can read `count` keys for one key it is shown. At this limit the keys of a window take
-/// under 16 MiB at the longest key the protocol allows, and each key's group and order value
-/// are held beside it. The value is a round number.
-const MAX_KEEP_LATEST_COUNT: usize = 65_536;
 
 /// Directory inside the store path where commit groups stage their SST files, so that ingestion
 /// can hard-link them into the database. Where hard links are unsupported, as across
@@ -574,15 +566,7 @@ impl CompiledPolicy {
         let regex = compile_payload_regex(&scope.selector.payload_regex)
             .map_err(|e| format!("policy: {e}"))?;
         let rule = match policy.retain {
-            RetainPolicy::KeepLatest { count } => {
-                if count > MAX_KEEP_LATEST_COUNT {
-                    return Err(format!(
-                        "policy: keep_latest count {count} exceeds the limit of \
-                         {MAX_KEEP_LATEST_COUNT}"
-                    ));
-                }
-                PruneRule::KeepLatest { count }
-            }
+            RetainPolicy::KeepLatest { count } => PruneRule::KeepLatest { count },
             RetainPolicy::GreaterThan { threshold } => PruneRule::GreaterThan {
                 threshold: threshold_order_value(&scope, threshold)?,
             },
@@ -790,7 +774,8 @@ struct ReadAhead {
     _db: Arc<DB>,
     /// The keys the cursor has read after the key last asked about, in key order. The cursor
     /// is on the last of them unless it ran off the end. It holds at most as many keys as the
-    /// `count` of the policy that reads ahead.
+    /// `count` of the policy that reads ahead, and never more than a run of one group's keys
+    /// in rising order and one key past it.
     window: VecDeque<Ahead>,
     /// How many keys at the front of `window` have been linked into a chain, members of one
     /// group whose order values never decrease from one key to the next. Keys behind them can
@@ -4312,61 +4297,34 @@ mod tests {
     }
 
     #[test]
-    fn keep_latest_count_above_the_limit_is_refused() {
+    fn keep_latest_accepts_a_count_above_any_group() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
-        let keep = |count| PrunePolicyDocument {
-            version: PRUNE_POLICY_DOCUMENT_VERSION,
-            policies: vec![versioned_policy(&[1], RetainPolicy::KeepLatest { count })],
-        };
-        let installed = || {
-            let row = store
-                .db
-                .get_cf(store.meta_cf(), PRUNE_META_KEY)
-                .expect("read row");
-            (row, store.prune.current())
-        };
-        install(&store, vec![versioned_policy(&[2], RetainPolicy::DropAll)]);
-        let (row, (generation, compiled)) = installed();
+        let policy = versioned_policy(&[1], RetainPolicy::KeepLatest { count: usize::MAX });
+        install(&store, vec![policy.clone()]);
+        assert_eq!(read_prune_policies(&store.db).expect("read row"), [policy]);
 
-        // A count above the limit is refused, and the refusal changes nothing.
-        let error = store
-            .install_prune_policies(keep(MAX_KEEP_LATEST_COUNT + 1))
-            .expect_err("a count above the limit");
-        assert!(
-            error.contains(&format!("exceeds the limit of {MAX_KEEP_LATEST_COUNT}")),
-            "{error}"
-        );
-        let (row_after, (generation_after, compiled_after)) = installed();
-        assert_eq!(row_after, row);
-        assert_eq!(generation_after, generation);
-        assert!(Arc::ptr_eq(&compiled_after, &compiled));
+        // Group a has five versions and group b has three.
+        let keys: Vec<Vec<u8>> = [(b"a", 1..=5), (b"b", 1..=3)]
+            .into_iter()
+            .flat_map(|(group, versions)| {
+                versions.map(|version| versioned_key(&[1], group, version))
+            })
+            .collect();
+        for key in &keys {
+            store.db.put(key, b"row").expect("put");
+        }
 
-        // A count at the limit is installed.
-        store
-            .install_prune_policies(keep(MAX_KEEP_LATEST_COUNT))
-            .expect("a count at the limit");
-        let (_, (generation_after, compiled_after)) = installed();
-        assert_eq!(generation_after, generation + 1);
-        assert_eq!(compiled_after.len(), 1);
-
-        // A stored document with a count above the limit fails the open.
-        store
-            .db
-            .put_cf(
-                store.meta_cf(),
-                PRUNE_META_KEY,
-                keep(MAX_KEEP_LATEST_COUNT + 1).encode(),
-            )
-            .expect("write row");
-        drop(store);
-        let Err(error) = RocksStore::open(dir.path(), None) else {
-            panic!("a stored count above the limit must fail open");
-        };
-        assert!(
-            error.contains(&format!("exceeds the limit of {MAX_KEEP_LATEST_COUNT}")),
-            "{error}"
-        );
+        // No group has that many rows, so nothing is removed. The window stops one key past the
+        // end of a group. It is longest at the first key of group a, with the four versions
+        // behind that key and the first key of group b.
+        let mut filter = filter_over(&store.prune);
+        let mut longest = 0;
+        for key in &keys {
+            assert!(!removes(&mut filter, key));
+            longest = longest.max(filter.ahead.as_ref().map_or(0, |a| a.window.len()));
+        }
+        assert_eq!(longest, 5);
     }
 
     #[test]
