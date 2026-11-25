@@ -22,10 +22,11 @@ async fn health() -> &'static str {
 /// Default for `--max-open-files`.
 pub const DEFAULT_MAX_OPEN_FILES: i32 = 16_384;
 
-/// Store options for the served simulator. Every commit group adds a log SST that stays until a
-/// merge compacts it. RocksDB's open tables are capped at `max_open_files` in case merges fall
-/// behind. Under pressure the table cache closes the rarely read log files and keeps the state
-/// files every point read probes. The process open-file limit must cover the cap.
+/// Store options for the served simulator. Every commit group adds a log SST and a state SST. The
+/// log merge and state compaction reduce their number in the background, and RocksDB's open tables
+/// are capped at `max_open_files` in case either falls behind. Under pressure the table cache
+/// closes the rarely read log files and keeps the state files every point read probes. The process
+/// open-file limit must cover the cap.
 fn store_config(max_open_files: i32) -> RocksConfig {
     if let Ok(limit) = rlimit::Resource::NOFILE.get_soft() {
         if limit <= max_open_files as u64 {
@@ -79,8 +80,8 @@ pub async fn open_temp(
     Ok((handle, url))
 }
 
-/// Like [`open_temp`], and also returns the store behind the server, for tests that need what
-/// the API does not expose.
+/// Like [`open_temp`], and also returns the server's store, so a test can reach what the API
+/// does not expose.
 pub async fn open_temp_with_store() -> Result<
     (tokio::task::JoinHandle<()>, String, RocksStore),
     Box<dyn std::error::Error + Send + Sync>,

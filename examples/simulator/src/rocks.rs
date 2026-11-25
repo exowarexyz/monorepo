@@ -39,24 +39,24 @@
 //!   a crash here     8 never existed  |  open replays row 8   |  8 is complete
 //! ```
 //!
-//! The durable log row alone defines a group. Each ingestion and each batch is atomic, and
-//! `commit` applies a group's state before it ingests the next group's log row. A crash can
-//! therefore leave only the newest group with a log row and no state, never a partial row or a
-//! partial state. `open` re-applies the newest row above the state floor whether or not its
-//! state was complete (see `replay_newest_log_row`).
+//! A stage worker writes each group's log row and state rows as two SST files, and `commit`
+//! ingests both (see `stage_wave`). Ingestion bypasses the WAL and the memtables.
+//!
+//! The durable log row alone defines a group. Each ingestion is atomic, and `commit` applies a
+//! group's state before it ingests the next group's log row. A crash can therefore leave only
+//! the newest group with a log row and no state, never a partial row or a partial state. `open`
+//! re-applies the newest row above the state floor whether or not its state was complete (see
+//! `replay_newest_log_row`).
 //!
 //! Any write failure in the pipeline is fatal. The writer panics and the next open rolls the
 //! store forward (see `commit_group`).
 //!
-//! Ingestion bypasses the WAL and the memtables. The state is either ingested as a file or
-//! written through both as one synced batch (see `writes_state_as_batch`).
-//!
 //! # Log files
 //!
-//! Each log row is ingested as its own file, bracketed by sentinel keys with empty values so
-//! that ingestion and retention enforcement need not read its payload block (see
-//! `stage_log_file`). RocksDB rebuilds a column family's file list on every ingestion into it,
-//! so a commit slows down as its families gain files.
+//! Each log row is ingested as its own file, bracketed by sentinel keys with empty values so that
+//! ingestion and retention enforcement can skip its payload block (see `stage_log_file`). RocksDB
+//! rebuilds a column family's file list on every ingestion into it, so commits slow down as the
+//! families gain files.
 //!
 //! ```text
 //!   log family, bottom level, without the merge
@@ -87,17 +87,14 @@
 //!
 //! # Key pruning
 //!
-//! A Prune call installs policies and replies. It merges them into the stored document, writes
-//! the document to a meta row, and swaps the compiled policies that the state family's
+//! A Prune call replaces the installed policies with its own and replies. It writes the
+//! request's document to a meta row and swaps the compiled policies that the state family's
 //! compaction filter reads (see `RocksStore::install_prune_policies` and `PruneFilter`). The
-//! rows a policy removes leave later, when RocksDB compacts the files that hold them, and
-//! nothing schedules a compaction for that.
-//!
-//! An install refuses a `KeepLatest` count above `MAX_KEEP_LATEST_COUNT` and a merged document
-//! whose encoding is longer than `MAX_REQUEST_MESSAGE_BYTES`.
+//! rows a policy removes leave later, when RocksDB compacts the files that hold them, and the
+//! store schedules no compaction for that.
 //!
 //! ```text
-//!   Prune call   --[ merge ][ write row ][ swap ]--> reply
+//!   Prune call   -----------[ write row ][ swap ]--> reply
 //!                                       |       |
 //!   meta row     .......................[############ stored document ########################
 //!   policies     ...............................[####### compiled policies ###################
@@ -111,26 +108,29 @@
 //!
 //! Both rows are ones a policy removes, k1 in the oldest file and k8 in a new one. A compaction
 //! of the newer files removes k8, and k1 stays readable until a compaction takes the oldest
-//! file. A policy stands, so it also removes rows written after the call. It ends when a
-//! request names its prefix, or a prefix that contains it or lies inside it, and so replaces
-//! it. A replaced policy stops deciding at the next key a compaction is shown. The removals it
+//! file.
+//!
+//! An installed policy also removes rows written after the call. It stays installed until the
+//! store accepts another request, and that request's document replaces every installed policy.
+//! A replaced policy stops deciding at the next key a compaction is shown, and the removals it
 //! had already decided still land when their compaction finishes (see `PruneFilter`).
 //!
-//! Which rows `KeepLatest` removes depends on the other rows of their group, and a filter is
-//! shown one row at a time. So the filter reads ahead in the live state (see
-//! `ReadAhead::followed_by`). It prunes a group in full when the group's keys sort together,
-//! oldest first, and can keep more of it otherwise.
+//! Which rows `KeepLatest` removes depends on the other rows of their group, and a filter is shown
+//! one row at a time. So the filter reads ahead in the live state to find the rows that follow
+//! each one (see `ReadAhead::followed_by`). When a group's keys sort together, oldest first, a
+//! compaction under an unchanged document removes every live row of the group it takes except the
+//! latest `count` its read-ahead sees. Under any other layout it can keep more.
 //!
-//! `open` loads the document before the store serves. It also re-applies the newest log row
-//! (see `replay_newest_log_row`), which can bring back rows of that group that a compaction had
-//! removed. A policy that is still installed removes them again when a compaction takes them,
-//! and a row that no installed policy removes stays.
+//! `open` loads the document before the store serves. Re-applying the newest log row at open (see
+//! `replay_newest_log_row`) can bring back rows of its commit group that a compaction had removed.
+//! A policy that is still installed removes them again when a compaction takes them, and a row
+//! that no installed policy removes stays.
 
 #[cfg(test)]
 use buffa::Message;
 use buffa::{DecodeOptions, ViewEncode};
 use bytes::Bytes;
-use commonware_codec::{Copying, DecodeExt, Encode, EncodeSize};
+use commonware_codec::{Copying, DecodeExt, Encode};
 #[cfg(test)]
 use exoware_sdk::common::kv::v1::Entry;
 #[cfg(test)]
@@ -195,13 +195,14 @@ const SEQ_META_KEY: &[u8] = b"sequence";
 /// [`RetentionPolicy`]). Absence of the row means no rule is installed.
 const RETENTION_META_KEY: &[u8] = b"retention";
 
-/// Meta row holding the installed prune policies, the SDK's encoded [`PrunePolicyDocument`]
-/// under the SDK's name for it. Absence of the row means no policy is installed.
+/// Meta row holding the installed prune policies as the SDK encodes a
+/// [`PrunePolicyDocument`]. Absence of the row means no policy is installed.
 const PRUNE_META_KEY: &[u8] = PRUNE_POLICY_CONTROL_KEY.as_bytes();
 
-/// Keys a filter is shown before it drops its read-ahead cursor for a fresh one. A cursor pins
-/// the files and memtables of the moment it was opened, and a long compaction would keep files
-/// alive that other compactions have replaced. The value is a round number.
+/// Fewest keys a read-ahead cursor is shown before the filter drops it for age (see
+/// [`ReadAhead::aged`]). A cursor pins the files and memtables of the moment it was opened, so one
+/// kept for a whole long compaction would keep alive files that other compactions have replaced.
+/// The value is a round number.
 const READ_AHEAD_REFRESH_KEYS: usize = 4096;
 
 /// Default for [`RocksWritePipelineConfig::max_commit_batch_bytes`]. A larger wave commits
@@ -212,12 +213,6 @@ const DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
 /// Most entries in one sequence, the protocol's limit for one put. A wave stops coalescing at
 /// the limits of a single put, so every sequence fits in one response.
 const MAX_SEQUENCE_ENTRIES: usize = MAX_PUT_ENTRIES;
-
-/// Largest `count` of a `KeepLatest` policy. A filter holds up to `count` keys in its window
-/// and can read `count` keys for one key it is shown. At this limit the keys of a window take
-/// under 16 MiB at the longest key the protocol allows, and each key's group and order value
-/// are held beside it. The value is a round number.
-const MAX_KEEP_LATEST_COUNT: usize = 65_536;
 
 /// Directory inside the store path where commit groups stage their SST files, so that ingestion
 /// can hard-link them into the database. Where hard links are unsupported, as across
@@ -236,8 +231,7 @@ const LOG_BATCH_KEY_LEN: usize = 8;
 /// them within it.
 const LOG_BOTTOM_LEVEL: i32 = 6;
 
-/// Default for [`RocksWritePipelineConfig::log_merge_files`]. That field describes what the
-/// value trades. The value is a round number.
+/// Default for [`RocksWritePipelineConfig::log_merge_files`]. The value is a round number.
 const DEFAULT_LOG_MERGE_FILES: usize = 1024;
 
 /// Size at which the merge cuts its output files. Larger files leave fewer for every commit
@@ -245,42 +239,39 @@ const DEFAULT_LOG_MERGE_FILES: usize = 1024;
 /// file. The value is a round number.
 const LOG_MERGE_TARGET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
-/// Log files below this size are merged with their small neighbors, so small traffic does not
-/// leave one small file behind every merge. A merge's last output file can fall below it and
-/// be merged again later, so this also bounds what a merge rewrites of an earlier one's
-/// output. The value equals RocksDB's default target file size.
+/// Log files below this size are merged with their small neighbors. A merge's last output file can
+/// fall below it and be merged again, so this also bounds what a merge rewrites of an earlier
+/// one's output. The value equals RocksDB's default target file size.
 const LOG_MERGE_SMALL_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Most bytes of bottom-level files one merge selects. This bounds a merge's temporary disk
-/// use and the size of each merge a closing store waits for, unless a retention tombstone
-/// overlaps the run and widens the compaction to every file the tombstone covers. The value is
-/// a round number.
+/// Most bytes of bottom-level files one merge selects. This bounds a merge's temporary disk use
+/// and the size of the merge a closing store waits for, unless a retention tombstone overlaps the
+/// run and widens the compaction to every file it covers. The value is a round number.
 const LOG_MERGE_PASS_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+/// Most files one merge selects. RocksDB picks a manual compaction's files within one level in
+/// time quadratic in their number, while it holds the database mutex that every commit and
+/// snapshot needs. The value is four times the default merge trigger.
+const LOG_MERGE_PASS_FILES: usize = 4096;
 
 /// Size at which compaction cuts the state files it writes below level zero. Large files keep
 /// down the file count that every state ingestion pays for. The value is four times RocksDB's
 /// default target file size.
 const STATE_TARGET_FILE_BYTES: u64 = 256 * 1024 * 1024;
 
-/// Largest state payload, in key and value bytes, that [`writes_state_as_batch`] lets a
-/// commit group write as a batch through the WAL and memtable. A larger payload is staged as
-/// a file and ingested, where a batch is written to the WAL and again at the flush. The value
-/// is a round number.
-const STATE_BATCH_MAX_BYTES: usize = 64 * 1024;
-
 /// Threads in the bottom-priority pool of RocksDB's default environment. A store on that
-/// environment runs compactions into a family's last level there, so its log merge does not
-/// queue behind the state family's other compactions, and the second thread lets the merge
-/// start while a last-level state compaction holds the first.
+/// environment runs compactions into a family's last level there, apart from other compactions,
+/// and the second thread lets a log merge start while a last-level state compaction holds the
+/// first.
 const BOTTOM_POOL_THREADS: i32 = 2;
 
-/// Name prefix of every writer thread. The server binary aborts the process when a thread
-/// with this prefix panics, because a failed write is fatal to the store.
+/// Name prefix of every writer thread. A failed write is fatal to the store and panics its writer
+/// thread, so a process can abort when a thread with this prefix panics.
 pub const WRITER_THREAD_PREFIX: &str = "simulator-rocks-";
 
 /// Default for [`RocksWritePipelineConfig::stage_workers`] and
-/// [`RocksWritePipelineConfig::max_queued_waves`]. Each one more lets another wave stage or
-/// wait, and holds that wave's payload in memory. The value is a round number.
+/// [`RocksWritePipelineConfig::max_queued_waves`]. Each added worker or queue slot lets one more
+/// wave stage or wait and holds that wave's payload in memory. The value is a round number.
 const DEFAULT_STAGE_WORKERS: usize = 4;
 
 /// Flat memory charge for one request, added to the charges that grow with its rows (see
@@ -294,13 +285,14 @@ type Closer = Box<dyn std::any::Any + Send + Sync>;
 
 /// The open RocksDB handle plus everything that must outlive it.
 ///
-/// Every holder of the database (store clones, the writer threads, open range-scan cursors,
-/// in-flight blocking reads) shares one `Arc<Database>`, so the database closes exactly when
-/// the last holder drops, wherever that happens. A closer attached at open drops strictly
-/// after the database (fields drop in declaration order).
+/// Every holder of the store's database (store clones, the writer threads, open range-scan
+/// cursors, in-flight blocking reads) shares one `Arc<Database>`, and the database closes when the
+/// last of them drops, wherever that happens. A compaction filter holds only the inner handle, and
+/// only while its compaction runs. A closer attached at open drops strictly after the database
+/// (fields drop in declaration order).
 struct Database {
-    /// Shared only with the compaction filters, which hold it while they read ahead (see
-    /// [`ReadAhead`]). `Drop` ends them first, so this handle is the last one when it drops.
+    /// Shared only with the compaction filters while they read ahead (see [`ReadAhead`]).
+    /// `Drop` ends every compaction first, so this is the last handle when the field drops.
     db: Arc<DB>,
     /// Dropped only after `db`: any resource that must outlive the open database. For a
     /// store opened with [`RocksStore::open_owned`], this is the owner whose drop deletes
@@ -312,10 +304,10 @@ impl Drop for Database {
     fn drop(&mut self) {
         // Stopping background work ends every compaction, and a compaction destroys its
         // filter as it ends. A filter left holding `db` would otherwise close the database
-        // on a compaction thread, from inside the compaction the close then waits for. The
-        // stop also waits for this database's queued jobs to leave RocksDB's thread pools,
-        // which every store in the process shares, so a close can wait for another store's
-        // compaction.
+        // on a compaction thread, from inside the compaction the close then waits for.
+        // Every store in the process shares RocksDB's thread pools, and the stop also waits
+        // for this database's queued jobs to leave them, so a close can wait for another
+        // store's compaction.
         self.db.cancel_all_background_work(true);
     }
 }
@@ -558,7 +550,7 @@ enum PruneRule {
     DropAll,
 }
 
-/// One installed prune policy, compiled once when it is installed.
+/// One installed prune policy, compiled once when the store installs it or loads it at open.
 struct CompiledPolicy {
     prefix: Prefix,
     regex: Regex,
@@ -575,15 +567,7 @@ impl CompiledPolicy {
         let regex = compile_payload_regex(&scope.selector.payload_regex)
             .map_err(|e| format!("policy: {e}"))?;
         let rule = match policy.retain {
-            RetainPolicy::KeepLatest { count } => {
-                if count > MAX_KEEP_LATEST_COUNT {
-                    return Err(format!(
-                        "policy: keep_latest count {count} exceeds the limit of \
-                         {MAX_KEEP_LATEST_COUNT}"
-                    ));
-                }
-                PruneRule::KeepLatest { count }
-            }
+            RetainPolicy::KeepLatest { count } => PruneRule::KeepLatest { count },
             RetainPolicy::GreaterThan { threshold } => PruneRule::GreaterThan {
                 threshold: threshold_order_value(&scope, threshold)?,
             },
@@ -615,59 +599,38 @@ fn compile_policies(policies: &[PrunePolicy]) -> Result<Arc<[CompiledPolicy]>, S
     policies.iter().map(CompiledPolicy::compile).collect()
 }
 
-/// The policies a Prune request leaves in force. Its policies replace every stored policy
-/// whose prefix equals one of theirs, extends it or is extended by it, and the rest stay.
-fn merge_prune_policies(stored: &[PrunePolicy], request: Vec<PrunePolicy>) -> Vec<PrunePolicy> {
-    let replaced = |kept: &PrunePolicy| {
-        let kept = &kept.scope.selector.prefix;
-        request.iter().any(|new| {
-            let new = &new.scope.selector.prefix;
-            kept.starts_with(new) || new.starts_with(kept)
-        })
-    };
-    let mut merged: Vec<PrunePolicy> = stored
-        .iter()
-        .filter(|kept| !replaced(kept))
-        .cloned()
-        .collect();
-    merged.extend(request);
-    merged
-}
-
-/// Encodes `document` as the meta row. A document whose encoding is longer than `limit` bytes
-/// is refused before the row is allocated.
-fn encode_prune_document(document: &PrunePolicyDocument, limit: usize) -> Result<Vec<u8>, String> {
-    let len = document.encode_size();
-    if len > limit {
-        return Err(format!(
-            "prune policy document is {len} bytes, above the limit of {limit}"
-        ));
-    }
-    encode_policy_document(document).map_err(|e| e.to_string())
-}
-
 /// The installed prune policies, shared by the Prune call and the state family's filters.
 //
 // The two locks are separate so that a filter never waits for an install. An install holds
-// `install` across a synced write, the write can wait on a write stall, and a stall ends only
-// when compactions run, each of which builds a filter first.
+// `install` across a synced write, and that write can wait on a write stall that ends only
+// when state compactions run. Every state compaction builds a filter first.
 #[derive(Default)]
 struct PrunePolicies {
-    /// Held by an install from its read of the meta row to its swap, so the row and `compiled`
+    /// Held by an install from its write of the meta row to its swap, so the row and `compiled`
     /// change in the same order.
     install: Mutex<()>,
-    /// The policies of the meta row as compiled. Each new filter takes the list as it is then.
+    /// The policies of the meta row, compiled. A new filter takes the list in force when it is
+    /// built.
     compiled: Mutex<Arc<[CompiledPolicy]>>,
-    /// Counts the changes of `compiled`. A filter compares it at every key, so a replaced
-    /// policy stops deciding at the next key and not at the next compaction.
+    /// Counts the changes of `compiled`. A running filter compares it at every key, so a
+    /// replaced policy stops deciding at the next key.
     generation: AtomicU64,
     /// The open database, for the filters that read ahead. `open` sets it once the database
-    /// exists, and until then a filter keeps every key of a `KeepLatest` policy.
+    /// exists, and until then a filter keeps every key of a `KeepLatest` policy. The handle is
+    /// weak because the database owns the filter factory and the factory holds this cell.
     db: OnceLock<Weak<DB>>,
     /// Held by a test to stop every filter that has taken the database and is about to open
     /// its read-ahead cursor.
     #[cfg(test)]
     read_ahead_gate: Mutex<()>,
+    /// Held by a test to stop a filter right after it has dropped its read-ahead cursor for
+    /// age, with the keys before that one decided and its compaction not yet finished.
+    #[cfg(test)]
+    aged_gate: Mutex<()>,
+    /// Held by a test to stop an install right before it writes the meta row. While its flag
+    /// is set, that write fails without reaching RocksDB.
+    #[cfg(test)]
+    write_gate: Mutex<bool>,
 }
 
 impl PrunePolicies {
@@ -687,9 +650,9 @@ impl PrunePolicies {
 
 /// Builds the state family's compaction filters.
 //
-// RocksDB calls `create` from any of its compaction threads, at times together, and the
-// binding hands each call a `&mut self` to this one object. So it holds a handle to shared
-// state and nothing of its own.
+// RocksDB can call `create` from several compaction threads at once, and the binding hands
+// each call a `&mut self` to this one object. So the factory holds only a handle to shared
+// state.
 struct PruneFilterFactory(Arc<PrunePolicies>);
 
 impl CompactionFilterFactory for PruneFilterFactory {
@@ -716,49 +679,59 @@ impl CompactionFilterFactory for PruneFilterFactory {
 /// oldest file can drop the tombstone, and it keeps the tombstone while an open snapshot still
 /// shows an older version of the key.
 //
-// It is never shown a flush or an ingestion, so a row leaves only when a compaction takes the
-// file that holds it. It never writes to the database and never takes the publication lock.
-// Its one read is the read-ahead cursor.
+// RocksDB does not run it on flushes or ingested files, so a row a policy removes leaves only
+// when a compaction takes the file that holds it. It never writes to the database or takes the
+// publication lock, and its only read is the read-ahead cursor.
 //
 // A removal does not advance the store's sequence, and a snapshot does not shield the version
 // of a row that a compaction removes. What a query sees depends on when its read starts,
 // because RocksDB fixes the files a read uses at that moment. A point read or a multi-key read
 // sees all the removals of a finished compaction or none of them. A range cursor keeps the
-// files it opened on for all its pages. A query that captured its snapshot before a compaction
-// finished and starts its read afterward misses a row when the version that compaction removed
-// is the one its snapshot showed. A query whose snapshot predates the removed version still
-// sees the version that snapshot showed, until a compaction removes that one too. The rows that
-// stand behind a `KeepLatest` removal can be newer than that snapshot, so such a query can find
-// fewer than `count` rows of a group.
+// files it opened on for all its pages.
+//
+// A query that captured its snapshot before a compaction finished and starts its read afterward
+// misses a row when the version that compaction removed is the one its snapshot showed. A query
+// whose snapshot predates the removed version still sees the version that snapshot showed,
+// until a compaction removes that one too. The `count` rows that let `KeepLatest` remove a
+// version can be newer than that snapshot, so such a query can find fewer than `count` rows of
+// a group.
 //
 // A request can replace a policy while compactions run. The replaced policy stops deciding at
 // the next key, and the removals it has already decided still land when their compaction
 // finishes. They take only rows written before the request is answered, so a group can hold
-// fewer rows than a `KeepLatest` policy from the request would keep. Until they land those rows
-// are live. A second state compaction that runs meanwhile, which takes options above RocksDB's
-// defaults, counts them among the rows that follow a key under the new `KeepLatest` policy. It
-// can then remove a row the new policy alone would keep, even one written after the request.
+// fewer rows than a `KeepLatest` policy from the request would keep.
+//
+// Those rows stay live until the removals land. A second state compaction can run meanwhile
+// only with options above RocksDB's defaults. It counts those rows among the rows that follow a
+// key under the new `KeepLatest` policy, so it can remove a row the new policy alone would
+// keep, even one written after the request.
 struct PruneFilter {
+    /// The store's policy cell, checked at every key for a new generation.
     shared: Arc<PrunePolicies>,
     /// The generation at which `policies` was taken.
     generation: u64,
+    /// The policies in force at `generation`.
     policies: Arc<[CompiledPolicy]>,
-    /// The cursor for `KeepLatest`, opened at the first key that needs it.
+    /// The read-ahead cursor for `KeepLatest`, opened when a key needs one and none is open.
     ahead: Option<ReadAhead>,
 }
 
 impl CompactionFilter for PruneFilter {
     fn filter(&mut self, _level: u32, key: &[u8], _value: &[u8]) -> CompactionDecision {
-        // A replaced policy stops deciding here, and the new one takes over.
+        // The generation moves each time the store publishes a policy list, at open and at every
+        // install. The filter then takes up the published list at this key and drops the cursor,
+        // because its window was matched against the list it held.
         if self.shared.generation.load(Ordering::Acquire) != self.generation {
             (self.generation, self.policies) = self.shared.current();
             self.ahead = None;
         }
 
-        // Every key the filter is shown ages its cursor, used or not, and an old cursor is
-        // dropped here. A key that needs one opens the next.
+        // Every key the filter is shown ages the cursor, whether or not the key uses it. An
+        // aged cursor is dropped here, and the next key that needs one opens a fresh one.
         if self.ahead.as_mut().is_some_and(ReadAhead::aged) {
             self.ahead = None;
+            #[cfg(test)]
+            drop(self.shared.aged_gate.lock());
         }
 
         // Policy prefixes never nest, so at most one policy selects a key.
@@ -806,8 +779,9 @@ impl CompactionFilter for PruneFilter {
     }
 }
 
-/// A key that a read-ahead cursor has reached, with what its policy reads from it.
+/// A key the read-ahead cursor has read.
 struct Ahead {
+    /// The key, copied so it stays valid after the cursor moves on.
     key: Box<[u8]>,
     /// The key's group and order value, or `None` when the policy does not select the key.
     member: Option<(Vec<u8>, Vec<u8>)>,
@@ -817,19 +791,21 @@ struct Ahead {
 /// which keys follow the one the compaction is at. It reads the state as it was when the
 /// cursor opened.
 struct ReadAhead {
-    /// Declared before `_db`, which it borrows, so that it drops first.
+    /// Borrows `_db`, so it is declared first and drops first.
     cursor: DBRawIterator<'static>,
+    /// Keeps the database open while the cursor reads it.
     _db: Arc<DB>,
     /// The keys the cursor has read after the key last asked about, in key order. The cursor
     /// is on the last of them unless it ran off the end. It holds at most as many keys as the
-    /// `count` of the policy that reads ahead.
+    /// `count` of the policy that reads ahead, and never more than a run of one group's keys
+    /// in rising order and one key past it.
     window: VecDeque<Ahead>,
-    /// How many keys at the front of `window` have been linked into a chain, members of one
-    /// group whose order values never decrease from one key to the next. Keys behind them can
-    /// continue the chain, and the next key that needs it links those.
+    /// How many keys at the front of `window` are linked into a chain. A chain is a run of one
+    /// group's members whose order values never decrease from one key to the next. The keys
+    /// after it are linked only when a key the compaction shows needs them.
     chain: usize,
-    /// Whether the cursor ran off the end of the state. Then no key follows a later key
-    /// either.
+    /// Whether the cursor ran off the end of the state. No key then follows a later key
+    /// either, so the cursor stops reading.
     exhausted: bool,
     /// Keys the filter has been shown since the cursor opened.
     age: usize,
@@ -863,8 +839,8 @@ impl ReadAhead {
 
     /// Counts one more key against the cursor and says whether it is due to be dropped.
     //
-    // A cursor pins the files and memtables of the moment it was opened. The limit grows with
-    // the window, so that reading a long window again costs less than the keys since.
+    // The limit is at least twice the window's length, so the reads a fresh cursor spends
+    // rebuilding the window are at most half the keys this one was shown.
     fn aged(&mut self) -> bool {
         self.age += 1;
         self.age >= READ_AHEAD_REFRESH_KEYS.max(2 * self.window.len())
@@ -890,14 +866,18 @@ impl ReadAhead {
     //
     // Each of those keys sorts after `key` by order value and then by key, so `count` members
     // of the group are newer than `key` whatever else the group holds. The latest `count`
-    // members never have `count` members after them, so no chain of removals reaches them.
+    // members never have `count` newer members, so under an unchanged document no chain of
+    // removals reaches them.
     //
-    // The cursor's view can be stale. A row in it can have left through this same rule, and
-    // then rows newer than that row stand behind it, and behind `key` too. It can also have
-    // left through a policy that this one replaced (see `PruneFilter`).
+    // The cursor's view can be stale. A row in it can have been removed by this same rule, and
+    // then the group still holds `count` rows newer than that row, so newer than `key` too. A
+    // row in it can also have been removed by a policy that this one replaced (see
+    // `PruneFilter`).
     //
-    // A group is pruned in full when its keys sort together, oldest first. Under another
-    // layout the chain breaks early, and the group can keep more than `count`.
+    // When a group's keys sort together, oldest first, this test removes a member a compaction
+    // shows exactly when `count` members of its group follow it in the cursor's view, so of the
+    // members in that view it keeps only the latest `count`. Under another layout the chain breaks
+    // early, and the group can keep more than `count`.
     fn followed_by(
         &mut self,
         policy: &CompiledPolicy,
@@ -906,16 +886,15 @@ impl ReadAhead {
         order: &[u8],
         count: usize,
     ) -> bool {
-        // Keys at or before `key` are behind the compaction now.
+        // The compaction has passed the window keys at or before `key`.
         while self.window.front().is_some_and(|ahead| &*ahead.key <= key) {
             self.window.pop_front();
             self.chain = self.chain.saturating_sub(1);
         }
 
-        // With nothing read ahead of `key`, the cursor is on `key` itself when the compaction
-        // walks adjacent keys, and has to seek otherwise. The seek lands on the first key
-        // after `key` when `key` is not live any more. A cursor that ran off the end has
-        // nothing after a later key either, so it does not seek again.
+        // With nothing read ahead of `key`, the cursor is still on `key` when the last read
+        // ahead stopped there, and has to seek otherwise. The seek lands on the first key after
+        // `key` when `key` is not live. An exhausted cursor does not seek again.
         if self.window.is_empty() && !self.exhausted && self.cursor.key() != Some(key) {
             self.cursor.seek(key);
             if self.cursor.key() != Some(key) {
@@ -923,9 +902,9 @@ impl ReadAhead {
             }
         }
 
-        // `key` is removed only if the first key after it follows it in its group. When that
-        // key does not, as behind the newest key of a group, `key` is kept after this one read
-        // and the cursor does not read into the next group.
+        // `key` can be removed only if the first key after it is a member of its group with an
+        // order value at or above its own. When it is not, as after a group's newest key, `key`
+        // is kept after this one read and the cursor reads no further into the next group.
         if self.window.is_empty() && !self.advance(policy) {
             return false;
         }
@@ -941,10 +920,10 @@ impl ReadAhead {
             return false;
         }
 
-        // The chain grows until it holds `count` keys, breaks, or the keys run out. Each key
-        // is read once and linked once, however many keys before it ask. So the cursor's work
-        // follows the live keys it passes and not the keys the compaction shows. A key shown
-        // past the window drops the window and pays a seek and up to `count` reads of its own.
+        // The chain grows until it holds `count` keys, breaks, or the keys run out. A cursor
+        // reads and links each key once, however many keys before it ask. So the cursor's work
+        // grows with the live keys it passes, not with the keys the compaction shows. A key
+        // shown past the window empties it and pays a seek and up to `count` reads of its own.
         loop {
             while self.chain < self.window.len() && self.links(self.chain, &policy.scope) {
                 self.chain += 1;
@@ -1009,17 +988,14 @@ struct Frontiers {
     /// up ahead of compaction. Starts at zero; open's one-shot enforcement re-seeds it
     /// when a rule is installed.
     trimmed: AtomicU64,
-    /// Smallest and largest state key found at open, widened by each state file ingested since.
-    state_file_span: Mutex<Option<(Bytes, Bytes)>>,
 }
 
 impl Frontiers {
-    const fn new(published: u64, state_file_span: Option<(Bytes, Bytes)>) -> Self {
+    const fn new(published: u64) -> Self {
         Self {
             published: AtomicU64::new(published),
             persist: Mutex::new(()),
             trimmed: AtomicU64::new(0),
-            state_file_span: Mutex::new(state_file_span),
         }
     }
 }
@@ -1079,27 +1055,14 @@ struct QueuedWave {
     _leases: Vec<Arc<WriteLease>>,
 }
 
-/// A commit group's current-state rows as staged for `commit`.
-enum StagedState {
-    /// SST of the rows sorted by key, last write per key, ready for ingestion.
-    File {
-        /// Path of the staged SST.
-        path: PathBuf,
-        /// Smallest and largest key in the file.
-        span: (Bytes, Bytes),
-    },
-    /// The rows in arrival order, to be written as one batch.
-    Batch(Vec<(Bytes, Bytes)>),
-}
-
 /// One staged commit group: every coalesced request shares a single sequence number, whose log
 /// row carries all their rows in arrival order.
 struct PreparedWrite {
     sequence: u64,
     /// Staged log SST (the group's encoded batch and its sentinel keys), ready for ingestion.
     log: PathBuf,
-    /// The group's state rows, staged as a file or kept for a batch.
-    state: StagedState,
+    /// Staged current-state SST (sorted by key, last write per key), ready for ingestion.
+    state: PathBuf,
     /// Combined payload bytes staged, for debug logging.
     staged_bytes: usize,
     requests: Vec<WriteRequest>,
@@ -1148,23 +1111,20 @@ impl Writer {
 
         let commit = thread::Builder::new()
             .name(format!("{WRITER_THREAD_PREFIX}commit"))
-            .spawn({
-                let frontiers = frontiers.clone();
-                move || {
-                    run_commit(
-                        db,
-                        frontiers,
-                        staged_receiver,
-                        next,
-                        merge_sender,
-                        log_merge_files,
-                    )
-                }
+            .spawn(move || {
+                run_commit(
+                    db,
+                    frontiers,
+                    staged_receiver,
+                    next,
+                    merge_sender,
+                    log_merge_files,
+                )
             })
             .expect("failed to spawn RocksDB commit worker");
 
-        // One shared bounded queue, so `prepare` cannot run away from staging and any idle
-        // worker takes the next wave.
+        // One shared bounded queue, so `prepare` blocks once `max_queued_waves` waves wait for
+        // staging, and any idle worker takes the next wave.
         let (wave_sender, wave_receiver) = mpsc::sync_channel::<QueuedWave>(max_queued_waves);
         let wave_receiver = Arc::new(Mutex::new(wave_receiver));
         let mut handles = Vec::with_capacity(stage_workers + 3);
@@ -1172,11 +1132,10 @@ impl Writer {
             let ingest_dir = ingest_dir.clone();
             let staged_sender = staged_sender.clone();
             let wave_receiver = wave_receiver.clone();
-            let frontiers = frontiers.clone();
             handles.push(
                 thread::Builder::new()
                     .name(format!("{WRITER_THREAD_PREFIX}stage-{worker}"))
-                    .spawn(move || run_stage(ingest_dir, frontiers, wave_receiver, staged_sender))
+                    .spawn(move || run_stage(ingest_dir, wave_receiver, staged_sender))
                     .expect("failed to spawn RocksDB stage worker"),
             );
         }
@@ -1316,7 +1275,6 @@ fn run_prepare(
 /// happens on a fatal write error.
 fn run_stage(
     ingest_dir: PathBuf,
-    frontiers: Arc<Frontiers>,
     receiver: Arc<Mutex<mpsc::Receiver<QueuedWave>>>,
     sender: mpsc::SyncSender<PreparedWrite>,
 ) {
@@ -1324,14 +1282,14 @@ fn run_stage(
         let Ok(wave) = receiver.lock().recv() else {
             break;
         };
-        let group = stage_wave(&ingest_dir, &frontiers, wave);
+        let group = stage_wave(&ingest_dir, wave);
         if sender.send(group).is_err() {
             panic!("rocks commit worker died");
         }
     }
 }
 
-/// Commits staged groups strictly in sequence order (log ingestion, state application, publish,
+/// Commits staged groups strictly in sequence order (log ingestion, state ingestion, publish,
 /// ack), buffering groups whose predecessors are still staging, until the group channel closes
 /// (store drop). Any write failure panics inside `commit_group`. Wakes the merge worker after
 /// every `log_merge_files` groups, since each adds one log file.
@@ -1411,8 +1369,9 @@ fn bottom_log_files(db: &DB) -> Result<Vec<LogFile>, String> {
 ///   ##### a file of `LOG_MERGE_SMALL_BYTES` or more     | | a smaller one
 /// ```
 ///
-/// A run needs two files, and the newest run needs `trigger` of them when that is more. One pass
-/// selects at most `LOG_MERGE_PASS_BYTES` of files.
+/// A run needs two files. The newest run needs `trigger` of them when that is more, or
+/// `LOG_MERGE_PASS_FILES` when `trigger` is above that. One pass selects at most
+/// `LOG_MERGE_PASS_FILES` files holding at most `LOG_MERGE_PASS_BYTES`.
 fn plan_log_merge(files: &[LogFile], trigger: usize) -> Option<Range<usize>> {
     let small = |file: &LogFile| file.size < LOG_MERGE_SMALL_BYTES;
     let mut start = 0;
@@ -1425,23 +1384,25 @@ fn plan_log_merge(files: &[LogFile], trigger: usize) -> Option<Range<usize>> {
 
         // The newest run is still growing, so it waits for `trigger` files. Its first file is
         // usually the small last output of the previous merge, and waiting spreads the cost of
-        // rewriting that file over many new ones. A run with a large file after it cannot grow,
-        // so waiting would gain nothing and two files are enough.
+        // rewriting that file over many new ones. It waits for at most `LOG_MERGE_PASS_FILES`,
+        // since a pass takes no more however long the run grows. A run with a large file after it
+        // cannot grow, so waiting would gain nothing and two files are enough.
         let needed = if start + run == files.len() {
-            trigger.max(2)
+            trigger.clamp(2, LOG_MERGE_PASS_FILES)
         } else {
             2
         };
         if run >= needed {
-            // One merge takes the first two files, then more while the total stays within
-            // `LOG_MERGE_PASS_BYTES`. A later call picks up the rest of the run.
+            // One merge takes the first two files, then more until it holds
+            // `LOG_MERGE_PASS_FILES` files or the next file would pass `LOG_MERGE_PASS_BYTES`.
+            // A later call picks up the rest of the run.
             let mut bytes = 0;
             let taken = files[start..start + run]
                 .iter()
                 .enumerate()
                 .take_while(|(index, file)| {
                     bytes += file.size;
-                    *index < 2 || bytes <= LOG_MERGE_PASS_BYTES
+                    *index < 2 || (*index < LOG_MERGE_PASS_FILES && bytes <= LOG_MERGE_PASS_BYTES)
                 })
                 .count();
             return Some(start..start + taken);
@@ -1468,8 +1429,12 @@ fn merge_log_run(db: &DB, trigger: usize) -> Result<bool, String> {
         .expect("log CF must exist (created on open)");
     let mut options = CompactOptions::default();
 
-    // By default a manual compaction skips files that are already in the bottom level, and
-    // `Force` makes it rewrite them.
+    // By default a manual compaction skips files that are already in the bottom level, and `Force`
+    // makes it rewrite them. When a retention tombstone overlaps the run, RocksDB first rewrites
+    // the bottom-level files under the tombstone without their deleted rows, and `Force` then
+    // merges that output with the rest of the run. That copies the surviving rows of those files
+    // twice and leaves the run merged after one call. `ForceOptimized` copies them once and leaves
+    // that output apart from the rest of the run.
     options.set_bottommost_level_compaction(BottommostLevelCompaction::Force);
 
     // A non-exclusive manual compaction leaves automatic compactions running in every family.
@@ -1494,8 +1459,8 @@ fn merge_log_run(db: &DB, trigger: usize) -> Result<bool, String> {
     Ok(true)
 }
 
-/// Merges runs until none is left, at start for files an earlier process left and again on
-/// each wake-up from `commit`. Exits when the wake-up channel closes (store drop).
+/// Merges runs until none is left or a merge fails, at start for files an earlier process left and
+/// again on each wake-up from `commit`. Exits when the wake-up channel closes (store drop).
 ///
 /// ```text
 ///   groups            1,024           2,048           3,072
@@ -1606,92 +1571,28 @@ fn coalesce_queued_write(
     )
 }
 
-/// Whether a wave's state rows (`payload` bytes of keys and values) are written as one batch
-/// or staged as a file.
-///
-/// ```text
-///   state keys          |<------------ `file_span` ------------>|       written as
-///
-///   large           [==========================]                        ingested file
-///   small, inside                         * *                           ingested file
-///   small, below  * *                                                   synced batch
-///   small, above                                                   * *  synced batch
-///   small, both    *                                                *   ingested file
-///
-///   * one key of the group      small: at most `STATE_BATCH_MAX_BYTES`
-/// ```
-///
-/// `file_span` is the smallest and largest state key found at open, widened by each state file
-/// ingested since. Its two ends count as inside, and without a span every small wave is a
-/// batch.
-//
-// A file of keys beyond the span (rows keyed by the next block height, say) usually overlaps
-// no other file and would be ingested into the bottom level. Universal compaction rewrites
-// that level as a whole, so such files would pile up there, one per commit, until it does.
-// Written as batches, the rows collect in the memtable and flush together.
-//
-// RocksDB flushes the memtable before it ingests a file whose key range covers rows in it. The
-// flush keeps the newer write on top but costs time, and keeping batch rows outside the span
-// avoids it for every file that stays inside the span. It still happens when a file widens the
-// span over batch rows, and when a file covers the rows of a batch that was staged before the
-// span widened over its keys.
-//
-// A small wave inside the span is staged as a file like a large one. In the memtable its rows
-// would force a flush before the next file that covers them. As a file it usually lands above
-// the bottom level, where compaction merges it.
-fn writes_state_as_batch(
-    rows: &[(Bytes, Bytes)],
-    payload: usize,
-    file_span: Option<&(Bytes, Bytes)>,
-) -> bool {
-    if payload > STATE_BATCH_MAX_BYTES {
-        return false;
-    }
-    let Some((first, last)) = file_span else {
-        return true;
-    };
-    rows.iter().all(|(key, _)| key < first) || rows.iter().all(|(key, _)| key > last)
-}
-
-/// Stages one wave's SST files in parallel, the log SST on this thread and the sorted state SST
-/// on a scoped thread. A wave that [`writes_state_as_batch`] gets the log SST alone and keeps
-/// its rows for `commit`. A staging failure is fatal, and the next open removes leftover files.
-fn stage_wave(ingest_dir: &Path, frontiers: &Frontiers, wave: QueuedWave) -> PreparedWrite {
+/// Stages one wave's two SST files in parallel, the log SST on this thread and the sorted state
+/// SST on a scoped thread. A staging failure is fatal, and the next open removes leftover files.
+fn stage_wave(ingest_dir: &Path, wave: QueuedWave) -> PreparedWrite {
     let sequence = wave.sequence;
+    let rows = &wave.rows;
     let log = ingest_dir.join(format!("log-{sequence:020}.sst"));
-    let payload = wave
-        .rows
-        .iter()
-        .map(|(key, value)| key.len() + value.len())
-        .sum();
-    let as_batch = writes_state_as_batch(
-        &wave.rows,
-        payload,
-        frontiers.state_file_span.lock().as_ref(),
-    );
-    let (log_result, state_bytes, state) = if as_batch {
-        let log_result = stage_log_file(&log, sequence, &wave.rows);
-        (log_result, payload, StagedState::Batch(wave.rows))
-    } else {
-        let rows = &wave.rows;
-        let state = ingest_dir.join(format!("state-{sequence:020}.sst"));
-        let (log_result, state_result) = thread::scope(|scope| {
-            let state_task = thread::Builder::new()
-                .name(format!("{WRITER_THREAD_PREFIX}stage"))
-                .spawn_scoped(scope, || stage_state_file(&state, rows))
-                .expect("failed to spawn SST staging thread");
-            let log_result = stage_log_file(&log, sequence, rows);
-            (
-                log_result,
-                state_task.join().expect("state staging thread panicked"),
-            )
-        });
-        let (state_bytes, span) =
-            state_result.unwrap_or_else(|error| panic!("failed to stage state SST: {error}"));
-        let state = StagedState::File { path: state, span };
-        (log_result, state_bytes, state)
-    };
+    let state = ingest_dir.join(format!("state-{sequence:020}.sst"));
+    let (log_result, state_result) = thread::scope(|scope| {
+        let state_task = thread::Builder::new()
+            .name(format!("{WRITER_THREAD_PREFIX}stage"))
+            .spawn_scoped(scope, || stage_state_file(&state, rows))
+            .expect("failed to spawn SST staging thread");
+        let log_result = stage_log_file(&log, sequence, rows);
+        (
+            log_result,
+            state_task.join().expect("state staging thread panicked"),
+        )
+    });
     let log_bytes = log_result.unwrap_or_else(|error| panic!("failed to stage log SST: {error}"));
+    let state_bytes =
+        state_result.unwrap_or_else(|error| panic!("failed to stage state SST: {error}"));
+    drop(wave.rows);
     PreparedWrite {
         sequence,
         requests: wave.requests,
@@ -1744,10 +1645,10 @@ fn stage_log_file(path: &Path, sequence: u64, rows: &[(Bytes, Bytes)]) -> Result
 }
 
 /// The head sentinel is the previous sequence's key with a trailing `1`, so the files of
-/// consecutive sequences stay disjoint (see the figure on `stage_log_file`). `prune_log` ends
-/// the tombstone for the sequences below at this key, so the tombstone stays clear of this
-/// file. Readers that iterate rows skip keys of this length, while the oldest-retained lookup
-/// reads the head sentinel on purpose.
+/// consecutive sequences stay disjoint (see the figure on `stage_log_file`). `prune_log` ends the
+/// tombstone for the sequences below at this key, so the tombstone stays clear of this file.
+/// Readers that iterate rows skip keys of this length, and the oldest-retained lookup reads the
+/// head sentinel in place of the row.
 fn log_head_sentinel(sequence: u64) -> [u8; LOG_BATCH_KEY_LEN + 1] {
     // Sequences start at 1. A wrapped subtraction here would make the prune tombstone end
     // above every key and erase the whole log.
@@ -1769,10 +1670,7 @@ fn log_tail_sentinel(sequence: u64) -> [u8; LOG_BATCH_KEY_LEN + 1] {
 /// Stages the current-state SST: the group's rows sorted by key, with the last write per key
 /// winning (in arrival order across coalesced requests). Built with [`state_cf_options`], so
 /// it is uncompressed and carries the key filter that compaction writes.
-fn stage_state_file(
-    path: &Path,
-    rows: &[(Bytes, Bytes)],
-) -> Result<(usize, (Bytes, Bytes)), String> {
+fn stage_state_file(path: &Path, rows: &[(Bytes, Bytes)]) -> Result<usize, String> {
     let mut order: Vec<usize> = (0..rows.len()).collect();
 
     // Arrival indices preserve the newest duplicate without a sorting workspace.
@@ -1801,16 +1699,13 @@ fn stage_state_file(
 
     // `finish` syncs the file before it is linked into the DB.
     writer.finish().map_err(|e| e.to_string())?;
-
-    // The sorted order starts at the file's smallest key and ends at its largest.
-    let (first, last) = (order[0], order[order.len() - 1]);
-    Ok((bytes, (rows[first].0.clone(), rows[last].0.clone())))
+    Ok(bytes)
 }
 
-/// Commits one group: ingests its log row (durability), then applies its state rows
-/// (visibility), then publishes the frontier and resolves the requests. Any write failure
-/// panics. A durable log row cannot be rolled back, because its sequence number must never be
-/// re-issued, so the next open rolls the group forward from it.
+/// Commits one group: ingests its log row (durability), then its state file (visibility), then
+/// publishes the frontier and resolves the requests. Any write failure panics. A durable log
+/// row cannot be rolled back, because its sequence number must never be re-issued, so the next
+/// open rolls the group forward from it.
 ///
 /// ```text
 ///   commit    --[ ingest log 8 ]--[####### apply state 8, publish 8 #######]--[ reply ]-->
@@ -1824,9 +1719,9 @@ fn stage_state_file(
 ///   # holds the publication lock
 /// ```
 ///
-/// The lock is `Frontiers::persist`. A read takes it in `OwnedRocksSnapshot::capture`. A log
-/// trim holds it for its tombstone and floor batch (`RocksStore::prune_log`). Key pruning never
-/// takes it (see `PruneFilter`).
+/// The lock is `Frontiers::persist`. A state read takes it in `OwnedRocksSnapshot::capture`, and a
+/// log read does not. A log trim holds it for its tombstone and floor batch
+/// (`RocksStore::prune_log`). Key pruning never takes it (see `PruneFilter`).
 //
 // The panic drops the group's response channels, so waiting callers observe an error even
 // though the open-time repair may restore the group. This at-least-once ambiguity is accepted
@@ -1842,13 +1737,12 @@ fn commit_group(db: &DB, frontiers: &Frontiers, group: PreparedWrite) {
     // every published frontier until publish.
     ingest_staged_file(db, LOG_CF, &group.log);
 
-    // Apply and publish under the publication lock. A snapshot is captured under the same
-    // lock, so it never holds a state row above the frontier it reports. A log trim records
-    // the published frontier as the state floor under it too, so the floor covers only groups
-    // whose state is applied. A state batch that waits on a write stall holds the lock, so
-    // snapshot capture waits with it.
+    // Ingest and publish under the publication lock. A snapshot is captured under the same lock,
+    // so it never holds a state row above the frontier it reports. A log trim records the
+    // published frontier as the state floor under it too, so the floor covers only groups whose
+    // state is applied.
     let publish_guard = frontiers.persist.lock();
-    apply_staged_state(db, frontiers, &group.state);
+    ingest_staged_file(db, STATE_CF, &group.state);
 
     // Release so `current_sequence` readers only observe frontiers whose rows are readable.
     frontiers.published.store(sequence, Ordering::Release);
@@ -1866,32 +1760,6 @@ fn commit_group(db: &DB, frontiers: &Frontiers, group: PreparedWrite) {
     }
     for request in group.requests {
         let _ = request.response.send(Ok(sequence));
-    }
-}
-
-/// Applies one group's state rows by ingesting the staged SST and widening the state file span,
-/// or by writing one synced batch. The rows are durable and readable once this returns, and any
-/// failure panics.
-fn apply_staged_state(db: &DB, frontiers: &Frontiers, state: &StagedState) {
-    match state {
-        StagedState::File { path, span } => {
-            ingest_staged_file(db, STATE_CF, path);
-            let mut file_span = frontiers.state_file_span.lock();
-            *file_span = Some(match file_span.take() {
-                Some((first, last)) => (first.min(span.0.clone()), last.max(span.1.clone())),
-                None => span.clone(),
-            });
-        }
-        StagedState::Batch(rows) => {
-            // Arrival order lets the last write per key win, as it does in a staged file. The
-            // batch goes through RocksDB's write path, so it can wait on a write stall.
-            let mut batch = rocksdb::WriteBatch::default();
-            for (key, value) in rows {
-                batch.put(key, value);
-            }
-            write_synced_batch(db, batch)
-                .unwrap_or_else(|error| panic!("state batch write must succeed: {error}"));
-        }
     }
 }
 
@@ -1926,6 +1794,11 @@ fn write_synced_batch(db: &DB, batch: rocksdb::WriteBatch) -> Result<(), String>
 /// original behind while its rows are already visible. Deleting leftovers is safe either way
 /// because the database owns its own link to every ingested file. Nothing here decides
 /// whether a group committed: the retained log rows alone do.
+///
+/// `stage_wave` names its files `log-*.sst` and `state-*.sst`, and only those are deleted.
+/// [`RocksConfig::db_options`] can place RocksDB's WAL, SST files and info log in this directory
+/// (`wal_dir`, `db_paths`, `db_log_dir`). The open database is using those files, and RocksDB
+/// gives none of them such a name.
 fn prepare_ingest_dir(store_path: &Path) -> Result<PathBuf, String> {
     let ingest_dir = store_path.join(LOG_INGEST_DIR);
     std::fs::create_dir_all(&ingest_dir)
@@ -1934,8 +1807,13 @@ fn prepare_ingest_dir(store_path: &Path) -> Result<PathBuf, String> {
         .map_err(|e| format!("failed to read staging directory: {e}"))?
     {
         let entry = entry.map_err(|e| format!("failed to read staging directory: {e}"))?;
-        std::fs::remove_file(entry.path())
-            .map_err(|e| format!("failed to remove staged file: {e}"))?;
+        let staged = entry.file_name().to_str().is_some_and(|name| {
+            (name.starts_with("log-") || name.starts_with("state-")) && name.ends_with(".sst")
+        });
+        if staged {
+            std::fs::remove_file(entry.path())
+                .map_err(|e| format!("failed to remove staged file: {e}"))?;
+        }
     }
     Ok(ingest_dir)
 }
@@ -1955,57 +1833,8 @@ fn sequence_from_log_key(key: &[u8]) -> Result<u64, String> {
     Ok(u64::from_be_bytes(raw))
 }
 
-/// Fails when the database at `path` was opened with `best_efforts_recovery` or
-/// `avoid_flush_during_recovery`. State rows written as batches are durable only through the
-/// WAL until their memtable flushes, and a store running with either option can lose them.
-//
-// `best_efforts_recovery` opens from the SST files and skips the WAL, so the store would serve
-// without the rows only the WAL holds. `avoid_flush_during_recovery` can leave recovered rows
-// in their old WAL, and later synced writes do not sync that WAL. A power loss can then tear
-// its unsynced tail, and point-in-time recovery, the default, can stop there and skip the
-// newer WAL with its acknowledged rows.
-//
-// The options are read from the options file RocksDB writes at open, because the Rust bindings
-// can neither read nor clear them on `Options`.
-fn reject_wal_unsafe_options(path: &Path) -> Result<(), String> {
-    let newest = std::fs::read_dir(path)
-        .map_err(|e| format!("failed to read store directory: {e}"))?
-        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
-        .filter_map(|name| Some((name.strip_prefix("OPTIONS-")?.parse::<u64>().ok()?, name)))
-        .max();
-    let Some((_, name)) = newest else {
-        return Err("RocksDB wrote no options file at open".to_string());
-    };
-    let options = std::fs::read_to_string(path.join(name))
-        .map_err(|e| format!("failed to read RocksDB options file: {e}"))?;
-    for option in ["best_efforts_recovery", "avoid_flush_during_recovery"] {
-        let enabled = format!("{option}=true");
-        if options.lines().any(|line| line.trim() == enabled) {
-            return Err(format!(
-                "{option} is not supported, because state rows written as batches depend on \
-                 WAL recovery"
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Smallest and largest state key, or `None` when the state column family is empty.
-fn state_key_span(db: &DB) -> Result<Option<(Bytes, Bytes)>, String> {
-    let mut it = db.raw_iterator();
-    it.seek_to_first();
-    let Some(first) = it.key().map(Bytes::copy_from_slice) else {
-        it.status().map_err(|e| e.to_string())?;
-        return Ok(None);
-    };
-    it.seek_to_last();
-    let last = it.key().map(Bytes::copy_from_slice);
-    it.status().map_err(|e| e.to_string())?;
-    Ok(last.map(|last| (first, last)))
-}
-
 /// Reads the state-floor meta row, defaulting to zero when no log trim has written it yet. A
-/// malformed row is corruption and fails the open. Read as zero, it would let `open` derive a
+/// malformed row is corruption and fails the open. Reading it as zero would let `open` derive a
 /// frontier below sequences the store has already issued.
 fn read_state_floor(db: &DB) -> Result<u64, String> {
     let meta_cf = db
@@ -2048,8 +1877,8 @@ fn read_retention_policy(db: &DB) -> Result<Option<RetentionPolicy>, String> {
     }
 }
 
-/// Reads the stored prune policies. Absence of the row means none is installed. A row that
-/// fails to decode or validate is corruption and fails the open.
+/// Reads the stored prune policies, or none when the row is absent. A row that fails to decode
+/// or validate is corruption and fails the open.
 fn read_prune_policies(db: &DB) -> Result<Vec<PrunePolicy>, String> {
     let meta_cf = db
         .cf_handle(META_CF)
@@ -2104,11 +1933,10 @@ const fn retention_floor(policy: &RetentionPolicy, frontier: u64) -> u64 {
 /// their keys.
 ///
 /// A row at or below `floor` is not replayed. A log trim takes the floor from the published
-/// frontier, so the state of every group at or below it is already applied. Ingestion is
-/// atomic, so no partial row can exist, and if the row being re-applied fails to decode, that
-/// is real corruption and fails the open.
+/// frontier, so the state of every group at or below it is already applied. Ingestion is atomic,
+/// so no row is partial, and a re-applied row that fails to decode is corrupt and fails the open.
 ///
-/// Re-applying can bring back rows of the group that a compaction had pruned (see
+/// Re-applying can bring back rows of the group that a compaction had removed (see
 /// `PruneFilter`). A policy that is still installed removes them again when a compaction takes
 /// them, and a row that no installed policy removes stays.
 fn replay_newest_log_row(db: &DB, floor: u64) -> Result<u64, String> {
@@ -2161,7 +1989,9 @@ pub struct RocksWritePipelineConfig {
     pub max_queued_waves: NonZeroUsize,
     /// Commit groups between wake-ups of the log merge. The merge compacts the newest run of log
     /// files once it holds this many, so a smaller value leaves fewer files for every commit to
-    /// pay for, and rewrites the previous merge's last, partly filled file more often.
+    /// pay for, and rewrites the previous merge's last, partly filled file more often. A value
+    /// above `LOG_MERGE_PASS_FILES` only leaves more files, since one merge takes at most that
+    /// many.
     pub log_merge_files: NonZeroUsize,
 }
 
@@ -2183,10 +2013,8 @@ impl Default for RocksWritePipelineConfig {
 /// RocksDB engine and application-level write pipeline options used by [`RocksStore::open`].
 #[derive(Default)]
 pub struct RocksConfig {
-    /// Database-wide options. `open` turns `paranoid_checks` on and rejects
-    /// `best_efforts_recovery` and `avoid_flush_during_recovery`, because the state rows of small
-    /// commit groups are durable only through the WAL until they flush. It also sizes the
-    /// bottom-priority thread pool of the process-wide default environment, where log merges run.
+    /// Database-wide options. `open` sizes the bottom-priority thread pool of the process-wide
+    /// default environment, where a store on that environment runs its log merges.
     ///
     /// `max_background_jobs` bounds the flushes and automatic compactions that run at once. A
     /// running log merge takes one of those slots but does not wait for one. `max_open_files`
@@ -2202,11 +2030,11 @@ pub struct RocksConfig {
     pub write_pipeline: RocksWritePipelineConfig,
 }
 
-/// Options for the state column family. Ingested state SSTs overlap one another, so compaction
-/// has to merge them. Universal compaction merges whole sorted runs, and compression stays off
-/// to match the staged files. The raised level-zero triggers let a larger compaction backlog
-/// build before RocksDB slows or stops writes such as state batches. A ribbon filter
-/// lets a point read skip the runs that lack its key in fewer bytes than a bloom filter.
+/// Options for the state column family. Ingested state SSTs can overlap one another, so compaction
+/// has to merge them. Universal compaction merges whole sorted runs, and compression stays off to
+/// match the staged files. The raised level-zero triggers let a larger compaction backlog build
+/// before RocksDB slows or stops writes such as log trims. A ribbon filter lets a point read skip
+/// the runs that lack its key in fewer bytes than a bloom filter.
 fn state_cf_options() -> Options {
     let mut opts = Options::default();
     opts.set_compression_type(DBCompressionType::None);
@@ -2222,9 +2050,9 @@ fn state_cf_options() -> Options {
     opts
 }
 
-/// Options for the log column family and for the log files staged for ingestion into it. Log
-/// rows are keyed by a monotonic sequence, so those files never overlap and settle in the bottom
-/// level, where the merge compacts small ones into files of `LOG_MERGE_TARGET_BYTES`.
+/// Options for the log column family and for the log files staged for ingestion into it. Log rows
+/// are keyed by a monotonic sequence, so those files never overlap and settle in the bottom level,
+/// where the merge compacts small ones into files it cuts at about `LOG_MERGE_TARGET_BYTES`.
 fn log_cf_options() -> Options {
     let mut opts = Options::default();
     opts.set_compression_type(DBCompressionType::None);
@@ -2258,7 +2086,7 @@ pub struct RocksStore {
     /// across reopens). The ingest path reads it on every commit to trim continuously, so a
     /// cheap cache keeps a rule-less store off the disk on that hot path.
     retention: Arc<Mutex<Option<RetentionPolicy>>>,
-    /// The installed prune policies, which the state family's compaction filters apply.
+    /// The prune policies that the state family's compaction filters apply.
     prune: Arc<PrunePolicies>,
 }
 
@@ -2305,20 +2133,15 @@ impl RocksStore {
         db_options.create_if_missing(true);
         db_options.create_missing_column_families(true);
 
-        // A failed WAL write has to stop the store. A later synced write would otherwise land
-        // behind the damaged record and be lost with it at recovery. Paranoid checks turn the
-        // failure into a background error that fails later writes.
-        db_options.set_paranoid_checks(true);
-
         // The bottom-priority pool belongs to the process-wide default environment, so this
         // sizes it for every store that uses that environment.
         let mut env = rocksdb::Env::new().map_err(|e| e.to_string())?;
         env.set_bottom_priority_background_threads(BOTTOM_POOL_THREADS);
 
-        // The filter factory has to be in the options before the database opens, and the
-        // policies are stored inside the database. So the factory gets an empty cell now, and
-        // the stored policies go into it below. Until then a filter has no policy and keeps
-        // every key.
+        // The filter factory has to be in the options before the database opens, but the
+        // policies are stored inside the database. So the factory starts with an empty cell,
+        // and the stored policies go into it once they are read below. Until then a filter has
+        // no policy and keeps every key.
         let prune = Arc::new(PrunePolicies::default());
         let mut state_options = state_cf_options();
         state_options.set_compaction_filter_factory(PruneFilterFactory(prune.clone()));
@@ -2327,7 +2150,6 @@ impl RocksStore {
         let cf_log = ColumnFamilyDescriptor::new(LOG_CF, log_cf_options());
         let db = DB::open_cf_descriptors(&db_options, path, vec![cf_state, cf_meta, cf_log])
             .map_err(|e| e.to_string())?;
-        reject_wal_unsafe_options(path)?;
         let db = Arc::new(Database {
             db: Arc::new(db),
             _closer: closer,
@@ -2335,7 +2157,7 @@ impl RocksStore {
         prune
             .db
             .set(Arc::downgrade(&db.db))
-            .expect("the cell is new");
+            .expect("a new policy cell must not hold a database yet");
 
         let ingest_dir = prepare_ingest_dir(path)?;
 
@@ -2349,7 +2171,7 @@ impl RocksStore {
         // Restore the prune policies so compactions keep applying them after a reopen.
         prune.publish(compile_policies(&read_prune_policies(&db)?)?);
 
-        let frontiers = Arc::new(Frontiers::new(seq, state_key_span(&db)?));
+        let frontiers = Arc::new(Frontiers::new(seq));
         let writer = Arc::new(Writer::start(
             db.clone(),
             ingest_dir,
@@ -2458,32 +2280,39 @@ impl RocksStore {
         Ok(())
     }
 
-    /// Merges a request into the stored prune policies (see `merge_prune_policies`), persists
-    /// the result and puts it in force. The rows a policy removes leave when a compaction takes
+    /// Replaces the installed policies with those of `document`. Once this returns `Ok`, the
+    /// document is durable and in force. The rows a policy removes leave when a compaction takes
     /// the files that hold them.
     //
     // A prune document covers keys only. Sequence-log retention is set through
     // `log.retention.v1.SetRetention` (see the `Retention` impl).
     fn install_prune_policies(&self, document: PrunePolicyDocument) -> Result<(), String> {
-        let _install = self.prune.install.lock();
-        let merged = PrunePolicyDocument {
-            version: document.version,
-            policies: merge_prune_policies(&read_prune_policies(&self.db)?, document.policies),
-        };
-        let compiled = compile_policies(&merged.policies)?;
-
-        // The stored document is bounded by the byte limit of one request. RocksDB refuses a
-        // value above 4 GiB and the binding does not report that refusal, so a larger document
-        // could be acknowledged without being stored.
-        let row = encode_prune_document(&merged, MAX_REQUEST_MESSAGE_BYTES)?;
+        let compiled = compile_policies(&document.policies)?;
+        let row = encode_policy_document(&document).map_err(|e| e.to_string())?;
 
         // The row is durable before the swap, so no compaction applies a policy that a crash
         // could forget.
-        let mut batch = rocksdb::WriteBatch::default();
-        batch.put_cf(self.meta_cf(), PRUNE_META_KEY, row);
-        write_synced_batch(&self.db, batch)?;
+        let _install = self.prune.install.lock();
+        self.write_prune_row(row)?;
         self.prune.publish(compiled);
         Ok(())
+    }
+
+    /// Writes the prune policy row with one synced put, so the row is durable once this returns
+    /// `Ok`.
+    //
+    // A single put reports a value that RocksDB refuses to store. A put into a write batch
+    // does not report that through the binding.
+    fn write_prune_row(&self, row: Vec<u8>) -> Result<(), String> {
+        #[cfg(test)]
+        if *self.prune.write_gate.lock() {
+            return Err("the write of the prune policy row failed".to_string());
+        }
+        let mut synced = WriteOptions::default();
+        synced.set_sync(true);
+        self.db
+            .put_cf_opt(self.meta_cf(), PRUNE_META_KEY, row, &synced)
+            .map_err(|e| e.to_string())
     }
 
     /// Lowest retained log sequence at or below the published frontier, or `None` when the log
@@ -2560,10 +2389,10 @@ impl RocksStore {
         self.enforce_retention()
     }
 
-    /// Asks RocksDB to compact the whole state column family, memtable included, and returns
-    /// when RocksDB is done. A compaction that succeeds applies the installed prune policies
-    /// to every value it shows the filter. This call does not report a failed compaction. This
-    /// is a test tool, and the store never calls it.
+    /// Compacts the whole state column family, memtable included, and returns when RocksDB is
+    /// done. A compaction that succeeds applies the installed prune policies to every key that was
+    /// live when this call began, and a failed one goes unreported. It lets a test prune at a
+    /// known point.
     #[doc(hidden)]
     pub fn compact_state(&self) {
         self.db.compact_range(None::<&[u8]>, None::<&[u8]>);
@@ -2764,8 +2593,8 @@ impl Query for RocksStore {
     }
 }
 
-// Installing policies issues a synced write, so it runs on the blocking pool instead of
-// occupying a Tokio worker.
+// Installing policies issues a synced write, so it runs on the blocking pool instead of occupying
+// a Tokio worker.
 impl Prune for RocksStore {
     async fn apply_prune_policies(&self, document: PrunePolicyDocument) -> Result<(), String> {
         let store = self.clone();
@@ -3480,7 +3309,7 @@ mod tests {
             from,
             DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES,
         );
-        stage_wave(&ingest_dir, &store.frontiers, wave)
+        stage_wave(&ingest_dir, wave)
     }
 
     #[test]
@@ -3494,7 +3323,7 @@ mod tests {
         );
         ingest_staged_file(&store.db, LOG_CF, &group.log);
         let guard = store.frontiers.persist.lock();
-        apply_staged_state(&store.db, &store.frontiers, &group.state);
+        ingest_staged_file(&store.db, STATE_CF, &group.state);
         assert_eq!(store.current_sequence(), 0);
         assert_eq!(
             store.db.get(b"a").expect("visible state"),
@@ -3655,11 +3484,11 @@ mod tests {
             receiver.try_recv(),
             Err(mpsc::TryRecvError::Disconnected)
         ));
-        let group = stage_wave(dir.path(), &Frontiers::new(0, None), wave);
+        let group = stage_wave(dir.path(), wave);
         assert_eq!(group.sequence, 1);
         assert_eq!(group.requests.len(), 3);
         assert!(group.log.exists());
-        assert!(matches!(&group.state, StagedState::Batch(rows) if rows.len() == 3));
+        assert!(group.state.exists());
         assert!(group.staged_bytes > 0);
     }
 
@@ -3944,11 +3773,12 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
 
-        let group = prepared_write(&store, 0, large_batch(1));
-        let StagedState::File { path, .. } = &group.state else {
-            panic!("a large group must stage a state file");
-        };
-        std::fs::remove_file(path).expect("sabotage staged state file");
+        let group = prepared_write(
+            &store,
+            0,
+            vec![(Bytes::from_static(b"a"), Bytes::from_static(b"1"))],
+        );
+        std::fs::remove_file(&group.state).expect("sabotage staged state file");
         commit_and_apply(&store, group);
     }
 
@@ -4053,8 +3883,61 @@ mod tests {
         assert!(error.contains("keep_latest count must be > 0"), "{error}");
     }
 
-    /// A policy over keys of the form group, two zero bytes, big-endian version, under
-    /// `prefix`.
+    #[tokio::test]
+    async fn open_removes_only_staged_files_from_the_staging_directory() {
+        // Each open places RocksDB's WAL in the staging directory.
+        let dir = tempdir().expect("tempdir");
+        let ingest_dir = dir.path().join(LOG_INGEST_DIR);
+        let open = || {
+            let mut config = RocksConfig::default();
+            config.db_options.set_wal_dir(&ingest_dir);
+            RocksStore::open(dir.path(), Some(config)).expect("open db")
+        };
+
+        // A retention rule evicts the first two of three groups, and only the WAL holds the rule
+        // and the trim when the store closes. A fourth group is staged and never committed, as a
+        // crash would leave it.
+        let leftovers = {
+            let store = open();
+            for sequence in 1..=3 {
+                store.put_batch(small_batch(sequence)).await.expect("put");
+            }
+            store
+                .set_retention(Some(RetentionPolicy::KeepLatest { count: 1 }))
+                .expect("set retention");
+            assert_eq!(
+                store.oldest_retained_batch().await.expect("oldest"),
+                Some(3)
+            );
+            let group = prepared_write(&store, 3, small_batch(4));
+            [group.log, group.state]
+        };
+        for path in &leftovers {
+            assert!(path.exists(), "{} must be staged", path.display());
+        }
+
+        // The reopened store has the rule and the trim, so the evicted groups stay evicted. The
+        // staged leftovers are gone.
+        let store = open();
+        assert_eq!(
+            store.oldest_retained_batch().await.expect("oldest"),
+            Some(3)
+        );
+        assert!(store.get_batch(2).await.expect("get").is_none());
+        for path in &leftovers {
+            assert!(!path.exists(), "open must remove {}", path.display());
+        }
+
+        // The rule is installed, so the next group moves the cutoff.
+        store.put_batch(small_batch(4)).await.expect("put");
+        assert_eq!(
+            store.oldest_retained_batch().await.expect("oldest"),
+            Some(4)
+        );
+    }
+
+    /// A policy under `prefix` over keys laid out as a group, two zero bytes and a big-endian
+    /// version. It groups keys by the group and orders them by the version.
     fn versioned_policy(prefix: &[u8], retain: RetainPolicy) -> PrunePolicy {
         PrunePolicy {
             scope: KeysScope {
@@ -4127,6 +4010,15 @@ mod tests {
             .collect()
     }
 
+    /// The prefixes of the policies in the stored document, in document order.
+    fn stored_prefixes(store: &RocksStore) -> Vec<Vec<u8>> {
+        read_prune_policies(&store.db)
+            .expect("read row")
+            .iter()
+            .map(|policy| policy.scope.selector.prefix.to_vec())
+            .collect()
+    }
+
     /// Waits until `ready` holds, and panics with `what` if thirty seconds pass first.
     fn wait_until(ready: impl Fn() -> bool, what: &str) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -4137,51 +4029,30 @@ mod tests {
     }
 
     #[test]
-    fn prune_request_merges_by_prefix() {
-        let prefixes = |policies: &[PrunePolicy]| -> Vec<(Vec<u8>, RetainPolicy)> {
-            policies
-                .iter()
-                .map(|policy| (policy.scope.selector.prefix.to_vec(), policy.retain.clone()))
-                .collect()
-        };
-        let stored = vec![
-            versioned_policy(&[1], RetainPolicy::DropAll),
-            versioned_policy(&[2, 7], RetainPolicy::DropAll),
-            versioned_policy(&[3], RetainPolicy::DropAll),
-            versioned_policy(&[4], RetainPolicy::DropAll),
-        ];
-
-        // The request names an equal prefix, a prefix that a stored one extends, and a prefix
-        // that extends a stored one. Each replaces the stored policy, and the fourth stays.
-        let keep = RetainPolicy::KeepLatest { count: 1 };
-        let merged = merge_prune_policies(
-            &stored,
+    fn prune_request_replaces_every_installed_policy() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        install(
+            &store,
             vec![
-                versioned_policy(&[1], keep.clone()),
-                versioned_policy(&[2], keep.clone()),
-                versioned_policy(&[3, 9], keep.clone()),
+                versioned_policy(&[1], RetainPolicy::DropAll),
+                versioned_policy(&[2], RetainPolicy::DropAll),
             ],
         );
-        assert_eq!(
-            prefixes(&merged),
-            [
-                (vec![4], RetainPolicy::DropAll),
-                (vec![1], keep.clone()),
-                (vec![2], keep.clone()),
-                (vec![3, 9], keep),
-            ]
-        );
+        assert_eq!(stored_prefixes(&store), [[1], [2]]);
 
-        // The merged policies form a document the SDK accepts.
-        encode_policy_document(&PrunePolicyDocument {
-            version: PRUNE_POLICY_DOCUMENT_VERSION,
-            policies: merged,
-        })
-        .expect("merged document validates");
+        // The second request names another prefix. Its document replaces the first request's in
+        // the row, and a filter built afterward applies only its policy.
+        install(&store, vec![versioned_policy(&[3], RetainPolicy::DropAll)]);
+        assert_eq!(stored_prefixes(&store), [[3]]);
+        let mut filter = filter_over(&store.prune);
+        assert!(!removes(&mut filter, &versioned_key(&[1], b"row", 1)));
+        assert!(!removes(&mut filter, &versioned_key(&[2], b"row", 1)));
+        assert!(removes(&mut filter, &versioned_key(&[3], b"row", 1)));
     }
 
     #[test]
-    fn prune_requests_for_separate_prefixes_survive_reopen() {
+    fn only_the_last_prune_request_decides_after_reopen() {
         let dir = tempdir().expect("tempdir");
         {
             let store = RocksStore::open(dir.path(), None).expect("open db");
@@ -4189,12 +4060,13 @@ mod tests {
             install(&store, vec![versioned_policy(&[2], RetainPolicy::DropAll)]);
         }
 
-        // The stored document holds both requests, so both policies decide after a reopen.
+        // The stored document is the second request's, so only its policy decides after a
+        // reopen.
         let store = RocksStore::open(dir.path(), None).expect("reopen db");
+        assert_eq!(stored_prefixes(&store), [[2]]);
         let mut filter = filter_over(&store.prune);
-        assert!(removes(&mut filter, &versioned_key(&[1], b"row", 1)));
+        assert!(!removes(&mut filter, &versioned_key(&[1], b"row", 1)));
         assert!(removes(&mut filter, &versioned_key(&[2], b"row", 1)));
-        assert!(!removes(&mut filter, &versioned_key(&[3], b"row", 1)));
     }
 
     #[test]
@@ -4208,7 +4080,7 @@ mod tests {
         let store = RocksStore::open(dir.path(), Some(config)).expect("open db");
         let synced = || statistics.get_ticker_count(rocksdb::statistics::Ticker::WalFileSynced);
 
-        // The meta row is the only write of an install.
+        // An install writes only the meta row, so a rise in the counter comes from that row.
         let before = synced();
         install(&store, vec![versioned_policy(&[1], RetainPolicy::DropAll)]);
         assert!(
@@ -4222,57 +4094,122 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
         install(&store, vec![versioned_policy(&[1], RetainPolicy::DropAll)]);
-        let stored = || -> Vec<Vec<u8>> {
-            read_prune_policies(&store.db)
-                .expect("read row")
-                .iter()
-                .map(|policy| policy.scope.selector.prefix.to_vec())
-                .collect()
-        };
 
-        // The test holds the compiled list, so a second install writes its row and then waits
-        // at the swap. It still holds the install lock there, which keeps a third install from
-        // reading the row and swapping ahead of it.
+        // The test holds the lock on the compiled list, so a second install writes its row and
+        // then waits at the swap. It holds the install lock while it waits, so no third install
+        // can write its row and swap ahead of it.
         let compiled = store.prune.compiled.lock();
         thread::scope(|scope| {
             let second = scope
                 .spawn(|| install(&store, vec![versioned_policy(&[2], RetainPolicy::DropAll)]));
             wait_until(
-                || stored() == [[1], [2]],
+                || stored_prefixes(&store) == [[2]],
                 "the second install must write its row",
             );
             assert!(store.prune.install.is_locked());
             drop(compiled);
-            second.join().expect("install");
+            second.join().expect("the second install must not panic");
         });
-        assert_eq!(stored(), [[1], [2]]);
+        assert_eq!(stored_prefixes(&store), [[2]]);
         let mut filter = filter_over(&store.prune);
-        assert!(removes(&mut filter, &versioned_key(&[1], b"row", 1)));
+        assert!(!removes(&mut filter, &versioned_key(&[1], b"row", 1)));
         assert!(removes(&mut filter, &versioned_key(&[2], b"row", 1)));
     }
 
     #[test]
-    fn prune_document_is_bounded_in_bytes() {
-        let document = PrunePolicyDocument {
+    fn prune_install_that_fails_its_write_changes_nothing() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        let document = |prefix: &[u8]| PrunePolicyDocument {
             version: PRUNE_POLICY_DOCUMENT_VERSION,
-            policies: vec![versioned_policy(&[1], RetainPolicy::DropAll)],
+            policies: vec![versioned_policy(prefix, RetainPolicy::DropAll)],
         };
-        let len = document.encode_size();
+        store
+            .install_prune_policies(document(&[1]))
+            .expect("install policies");
+        let (generation, compiled) = store.prune.current();
 
-        // The document is encoded under a limit of its own length and refused under a limit
-        // one byte shorter.
-        assert_eq!(
-            encode_prune_document(&document, len).expect("at the limit"),
-            document.encode()
-        );
-        let error = encode_prune_document(&document, len - 1).expect_err("above the limit");
-        assert_eq!(
-            error,
-            format!(
-                "prune policy document is {len} bytes, above the limit of {}",
-                len - 1
-            )
-        );
+        // The write of the second request's row fails. The request gets the error, and the
+        // row, the compiled list and the generation stay as the first request left them.
+        *store.prune.write_gate.lock() = true;
+        let error = store
+            .install_prune_policies(document(&[2]))
+            .expect_err("an install whose write fails must return an error");
+        assert_eq!(error, "the write of the prune policy row failed");
+        assert_eq!(stored_prefixes(&store), [[1]]);
+        let (generation_after, compiled_after) = store.prune.current();
+        assert_eq!(generation_after, generation);
+        assert!(Arc::ptr_eq(&compiled_after, &compiled));
+
+        // The failed install released its lock, and the request succeeds when it is sent again.
+        *store.prune.write_gate.lock() = false;
+        store
+            .install_prune_policies(document(&[2]))
+            .expect("install policies");
+        assert_eq!(stored_prefixes(&store), [[2]]);
+    }
+
+    // A value this long needs a 64-bit address space.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn prune_row_write_reports_a_value_rocksdb_refuses() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        install(&store, vec![versioned_policy(&[1], RetainPolicy::DropAll)]);
+
+        // The value is one byte longer than the longest that RocksDB stores. RocksDB refuses it
+        // by its length, so its zeroed pages are never read or written.
+        let refused = vec![0u8; u32::MAX as usize + 1];
+        let error = store
+            .write_prune_row(refused)
+            .expect_err("RocksDB must refuse the value");
+        assert!(error.contains("value is too large"), "{error}");
+        assert_eq!(stored_prefixes(&store), [[1]]);
+    }
+
+    #[test]
+    fn filter_does_not_wait_for_an_install_that_waits_on_its_write() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        install(&store, vec![versioned_policy(&[1], RetainPolicy::DropAll)]);
+        let keys = [
+            versioned_key(&[1], b"row", 1),
+            versioned_key(&[2], b"row", 1),
+        ];
+
+        // The test holds the write gate, so a second install stops right before its write with
+        // the install lock held, as it would while RocksDB stalls writes.
+        let gate = store.prune.write_gate.lock();
+        thread::scope(|scope| {
+            let second = scope
+                .spawn(|| install(&store, vec![versioned_policy(&[2], RetainPolicy::DropAll)]));
+            wait_until(
+                || store.prune.install.is_locked(),
+                "the second install must reach its write",
+            );
+
+            // A filter is built meanwhile, as a compaction that could end the stall builds one.
+            // It does not wait for the install, and it decides under the list still in force.
+            let (sender, decided) = mpsc::channel();
+            let (prune, keys) = (&store.prune, &keys);
+            scope.spawn(move || {
+                let mut filter = filter_over(prune);
+                sender
+                    .send(removed(&mut filter, keys))
+                    .expect("the test must still wait for the decisions");
+            });
+            let gone = decided
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("a filter must not wait for an install");
+            assert_eq!(gone, [keys[0].clone()]);
+            assert_eq!(stored_prefixes(&store), [[1]]);
+            drop(gate);
+            second.join().expect("the second install must not panic");
+        });
+
+        // The install has finished, and a filter decides under its list.
+        let mut filter = filter_over(&store.prune);
+        assert_eq!(removed(&mut filter, &keys), [keys[1].clone()]);
     }
 
     #[test]
@@ -4287,7 +4224,8 @@ mod tests {
         let mut drop_all = filter(versioned_policy(&[1], RetainPolicy::DropAll));
         assert!(removes(&mut drop_all, &key(1)));
 
-        // Outside the prefix, and under it with a payload the regex rejects.
+        // A key outside the prefix stays, and so does a key under it whose payload the regex
+        // rejects.
         assert!(!removes(&mut drop_all, &versioned_key(&[2], b"row", 1)));
         assert!(!removes(&mut drop_all, &[1, b'r', 0, 0, 9]));
 
@@ -4384,61 +4322,36 @@ mod tests {
     }
 
     #[test]
-    fn keep_latest_count_above_the_limit_is_refused() {
+    fn keep_latest_accepts_a_count_above_any_group() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
-        let keep = |count| PrunePolicyDocument {
-            version: PRUNE_POLICY_DOCUMENT_VERSION,
-            policies: vec![versioned_policy(&[1], RetainPolicy::KeepLatest { count })],
-        };
-        let installed = || {
-            let row = store
-                .db
-                .get_cf(store.meta_cf(), PRUNE_META_KEY)
-                .expect("read row");
-            (row, store.prune.current())
-        };
-        install(&store, vec![versioned_policy(&[2], RetainPolicy::DropAll)]);
-        let (row, (generation, compiled)) = installed();
 
-        // A count above the limit is refused, and the refusal changes nothing.
-        let error = store
-            .install_prune_policies(keep(MAX_KEEP_LATEST_COUNT + 1))
-            .expect_err("a count above the limit");
-        assert!(
-            error.contains(&format!("exceeds the limit of {MAX_KEEP_LATEST_COUNT}")),
-            "{error}"
-        );
-        let (row_after, (generation_after, compiled_after)) = installed();
-        assert_eq!(row_after, row);
-        assert_eq!(generation_after, generation);
-        assert!(Arc::ptr_eq(&compiled_after, &compiled));
+        // The store accepts a count of `usize::MAX` and stores it as sent.
+        let policy = versioned_policy(&[1], RetainPolicy::KeepLatest { count: usize::MAX });
+        install(&store, vec![policy.clone()]);
+        assert_eq!(read_prune_policies(&store.db).expect("read row"), [policy]);
 
-        // A count at the limit is installed beside the policy that was there.
-        store
-            .install_prune_policies(keep(MAX_KEEP_LATEST_COUNT))
-            .expect("a count at the limit");
-        let (_, (generation_after, compiled_after)) = installed();
-        assert_eq!(generation_after, generation + 1);
-        assert_eq!(compiled_after.len(), 2);
+        // Group a has five versions and group b has three.
+        let keys: Vec<Vec<u8>> = [(b"a", 1..=5), (b"b", 1..=3)]
+            .into_iter()
+            .flat_map(|(group, versions)| {
+                versions.map(|version| versioned_key(&[1], group, version))
+            })
+            .collect();
+        for key in &keys {
+            store.db.put(key, b"row").expect("put");
+        }
 
-        // A stored document with a count above the limit fails the open.
-        store
-            .db
-            .put_cf(
-                store.meta_cf(),
-                PRUNE_META_KEY,
-                keep(MAX_KEEP_LATEST_COUNT + 1).encode(),
-            )
-            .expect("write row");
-        drop(store);
-        let Err(error) = RocksStore::open(dir.path(), None) else {
-            panic!("a stored count above the limit must fail open");
-        };
-        assert!(
-            error.contains(&format!("exceeds the limit of {MAX_KEEP_LATEST_COUNT}")),
-            "{error}"
-        );
+        // No group has that many rows, so nothing is removed. The window stops one key past the
+        // end of a group. It is longest at the first key of group a, with the four versions
+        // behind that key and the first key of group b.
+        let mut filter = filter_over(&store.prune);
+        let mut longest = 0;
+        for key in &keys {
+            assert!(!removes(&mut filter, key));
+            longest = longest.max(filter.ahead.as_ref().map_or(0, |a| a.window.len()));
+        }
+        assert_eq!(longest, 5);
     }
 
     #[test]
@@ -4475,8 +4388,9 @@ mod tests {
             assert_eq!(removed(&mut filter, &keys), expected, "keep latest {count}");
         }
 
-        // A compaction of some files shows the filter some of the keys, and one of them can be
-        // a version that is no longer live. The cursor reads the others from the live state.
+        // A compaction of some files shows the filter only the keys in them, and one of those
+        // can be a version that is not live. The cursor reads the keys that follow from the
+        // live state.
         install(
             &store,
             vec![versioned_policy(
@@ -4530,8 +4444,8 @@ mod tests {
             ],
         );
 
-        // The last key of the first policy reads ahead into the keys of the second. What it
-        // read there says nothing about them under the second policy.
+        // The last key of the first policy reads ahead into the keys of the second. The filter
+        // still decides those keys under the second policy's own rule.
         let keys = [
             versioned_key(&[1], b"z", 1),
             versioned_key(&[2], b"a", 1),
@@ -4550,8 +4464,8 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
 
-        // The version comes first in the key, so the versions of one group are apart. The
-        // next key is always of another group, and nothing is removed.
+        // The version comes first in the key, so the versions of one group are apart. Each key
+        // is followed by a key of another group or by none, so nothing is removed.
         let mut policy = versioned_policy(&[1], RetainPolicy::KeepLatest { count: 1 });
         policy.scope.selector.payload_regex =
             Utf8::from("(?s-u)^(?P<version>.{8})(?P<group>[a-z])$");
@@ -4584,8 +4498,8 @@ mod tests {
             store.db.put(key, b"row").expect("put");
         }
 
-        // Version 5 has the newer 9 behind it. Version 9 has only the older 1 behind it, which
-        // does not count against it.
+        // Version 5 has the newer 9 behind it. Version 9 has only the older 1 behind it, and an
+        // older version does not count against it.
         install(&store, vec![policy(1)]);
         let mut filter = filter_over(&store.prune);
         assert_eq!(removed(&mut filter, &keys), [key(b'x', 5)]);
@@ -4597,8 +4511,9 @@ mod tests {
         assert!(removed(&mut filter, &keys).is_empty());
     }
 
-    /// The cursor steps and seeks of `walk` on this thread, from RocksDB's own counters. The
-    /// rows of these tests sit in the memtable, where each cursor step is one memtable step.
+    /// Runs `walk` and returns the cursor steps and seeks it made on this thread, from
+    /// RocksDB's own counters. The rows of these tests sit in the memtable, where each cursor
+    /// step is one memtable step.
     fn cursor_work(walk: impl FnOnce()) -> (u64, u64) {
         rocksdb::perf::set_perf_stats(rocksdb::perf::PerfStatsLevel::EnableCount);
         let mut perf = rocksdb::perf::PerfContext::default();
@@ -4637,7 +4552,7 @@ mod tests {
         // cursor for a fresh one.
         let mut filter = filter_over(&store.prune);
         assert_eq!(removed(&mut filter, &keys), keys[..keys.len() - 1]);
-        assert!(filter.ahead.as_ref().expect("cursor").age < READ_AHEAD_REFRESH_KEYS);
+        assert!(filter.ahead.as_ref().expect("cursor must be open").age < READ_AHEAD_REFRESH_KEYS);
     }
 
     #[test]
@@ -4645,8 +4560,8 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
 
-        // The window is twice as long as the interval at which a short one is dropped, and the
-        // group is longer still.
+        // The window fills to `count`, twice the age at which the filter drops a cursor with a
+        // short window. The group is longer still.
         let count = 2 * READ_AHEAD_REFRESH_KEYS;
         let versions = 5 * READ_AHEAD_REFRESH_KEYS;
         install(
@@ -4742,7 +4657,15 @@ mod tests {
             cursor_work(|| gone = removes(&mut filter, &versioned_key(&[1], b"a", 1)));
         assert!(!gone);
         assert_eq!((steps, seeks), (3, 1));
-        assert_eq!(filter.ahead.as_ref().expect("cursor").window.len(), 3);
+        assert_eq!(
+            filter
+                .ahead
+                .as_ref()
+                .expect("cursor must be open")
+                .window
+                .len(),
+            3
+        );
     }
 
     #[test]
@@ -4758,8 +4681,8 @@ mod tests {
         );
         store.db.put([0], b"row").expect("put");
 
-        // A compaction can show the filter versions that are no longer live. Nothing follows
-        // the first of these, so nothing follows the later ones either.
+        // A compaction can show the filter versions that are not live. No live key follows the
+        // first of these, so none follows the later ones either, and the cursor seeks once.
         let keys: Vec<Vec<u8>> = (1..=64)
             .map(|version| versioned_key(&[1], b"row", version))
             .collect();
@@ -4784,7 +4707,8 @@ mod tests {
         let inside = versioned_key(&[1], b"row", 1);
         store.db.put(&inside, b"row").expect("put");
 
-        // The compaction leaves the policy's prefix and no key needs the cursor any more.
+        // Past the policy's prefix no key needs the cursor, and the filter drops it once it
+        // has aged.
         let mut filter = filter_over(&store.prune);
         assert!(!removes(&mut filter, &inside));
         assert!(filter.ahead.is_some());
@@ -4839,8 +4763,8 @@ mod tests {
         let mut filter = filter_over(&store.prune);
         assert!(removes(&mut filter, &keys[0]));
 
-        // The new policy keeps one version and does not select version 3. Version 2 is now the
-        // newest row it selects, and what the cursor read under the old policy does not count
+        // The new policy keeps one version and does not select version 3, so version 2 is the
+        // newest row it selects. What the cursor read under the old policy does not count
         // against it.
         let mut policy = versioned_policy(&[1], RetainPolicy::KeepLatest { count: 1 });
         policy.scope.selector.payload_regex =
@@ -4865,7 +4789,8 @@ mod tests {
 
         // The gate stops the filter after it has taken the database and before its cursor
         // opens. Meanwhile a request replaces the policy with one that keeps every row, and a
-        // newer version is written. The cursor then sees that version.
+        // newer version is written. The cursor then sees that version, and the filter keeps
+        // the key because its policy was replaced.
         let gate = store.prune.read_ahead_gate.lock();
         let mut filter = filter_over(&store.prune);
         let db = Arc::downgrade(&store.db.db);
@@ -4884,7 +4809,7 @@ mod tests {
                 .put(versioned_key(&[1], b"row", 2), b"row")
                 .expect("put");
             drop(gate);
-            shown.join().expect("filter")
+            shown.join().expect("the filter thread must not panic")
         });
         assert!(!removed);
     }
@@ -4903,7 +4828,8 @@ mod tests {
         files
     }
 
-    /// One version of each of `groups` under [`versioned_policy`], with values of `value_len`.
+    /// Rows holding `version` of each group in `groups`, keyed for [`versioned_policy`] under
+    /// the prefix `[1]`, with values of `value_len` bytes.
     fn version_rows(
         groups: std::ops::Range<u64>,
         version: u64,
@@ -4925,7 +4851,7 @@ mod tests {
 
     #[tokio::test]
     async fn keep_latest_counts_newer_keys_in_a_file_the_compaction_skips() {
-        // Fifteen files above the oldest one make sixteen sorted runs, which is where the state
+        // Fifteen files above the oldest one make sixteen sorted runs. At sixteen the state
         // family starts a compaction by itself.
         const OLD_VERSIONS: u64 = 15;
         const NEWEST: u64 = 100;
@@ -4963,8 +4889,9 @@ mod tests {
         assert_eq!(files.len(), 2, "{files:?}");
         assert!(files.contains(&oldest_file[0]), "{files:?}");
 
-        // The newest version stands behind every older one, in the file that was not
-        // compacted, and the filter removed them all on its strength.
+        // The newest version of each group sorts after every older one and sits in the file
+        // the compaction skipped. The cursor reads it from the live state, so the filter
+        // removed every older version.
         for (key, _) in (1..=OLD_VERSIONS).flat_map(|version| version_rows(1..6, version, 8)) {
             assert_eq!(store.get_raw(&key).expect("get"), None);
         }
@@ -5007,18 +4934,14 @@ mod tests {
                 state % below
             };
 
-            // The first commit is large enough to be staged as a file, and the file spans every
-            // key, so that each later commit is staged as a file too.
+            // The first commit's file spans every key, so each later file overlaps it.
             let mut sequence = 0;
             let mut commit = |rows: Vec<(Bytes, Bytes)>| {
                 commit_and_apply(&store, prepared_write(&store, sequence, rows));
                 sequence += 1;
             };
             commit(vec![
-                (
-                    Bytes::from_static(&[0]),
-                    Bytes::from(vec![0; STATE_BATCH_MAX_BYTES + 1]),
-                ),
+                (Bytes::from_static(&[0]), row.clone()),
                 (Bytes::from_static(&[255]), row.clone()),
             ]);
 
@@ -5063,7 +4986,8 @@ mod tests {
                     .wait_for_compact(&rocksdb::WaitForCompactOptions::default())
                     .expect("wait for compaction");
 
-                // The two compactions pruned, and the latest of every group are still there.
+                // The compactions removed rows, and the latest `COUNT` versions of every group are
+                // still there.
                 let live = |group: usize, version: &u64| {
                     store.get_raw(&key(group, *version)).expect("get").is_some()
                 };
@@ -5076,7 +5000,7 @@ mod tests {
                     for version in versions.iter().rev().take(COUNT) {
                         assert!(
                             live(group, version),
-                            "seed {seed}: group {group} lost version {version} of {versions:?}"
+                            "seed {seed}: group {group} must keep {version} of {versions:?}"
                         );
                     }
                 }
@@ -5084,7 +5008,8 @@ mod tests {
                 pruned = gone;
             }
 
-            // A compaction of every file leaves exactly the latest of each group.
+            // A compaction of every file leaves exactly the latest `COUNT` versions of each
+            // group.
             store.compact_state();
             for (group, versions) in written.iter().enumerate() {
                 let live: Vec<u64> = versions
@@ -5096,6 +5021,101 @@ mod tests {
                 assert_eq!(live, latest, "seed {seed}: group {group}");
             }
         }
+    }
+
+    #[test]
+    fn keep_latest_counts_rows_that_another_compaction_is_removing() {
+        let dir = tempdir().expect("tempdir");
+
+        // The default of two background jobs runs one compaction at a time. Four let RocksDB
+        // run a second beside the first once thirty-two sorted runs wait.
+        let mut config = RocksConfig::default();
+        config.db_options.set_max_background_jobs(4);
+        let store = RocksStore::open(dir.path(), Some(config)).expect("open db");
+        install(
+            &store,
+            vec![versioned_policy(
+                &[1],
+                RetainPolicy::KeepLatest { count: 2 },
+            )],
+        );
+        let key = |version: u64| Bytes::from(versioned_key(&[1], b"a", version));
+        let live = || -> Vec<u64> {
+            (1..=7)
+                .filter(|version| store.get_raw(&key(*version)).expect("get").is_some())
+                .collect()
+        };
+        let row = Bytes::from_static(b"row");
+        let mut sequence = 0;
+        let mut commit = |rows: Vec<(Bytes, Bytes)>| {
+            commit_and_apply(&store, prepared_write(&store, sequence, rows));
+            sequence += 1;
+        };
+
+        // The first file holds versions 3 to 7 of group a. Behind them it holds
+        // `READ_AHEAD_REFRESH_KEYS` keys that the policy does not select, enough for a filter to
+        // drop its cursor for age. The file spans every key, so each later file overlaps it.
+        let mut rows = vec![
+            (Bytes::from_static(&[0]), row.clone()),
+            (Bytes::from_static(&[255]), row.clone()),
+        ];
+        rows.extend((3..=7).map(|version| (key(version), row.clone())));
+        rows.extend((0..READ_AHEAD_REFRESH_KEYS as u32).map(|unselected| {
+            let key = [&[1, b'b'][..], &unselected.to_be_bytes()].concat();
+            (Bytes::from(key), Bytes::from(vec![0; 16]))
+        }));
+        let read_gate = store.prune.read_ahead_gate.lock();
+        let aged_gate = store.prune.aged_gate.lock();
+        commit(rows);
+
+        // Fifteen files that rewrite one key make sixteen sorted runs with the first, large
+        // enough together for RocksDB to compact them all. The gate holds that compaction's
+        // filter at version 3, before its first read.
+        let rewrite = (Bytes::from_static(&[0, 1]), Bytes::from(vec![0; 32 * 1024]));
+        for _ in 0..15 {
+            commit(vec![rewrite.clone()]);
+        }
+        let db = Arc::downgrade(&store.db.db);
+        wait_until(
+            || db.strong_count() == 2,
+            "the first compaction must reach the read-ahead gate",
+        );
+
+        // Once the gate opens, the filter decides that versions 3, 4 and 5 go, each with two
+        // newer versions behind it. It then drops its cursor for age and stops at the aged
+        // gate, before its compaction finishes.
+        drop(read_gate);
+        wait_until(
+            || db.strong_count() == 1,
+            "the first compaction must drop its cursor",
+        );
+        assert_eq!(live(), [3, 4, 5, 6, 7]);
+
+        // Versions 1 and 2 arrive late, and sixteen more files start a second compaction
+        // beside the first. The second counts versions 3 and 4 as the rows behind versions 1
+        // and 2, though the first is removing them. It removes versions 1 and 2 and finishes
+        // first.
+        commit(vec![
+            rewrite.clone(),
+            (key(1), row.clone()),
+            (key(2), row.clone()),
+        ]);
+        assert_eq!(live(), [1, 2, 3, 4, 5, 6, 7]);
+        for _ in 0..15 {
+            commit(vec![rewrite.clone()]);
+        }
+        wait_until(
+            || live() == [3, 4, 5, 6, 7],
+            "the second compaction must remove versions 1 and 2",
+        );
+
+        // The first compaction finishes, and the group holds only its latest two rows.
+        drop(aged_gate);
+        store
+            .db
+            .wait_for_compact(&rocksdb::WaitForCompactOptions::default())
+            .expect("wait for compaction");
+        assert_eq!(live(), [6, 7]);
     }
 
     #[test]
@@ -5126,7 +5146,9 @@ mod tests {
         let (closed_sender, closed) = mpsc::channel();
         let closer = thread::spawn(move || {
             drop(store);
-            closed_sender.send(()).expect("closed");
+            closed_sender
+                .send(())
+                .expect("the test must still wait for the close");
         });
         wait_until(
             || database.strong_count() == 0,
@@ -5136,10 +5158,10 @@ mod tests {
         closed
             .recv_timeout(std::time::Duration::from_secs(30))
             .expect("the store must close while a filter reads ahead");
-        closer.join().expect("closer");
+        closer.join().expect("the closing thread must not panic");
         assert_eq!(db.strong_count(), 0);
 
-        // The database closed whole. It reopens, and the newest version of every group is
+        // The close finished, so the store reopens, and the newest version of every group is
         // there.
         let store = RocksStore::open(dir.path(), None).expect("reopen db");
         for (key, value) in version_rows(0..32, 16, 4096) {
@@ -5341,7 +5363,7 @@ mod tests {
                 .get_batch(sequence)
                 .await
                 .expect("get batch")
-                .unwrap_or_else(|| panic!("batch {sequence} retained"));
+                .unwrap_or_else(|| panic!("batch {sequence} must be retained"));
             assert_eq!(batch_entries(batch), small_batch(sequence));
             assert_eq!(log_file_keys_present(store, sequence), [true; 3]);
             let (key, value) = small_batch(sequence).remove(0);
@@ -5391,8 +5413,8 @@ mod tests {
         assert_eq!(plan_log_merge(&files, 4), Some(2..4));
         assert_eq!(plan_log_merge(&files[4..], 4), Some(1..5));
 
-        // One merge takes as many files as the pass budget holds, and a merge needs at least
-        // two files.
+        // One merge takes as many files as the byte budget of a pass holds, and a merge needs at
+        // least two files.
         let files: Vec<LogFile> = (1..=200).map(|s| log_file(s, s, LARGE - 1)).collect();
         let run = plan_log_merge(&files, 8).expect("run");
         let bytes: u64 = files[run.clone()].iter().map(|file| file.size).sum();
@@ -5400,6 +5422,54 @@ mod tests {
         assert!(bytes <= LOG_MERGE_PASS_BYTES && bytes + LARGE > LOG_MERGE_PASS_BYTES);
         assert_eq!(plan_log_merge(&files[..2], 1), Some(0..2));
         assert_eq!(plan_log_merge(&files[..1], 1), None);
+    }
+
+    #[test]
+    fn log_merge_plan_takes_a_backlog_in_bounded_passes() {
+        // Four passes' worth of one-row files hold far less than the byte budget of one pass,
+        // so the file limit alone ends the first pass.
+        let mut files: Vec<LogFile> = (1..=4 * LOG_MERGE_PASS_FILES as u64)
+            .map(|sequence| log_file(sequence, sequence, 1250))
+            .collect();
+        assert_eq!(
+            plan_log_merge(&files, DEFAULT_LOG_MERGE_FILES),
+            Some(0..LOG_MERGE_PASS_FILES)
+        );
+
+        // Drain the backlog the way the merge worker does. Each pass leaves one small output in
+        // place of its inputs, and the next plan starts from that output.
+        while let Some(run) = plan_log_merge(&files, DEFAULT_LOG_MERGE_FILES) {
+            assert!(
+                run.len() <= LOG_MERGE_PASS_FILES,
+                "one pass must select at most {LOG_MERGE_PASS_FILES} files, selected {}",
+                run.len()
+            );
+            let output = LogFile {
+                start: files[run.start].start.clone(),
+                end: files[run.end - 1].end.clone(),
+                size: files[run.clone()].iter().map(|file| file.size).sum(),
+            };
+            files.splice(run, [output]);
+        }
+        assert!(
+            files.len() < DEFAULT_LOG_MERGE_FILES,
+            "the passes must drain the backlog below the trigger, left {} files",
+            files.len()
+        );
+
+        // Under a trigger above the pass limit, the newest run merges once it holds
+        // `LOG_MERGE_PASS_FILES` files.
+        let files: Vec<LogFile> = (1..=LOG_MERGE_PASS_FILES as u64)
+            .map(|sequence| log_file(sequence, sequence, 1250))
+            .collect();
+        assert_eq!(
+            plan_log_merge(&files, 2 * LOG_MERGE_PASS_FILES),
+            Some(0..LOG_MERGE_PASS_FILES)
+        );
+        assert_eq!(
+            plan_log_merge(&files[..LOG_MERGE_PASS_FILES - 1], 2 * LOG_MERGE_PASS_FILES),
+            None
+        );
     }
 
     #[tokio::test]
@@ -5429,7 +5499,7 @@ mod tests {
             assert_small_batches(&store, BATCHES).await;
         }
 
-        // The reopened store reads every row from the merged files.
+        // The reopened store reads every row, whether or not a merge rewrote its file.
         let store = open_merging(dir.path(), MERGE_FILES);
         assert_small_batches(&store, BATCHES).await;
 
@@ -5517,194 +5587,57 @@ mod tests {
                 .get_batch(u64::from(tag))
                 .await
                 .expect("get batch")
-                .expect("batch retained");
+                .expect("batch must be retained");
             assert_eq!(batch_entries(batch), large_batch(tag));
         }
     }
 
-    /// Live SST files of the state column family.
-    fn state_files(store: &RocksStore) -> usize {
-        store
-            .db
-            .live_files()
-            .expect("live files")
-            .into_iter()
-            .filter(|file| file.column_family_name == STATE_CF)
-            .count()
-    }
-
     #[tokio::test]
-    async fn small_groups_beyond_the_stored_keys_add_no_state_files() {
-        // Staged as files, sixty-four groups would leave sixty-four state files.
-        const BATCHES: u64 = 64;
-        let dir = tempdir().expect("tempdir");
-        {
-            let store = RocksStore::open(dir.path(), None).expect("open db");
-
-            // Each batch is one row under a key above every stored key. As a file, it would
-            // ingest straight into the bottom level beside the files of the batches before it.
-            for sequence in 1..=BATCHES {
-                store.put_batch(small_batch(sequence)).await.expect("put");
-            }
-            assert_eq!(state_files(&store), 0);
-
-            // A large group ingests a state file. Its keys sort below the batch rows in the
-            // memtable, so the ingestion leaves them there, and the next small group above its
-            // range is a batch too.
-            store.put_batch(large_batch(1)).await.expect("put");
-            assert_eq!(state_files(&store), 1);
-            store
-                .put_batch(small_batch(BATCHES + 2))
-                .await
-                .expect("put");
-            assert_eq!(state_files(&store), 1);
-
-            // A small group inside the range of the files is ingested as a file. Written to the
-            // memtable, it would force a flush before the next file that spans it.
-            let mut inside = large_batch(1).remove(5).0.to_vec();
-            inside.push(0);
-            store
-                .put_batch(vec![(Bytes::from(inside), Bytes::from_static(b"inside"))])
-                .await
-                .expect("put");
-            assert_eq!(state_files(&store), 2);
-        }
-
-        // The reopened store recovers the batch rows from the WAL, and a later group beyond the
-        // stored keys adds no state file either.
-        let store = RocksStore::open(dir.path(), None).expect("reopen db");
-        assert_eq!(store.current_sequence(), BATCHES + 3);
-        for sequence in (1..=BATCHES).chain([BATCHES + 2]) {
-            let (key, value) = small_batch(sequence).remove(0);
-            assert_eq!(
-                store.get_raw(&key).expect("get").as_deref(),
-                Some(&value[..])
-            );
-        }
-        let reopened = state_files(&store);
-        store
-            .put_batch(small_batch(BATCHES + 4))
-            .await
-            .expect("put");
-        assert_eq!(state_files(&store), reopened);
-
-        // Open rebuilds the span from the stored keys, so a small group inside it is staged as a
-        // file.
-        store.put_batch(small_batch(1)).await.expect("put");
-        assert_eq!(state_files(&store), reopened + 1);
-    }
-
-    #[tokio::test]
-    async fn newest_write_wins_across_batch_and_file_groups() {
+    async fn newest_write_wins_across_overlapping_state_files() {
         let dir = tempdir().expect("tempdir");
         let key = large_batch(7).remove(3).0;
         let small = |value: &'static [u8]| vec![(key.clone(), Bytes::from_static(value))];
         {
             let store = RocksStore::open(dir.path(), None).expect("open db");
 
-            // With no state file yet, the first write is a batch in the memtable.
+            // The first group's state file holds only that key.
             store.put_batch(small(b"first")).await.expect("put");
             assert_eq!(
                 store.get_raw(&key).expect("get").as_deref(),
                 Some(&b"first"[..])
             );
 
-            // The file covers a key still in the memtable and must land above it.
+            // A file that rewrites that key among many others must land above the first.
             store.put_batch(large_batch(7)).await.expect("put");
             assert_eq!(
                 store.get_raw(&key).expect("get").as_deref(),
                 Some(&[7u8; 4096][..])
             );
 
-            // A small write inside the file's range is staged as a file and lands above it.
+            // A file of that one key, inside the large file's key range, must land above it in
+            // turn.
             store.put_batch(small(b"last")).await.expect("put");
             assert_eq!(
                 store.get_raw(&key).expect("get").as_deref(),
                 Some(&b"last"[..])
             );
+
+            // A group with another key becomes the newest log row, so the reopen replays no
+            // write of this key.
+            store.put_batch(small_batch(4)).await.expect("put");
         }
 
         // The newest write survives a reopen.
         let store = RocksStore::open(dir.path(), None).expect("reopen db");
-        assert_eq!(store.current_sequence(), 3);
+        assert_eq!(store.current_sequence(), 4);
         assert_eq!(
             store.get_raw(&key).expect("get").as_deref(),
             Some(&b"last"[..])
         );
     }
 
-    #[tokio::test]
-    async fn small_group_state_batch_syncs_the_wal() {
-        let dir = tempdir().expect("tempdir");
-        let mut config = RocksConfig::default();
-        config.db_options.enable_statistics();
-
-        // The clone shares the database's statistics.
-        let statistics = config.db_options.clone();
-        let store = RocksStore::open(dir.path(), Some(config)).expect("open db");
-        let synced = || statistics.get_ticker_count(rocksdb::statistics::Ticker::WalFileSynced);
-
-        // The log row is ingested as a file and nothing else writes, so the state batch is
-        // the only WAL write of this Put.
-        let before = synced();
-        store.put_batch(small_batch(1)).await.expect("put");
-        assert_eq!(state_files(&store), 0);
-        assert!(
-            synced() > before,
-            "the state batch must sync the WAL before the Put is acknowledged"
-        );
-    }
-
     #[test]
-    fn open_rejects_options_that_break_wal_recovery() {
-        // A fresh store's options file is the template for the edited ones.
-        let source = tempdir().expect("tempdir");
-        drop(RocksStore::open(source.path(), None).expect("open db"));
-        let (name, options) = std::fs::read_dir(source.path())
-            .expect("read store directory")
-            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
-            .filter(|name| name.starts_with("OPTIONS-"))
-            .map(|name| {
-                let options = std::fs::read_to_string(source.path().join(&name)).expect("read");
-                (name, options)
-            })
-            .next()
-            .expect("options file");
-
-        // Neither option has a setter in the Rust bindings. They can only arrive in options
-        // loaded from a file.
-        for option in ["best_efforts_recovery", "avoid_flush_during_recovery"] {
-            let off = format!("{option}=false");
-            assert!(options.contains(&off), "{option}");
-            let edited = tempdir().expect("tempdir");
-            std::fs::write(
-                edited.path().join(&name),
-                options.replace(&off, &format!("{option}=true")),
-            )
-            .expect("write options file");
-            let (db_options, _) = Options::load_latest(
-                edited.path(),
-                rocksdb::Env::new().expect("env"),
-                true,
-                rocksdb::Cache::new_lru_cache(1 << 20),
-            )
-            .expect("load options");
-
-            // Opening a store with the edited options must fail and name the option.
-            let dir = tempdir().expect("tempdir");
-            let config = RocksConfig {
-                db_options,
-                ..Default::default()
-            };
-            let Err(error) = RocksStore::open(dir.path(), Some(config)) else {
-                panic!("{option} must fail open");
-            };
-            assert!(error.contains(option), "{error}");
-        }
-    }
-
-    #[test]
-    fn stale_batch_and_overlapping_file_keep_the_newest_write_and_old_snapshots() {
+    fn overlapping_state_files_keep_the_newest_write_and_old_snapshots() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
         let key = large_batch(7).remove(3).0;
@@ -5716,12 +5649,11 @@ mod tests {
                 .map(|value| value[..5].to_vec())
         };
 
-        // The overwrite is staged while no state file exists, so it is a batch even though
-        // the file committed before it covers its key.
+        // The stage workers can stage both groups before either commits. The overwrite commits
+        // after the file that covers its key.
         let file = prepared_write(&store, 0, large_batch(7));
         let overwrite =
             prepared_write(&store, 1, vec![(key.clone(), Bytes::from_static(b"newer"))]);
-        assert!(matches!(overwrite.state, StagedState::Batch(_)));
         assert_eq!(commit_and_apply(&store, file), 1);
         let after_file = OwnedRocksSnapshot::capture(store.db.clone(), &store.frontiers);
         assert_eq!(commit_and_apply(&store, overwrite), 2);
@@ -5730,10 +5662,9 @@ mod tests {
             Some(&b"newer"[..])
         );
 
-        // A file ingested over the key while it is still in the memtable lands above it.
-        let after_batch = OwnedRocksSnapshot::capture(store.db.clone(), &store.frontiers);
+        // Another file that covers the key lands above the overwrite.
+        let after_overwrite = OwnedRocksSnapshot::capture(store.db.clone(), &store.frontiers);
         let again = prepared_write(&store, 2, large_batch(7));
-        assert!(matches!(again.state, StagedState::File { .. }));
         assert_eq!(commit_and_apply(&store, again), 3);
         assert_eq!(
             store.get_raw(&key).expect("get").as_deref(),
@@ -5744,8 +5675,8 @@ mod tests {
         // writes.
         assert_eq!(after_file.sequence_number, 1);
         assert_eq!(read(&after_file), Some(vec![7u8; 5]));
-        assert_eq!(after_batch.sequence_number, 2);
-        assert_eq!(read(&after_batch), Some(b"newer".to_vec()));
+        assert_eq!(after_overwrite.sequence_number, 2);
+        assert_eq!(read(&after_overwrite), Some(b"newer".to_vec()));
     }
 
     #[tokio::test]
@@ -5768,7 +5699,7 @@ mod tests {
                     .get_batch(sequence)
                     .await
                     .expect("get batch")
-                    .unwrap_or_else(|| panic!("batch {sequence} retained"));
+                    .unwrap_or_else(|| panic!("batch {sequence} must be retained"));
                 assert_eq!(batch_entries(batch), small_batch(sequence));
                 assert_eq!(log_file_keys_present(&store, sequence), [true; 3]);
             }
@@ -5810,6 +5741,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn log_merge_joins_a_file_that_retention_cut_with_its_neighbor() {
+        let dir = tempdir().expect("tempdir");
+
+        // The default trigger is far above nine files, so the merge worker stays idle and the
+        // test runs each merge itself.
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        for sequence in 1..=8 {
+            store.put_batch(small_batch(sequence)).await.expect("put");
+        }
+        assert_eq!(merge_log_run(&store.db, 8), Ok(true));
+        store.put_batch(small_batch(9)).await.expect("put");
+        assert_eq!(log_files(&store).len(), 2);
+
+        // The cutoff, sequence 5, falls inside the merged file, and its tombstone is still in
+        // the memtable when the next merge compacts the run of two.
+        store
+            .set_retention(Some(RetentionPolicy::KeepLatest { count: 5 }))
+            .expect("set retention");
+
+        // One call joins the two files. A run of two that stayed two files would be planned
+        // again at every wake-up, ahead of every newer run.
+        assert_eq!(merge_log_run(&store.db, 2), Ok(true));
+        assert_eq!(log_files(&store).len(), 1);
+
+        // The merged file holds exactly the retained window.
+        assert_eq!(
+            store.oldest_retained_batch().await.expect("oldest"),
+            Some(5)
+        );
+        assert_eq!(log_file_keys_present(&store, 4), [false; 3]);
+        for sequence in 5..=9 {
+            let batch = store
+                .get_batch(sequence)
+                .await
+                .expect("get batch")
+                .unwrap_or_else(|| panic!("batch {sequence} must be retained"));
+            assert_eq!(batch_entries(batch), small_batch(sequence));
+            assert_eq!(log_file_keys_present(&store, sequence), [true; 3]);
+        }
+    }
+
+    #[tokio::test]
     async fn reopen_replays_newest_log_batch_missing_from_state() {
         let dir = tempdir().expect("tempdir");
         {
@@ -5820,8 +5793,8 @@ mod tests {
                 .expect("put");
 
             // Seed only sequence 2's durable log row, as a crash between its log ingestion and
-            // its state application would leave it. The reopened store must re-derive the
-            // frontier from the retained rows alone and replay the row into the state.
+            // its state ingestion would leave it. The reopened store must re-derive the frontier
+            // from the retained rows alone and replay the row into the state.
             let payload = StreamGetResponse {
                 sequence_number: 2,
                 entries: vec![
@@ -5967,7 +5940,11 @@ mod tests {
     fn staged_state_file_carries_key_filter() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
-        let group = prepared_write(&store, 0, large_batch(1));
+        let group = prepared_write(
+            &store,
+            0,
+            vec![(Bytes::from_static(b"a"), Bytes::from_static(b"value"))],
+        );
         assert_eq!(commit_and_apply(&store, group), 1);
 
         // The state CF holds only the one ingested file, since nothing has flushed or compacted.

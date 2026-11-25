@@ -554,8 +554,8 @@ describe('Exoware TS SDK', () => {
 
             await store.prune([policy]);
 
-            // A reply means the Store accepted the policy. It removes old versions later, so
-            // only the newest version of each group is checked.
+            // A reply means the Store has accepted the policy. It does not mean the older
+            // versions are gone, so the test checks only the newest version of each group.
             const a3 = await store.get(alphaV3);
             expect(a3).not.toBeNull();
             expect(Buffer.from(a3!.value)).toEqual(Buffer.from('a3'));
