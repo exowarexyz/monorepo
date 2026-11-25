@@ -306,8 +306,8 @@ impl Drop for Database {
         // Stopping background work ends every compaction, and a compaction destroys its
         // filter as it ends. A filter left holding `db` would otherwise close the database
         // on a compaction thread, from inside the compaction the close then waits for.
-        // Every store in the process shares RocksDB's thread pools, and the stop also waits
-        // for this database's queued jobs to leave them, so a close can wait for another
+        // Every store on one RocksDB environment shares its thread pools, and the stop also
+        // waits for this database's queued jobs to leave them, so a close can wait for another
         // store's compaction.
         self.db.cancel_all_background_work(true);
     }
@@ -602,9 +602,9 @@ fn compile_policies(policies: &[PrunePolicy]) -> Result<Arc<[CompiledPolicy]>, S
 
 /// The installed prune policies, shared by the Prune call and the state family's filters.
 //
-// The two locks are separate so that a filter never waits for an install. An install holds
-// `install` across a synced write, and that write can wait on a write stall that ends only
-// when state compactions run. Every state compaction builds a filter first.
+// The two locks are separate so that a filter never waits for an install's write. An install
+// holds `install` across a synced write, and that write can wait on a write stall that ends
+// only when state compactions run. Every state compaction builds a filter first.
 #[derive(Default)]
 struct PrunePolicies {
     /// Held by an install from its write of the meta row to its swap, so the row and `compiled`
@@ -703,10 +703,12 @@ impl CompactionFilterFactory for PruneFilterFactory {
 // finishes. They take only rows written before the request is answered, so a group can hold
 // fewer rows than a `KeepLatest` policy from the request would keep.
 //
-// Those rows stay live until the removals land. A second state compaction can run meanwhile
-// only with options above RocksDB's defaults. It counts those rows among the rows that follow a
-// key under the new `KeepLatest` policy, so it can remove a row the new policy alone would
-// keep, even one written after the request.
+// Those rows stay live until the removals land. Another filter can decide meanwhile only with
+// options above RocksDB's defaults, where `max_background_jobs` above two lets a second state
+// compaction run and `max_subcompactions` above one splits a compaction among several
+// filters. That filter counts those rows among the rows that follow a key under the new
+// `KeepLatest` policy, so it can remove a row the new policy alone would keep. A second
+// compaction can remove even one written after the request.
 struct PruneFilter {
     /// The store's policy cell, checked at every key for a new generation.
     shared: Arc<PrunePolicies>,
@@ -2041,9 +2043,13 @@ pub struct RocksConfig {
     ///
     /// RocksDB derives from `max_background_jobs` how many flushes and automatic compactions run
     /// at once. A running log merge counts as one of those compactions but does not wait for a
-    /// slot. `max_open_files` can be lower than the number of SST files. RocksDB closes the files
-    /// read least recently, and the log files are rarely read back. Below the number of state
-    /// files that reads probe, those reads reopen tables.
+    /// slot. With more than two jobs, or with `max_subcompactions` above one, several compaction
+    /// filters can run at once, and a request that replaces a `KeepLatest` policy can then cost
+    /// a group rows that the new policy keeps (see `PruneFilter`).
+    ///
+    /// `max_open_files` can be lower than the number of SST files. RocksDB closes the files read
+    /// least recently, and the log files are rarely read back. Below the number of state files
+    /// that reads probe, those reads reopen tables.
     ///
     /// A rate limiter throttles flushes and compactions, log merges included, but not the files a
     /// commit stages. It spreads a compaction over more time without reducing what it writes, so
@@ -4472,17 +4478,17 @@ mod tests {
     fn keep_latest_reads_each_policy_under_its_own_rule() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
-        let keep = RetainPolicy::KeepLatest { count: 2 };
         install(
             &store,
             vec![
-                versioned_policy(&[1], keep.clone()),
-                versioned_policy(&[2], keep),
+                versioned_policy(&[1], RetainPolicy::KeepLatest { count: 2 }),
+                versioned_policy(&[2], RetainPolicy::KeepLatest { count: 1 }),
             ],
         );
 
         // The last key of the first policy reads ahead into the keys of the second. The filter
-        // still decides those keys under the second policy's own rule.
+        // still decides those keys under the second policy's own rule, which keeps one row
+        // where the first policy's would keep two.
         let keys = [
             versioned_key(&[1], b"z", 1),
             versioned_key(&[2], b"a", 1),
@@ -4493,7 +4499,7 @@ mod tests {
             store.db.put(key, b"row").expect("put");
         }
         let mut filter = filter_over(&store.prune);
-        assert_eq!(removed(&mut filter, &keys), [keys[1].clone()]);
+        assert_eq!(removed(&mut filter, &keys), keys[1..3]);
     }
 
     #[test]
@@ -4586,10 +4592,13 @@ mod tests {
         store.db.write(batch).expect("write");
 
         // Every version but the last is removed, across the point where the filter drops its
-        // cursor for a fresh one.
+        // cursor for a fresh one. The walk seeks once when it opens its first cursor and once
+        // more when it opens the fresh one.
         let mut filter = filter_over(&store.prune);
-        assert_eq!(removed(&mut filter, &keys), keys[..keys.len() - 1]);
-        assert!(filter.ahead.as_ref().expect("cursor must be open").age < READ_AHEAD_REFRESH_KEYS);
+        let mut gone = Vec::new();
+        let (_, seeks) = cursor_work(|| gone = removed(&mut filter, &keys));
+        assert_eq!(gone, keys[..keys.len() - 1]);
+        assert_eq!(seeks, 2);
     }
 
     #[test]
@@ -5128,10 +5137,20 @@ mod tests {
         );
         assert_eq!(live(), [3, 4, 5, 6, 7]);
 
-        // Versions 1 and 2 arrive late, and sixteen more files start a second compaction
-        // beside the first. The second counts versions 3 and 4 as the rows behind versions 1
-        // and 2, though the first is removing them. It removes versions 1 and 2 and finishes
-        // first.
+        // A request replaces the policy with one that keeps the latest five. The removals the
+        // first compaction has decided still land when it finishes.
+        install(
+            &store,
+            vec![versioned_policy(
+                &[1],
+                RetainPolicy::KeepLatest { count: 5 },
+            )],
+        );
+
+        // Versions 1 and 2 arrive after the request, and sixteen more files start a second
+        // compaction beside the first. Five rows follow version 1 and five follow version 2
+        // only with versions 3, 4 and 5 among them, which the first compaction is removing.
+        // The second counts them, removes versions 1 and 2 and finishes first.
         commit(vec![
             rewrite.clone(),
             (key(1), row.clone()),
@@ -5146,7 +5165,8 @@ mod tests {
             "the second compaction must remove versions 1 and 2",
         );
 
-        // The first compaction finishes, and the group holds only its latest two rows.
+        // The first compaction finishes, and the group holds two rows where the new policy
+        // keeps five.
         drop(aged_gate);
         store
             .db
@@ -5873,7 +5893,7 @@ mod tests {
             );
         }
 
-        // A second reopen replays again (the floor only advances on prune); idempotent.
+        // A second reopen replays again (only a log trim advances the floor); idempotent.
         drop(store);
         let store = RocksStore::open(dir.path(), None).expect("reopen db again");
         assert_eq!(store.current_sequence(), 2);
