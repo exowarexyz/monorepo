@@ -2134,6 +2134,13 @@ impl RocksStore {
         self.enforce_retention()
     }
 
+    /// Compacts the whole state column family, memtable included, and returns once RocksDB has
+    /// rewritten it. This is a test tool, and the store never calls it.
+    #[doc(hidden)]
+    pub fn compact_state(&self) {
+        self.db.compact_range(None::<&[u8]>, None::<&[u8]>);
+    }
+
     /// Commits a batch and returns its sequence number. Queued batches may share a sequence.
     pub async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
         // Dedicated writer threads keep blocking storage writes off Tokio workers.

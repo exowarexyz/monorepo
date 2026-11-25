@@ -16,17 +16,35 @@ use exoware_sdk::{
     PreferZstdHttpClient, PrefixedStoreClient, RangeMode, RangeReduceOp, RangeReduceRequest,
     RangeReducerSpec, RetryConfig, StoreClient,
 };
+use exoware_simulator::RocksStore;
 use futures::StreamExt;
 
 /// Spawns a local simulator and returns a client for it plus the base URL.
 async fn spawn_client() -> (PrefixedStoreClient, String) {
-    let (_task, url) = exoware_simulator::open_temp().await.expect("open_temp");
+    let (client, url, _store) = spawn_client_with_store().await;
+    (client, url)
+}
+
+/// Spawns a local simulator and returns a client for it, the base URL, and the store behind it.
+async fn spawn_client_with_store() -> (PrefixedStoreClient, String, RocksStore) {
+    let (_task, url, store) = exoware_simulator::open_temp_with_store()
+        .await
+        .expect("open_temp_with_store");
     let client = StoreClient::builder()
         .url(&url)
         .retry_config(RetryConfig::disabled())
         .build()
         .expect("build client");
-    (PrefixedStoreClient::empty(client), url)
+    (PrefixedStoreClient::empty(client), url, store)
+}
+
+/// Compacts the store's state. A prune reply does not promise that the pruned rows are gone, so
+/// the prune tests compact before they read.
+async fn compact_state(store: &RocksStore) {
+    let store = store.clone();
+    tokio::task::spawn_blocking(move || store.compact_state())
+        .await
+        .expect("compact state");
 }
 
 fn key(b: &[u8]) -> Key {
@@ -366,7 +384,7 @@ async fn reduce_sum_int64() {
 
 #[tokio::test]
 async fn prune_drop_all_removes_keys() {
-    let (client, url) = spawn_client().await;
+    let (client, url, store) = spawn_client_with_store().await;
 
     let prefix = Prefix::from_byte(1);
     let ka = prefix.encode(b"aaa").expect("encode key a");
@@ -414,6 +432,7 @@ async fn prune_drop_all_removes_keys() {
         })
         .await
         .expect("prune");
+    compact_state(&store).await;
 
     // All keys in this prefix should be gone
     assert!(client.query().get(&ka).await.expect("get a").is_none());
@@ -518,7 +537,7 @@ async fn get_with_min_sequence_number() {
 
 #[tokio::test]
 async fn prune_keep_latest_retains_newest() {
-    let (client, url) = spawn_client().await;
+    let (client, url, store) = spawn_client_with_store().await;
 
     let prefix = Prefix::from_byte(2);
     // Keys: prefix(family=2) + logical(3 bytes) + \x00\x00 + version(8 bytes big-endian u64)
@@ -591,6 +610,7 @@ async fn prune_keep_latest_retains_newest() {
         })
         .await
         .expect("prune keep_latest");
+    compact_state(&store).await;
 
     // Only the newest version of group "aaa" (version=3) should survive
     assert!(client.query().get(&k_a1).await.expect("get a1").is_none());
@@ -732,7 +752,7 @@ async fn reduce_grouped_count() {
 
 #[tokio::test]
 async fn store_client_prune_drop_all() {
-    let (client, _url) = spawn_client().await;
+    let (client, _url, store) = spawn_client_with_store().await;
 
     let prefix = Prefix::from_byte(5);
     let ka = prefix.encode(b"pa").expect("encode");
@@ -759,6 +779,7 @@ async fn store_client_prune_drop_all() {
         }])
         .await
         .expect("prune");
+    compact_state(&store).await;
 
     assert!(client.query().get(&ka).await.expect("get").is_none());
     assert!(client.query().get(&kb).await.expect("get").is_none());
@@ -768,7 +789,7 @@ async fn store_client_prune_drop_all() {
 
 #[tokio::test]
 async fn prune_greater_than_retains_above_threshold() {
-    let (client, url) = spawn_client().await;
+    let (client, url, store) = spawn_client_with_store().await;
 
     let prefix = Prefix::from_byte(3);
     let make_key = |logical: &[u8; 2], version: u64| -> Key {
@@ -831,6 +852,7 @@ async fn prune_greater_than_retains_above_threshold() {
         })
         .await
         .expect("prune greater_than");
+    compact_state(&store).await;
 
     assert!(client.query().get(&k_a10).await.expect("get a10").is_none());
     assert!(client.query().get(&k_a20).await.expect("get a20").is_some());

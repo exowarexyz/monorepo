@@ -50,14 +50,20 @@ type QmdbConnectClient =
 
 /// Spawns a local simulator and returns a client for it.
 async fn local_store_client() -> StoreClient {
-    let (_task, url) = exoware_simulator::open_temp()
+    local_store_client_with_store().await.0
+}
+
+/// Spawns a local simulator and returns a client for it and the store behind it.
+async fn local_store_client_with_store() -> (StoreClient, exoware_simulator::RocksStore) {
+    let (_task, url, store) = exoware_simulator::open_temp_with_store()
         .await
         .expect("spawn simulator");
-    StoreClient::builder()
+    let client = StoreClient::builder()
         .url(&url)
         .retry_config(RetryConfig::disabled())
         .build()
-        .expect("build store client")
+        .expect("build store client");
+    (client, store)
 }
 
 async fn health() -> &'static str {
@@ -766,7 +772,7 @@ async fn test_prefixed_prune_composes_selector_and_prunes_cleanly() {
     // onto the logical selector (prefix_prune_policies), and the store
     // reconstructs a codec from the MERGED selector (apply_key_prune_policy) and
     // strips.
-    let base = local_store_client().await;
+    let (base, store) = local_store_client_with_store().await;
     let client = base.prefixed(StoreKeyPrefix::new(vec![0x05, 0x06]).unwrap());
 
     // LOGICAL keys carry the logical family prefix 0x07 and the versioned-payload
@@ -827,6 +833,12 @@ async fn test_prefixed_prune_composes_selector_and_prunes_cleanly() {
     // (prefix_prune_policies), and the server reconstructs a codec from the merged
     // selector and strips.
     client.prune().prune(&[policy]).await.expect("prune");
+
+    // A prune reply does not promise that the pruned rows are gone, so compact the state
+    // before reading.
+    tokio::task::spawn_blocking(move || store.compact_state())
+        .await
+        .expect("compact state");
 
     // Verified through the prefixed client (which strips the store prefix
     // transparently). Because KeepLatest grouping depends on the server stripping

@@ -75,11 +75,19 @@ pub async fn run(
 /// ([`RocksStore::open_owned`]), deleted only after the database has fully closed.
 pub async fn open_temp(
 ) -> Result<(tokio::task::JoinHandle<()>, String), Box<dyn std::error::Error + Send + Sync>> {
+    let (handle, url, _store) = open_temp_with_store().await?;
+    Ok((handle, url))
+}
+
+/// Like [`open_temp`], and also returns the store behind the server, for tests that need what
+/// the API does not expose.
+pub async fn open_temp_with_store() -> Result<
+    (tokio::task::JoinHandle<()>, String, RocksStore),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
     let data_dir = tempfile::tempdir()?;
-    let app = app(RocksStore::open_owned(
-        data_dir,
-        Some(store_config(DEFAULT_MAX_OPEN_FILES)),
-    )?);
+    let store = RocksStore::open_owned(data_dir, Some(store_config(DEFAULT_MAX_OPEN_FILES)))?;
+    let app = app(store.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await?
         .tap_io(set_tcp_nodelay);
@@ -90,7 +98,7 @@ pub async fn open_temp(
             exoware_server::ingest::transport::serve(listener, app, std::future::pending()).await;
     });
     wait_for_health(&url).await?;
-    Ok((handle, url))
+    Ok((handle, url, store))
 }
 
 /// Poll until `GET {base}/health` succeeds (same contract as production query workers).

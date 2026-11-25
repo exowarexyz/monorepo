@@ -1,5 +1,8 @@
 //! Contract tests for RocksDB simulator pruning (user-key scopes via `Prune`) and sequence-log
 //! retention (continuously enforced via `Retention`/`SetRetention`).
+//!
+//! A prune reply does not promise that the pruned rows are gone, so each key-prune test compacts
+//! the state between the prune and its reads.
 
 use bytes::Bytes;
 use exoware_sdk::{
@@ -126,6 +129,7 @@ fn keys_drop_all_deletes_matching_family_keys() {
     );
 
     apply_prune(&store, &[version_policy(RetainPolicy::DropAll)]);
+    store.compact_state();
 
     assert!(get_value(&store, &a1).is_none());
     assert!(get_value(&store, &b1).is_none());
@@ -155,6 +159,7 @@ fn keys_keep_latest_deletes_old_versions_without_advancing_sequence() {
         &store,
         &[version_policy(RetainPolicy::KeepLatest { count: 1 })],
     );
+    store.compact_state();
 
     assert!(get_value(&store, &v1).is_none());
     assert!(get_value(&store, &v2).is_none());
@@ -181,14 +186,17 @@ fn key_prune_is_idempotent_when_reapplied() {
         ],
     );
     let policy = version_policy(RetainPolicy::KeepLatest { count: 1 });
+    let rows = |store: &RocksStore| [&v1, &v2, &v3].map(|key| get_value(store, key));
+    let pruned = [None, None, Some(Bytes::from_static(b"v3"))];
 
     apply_prune(&store, std::slice::from_ref(&policy));
+    store.compact_state();
+    assert_eq!(rows(&store), pruned);
     let sequence_after_first_prune = store.current_sequence();
-    apply_prune(&store, &[policy]);
 
-    assert!(get_value(&store, &v1).is_none());
-    assert!(get_value(&store, &v2).is_none());
-    assert_eq!(get_value(&store, &v3).as_deref(), Some(b"v3".as_slice()));
+    apply_prune(&store, &[policy]);
+    store.compact_state();
+    assert_eq!(rows(&store), pruned);
     assert_eq!(sequence_after_first_prune, initial_sequence);
     assert_eq!(store.current_sequence(), sequence_after_first_prune);
     assert!(block_on(store.get_batch(sequence_after_first_prune + 1))
@@ -218,6 +226,7 @@ fn keys_threshold_retains_greater_than_or_equal_versions() {
             threshold: 4,
         })],
     );
+    store.compact_state();
 
     assert!(get_value(&store, &v3).is_none());
     assert_eq!(get_value(&store, &v4).as_deref(), Some(b"v4".as_slice()));
@@ -383,6 +392,7 @@ fn keys_prune_and_retention_compose() {
             &store,
             &[version_policy(RetainPolicy::KeepLatest { count: 1 })],
         );
+        store.compact_state();
         assert_eq!(
             set_retention(&store, Some(RetentionPolicy::KeepLatest { count: 1 })),
             Some(last)
@@ -465,6 +475,7 @@ fn key_pruned_state_survives_reopen_when_versions_share_a_batch() {
             &store,
             &[version_policy(RetainPolicy::KeepLatest { count: 1 })],
         );
+        store.compact_state();
         assert!(get_value(&store, &v1).is_none());
         assert!(get_value(&store, &v2).is_none());
         (v1, v2, v3)
