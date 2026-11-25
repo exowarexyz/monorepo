@@ -22,11 +22,11 @@ async fn health() -> &'static str {
 /// Default for `--max-open-files`.
 pub const DEFAULT_MAX_OPEN_FILES: i32 = 16_384;
 
-/// Store options for the served simulator. Every commit group adds a log SST that stays until a
-/// merge compacts it and a state SST that stays until a compaction merges it. RocksDB's open
-/// tables are capped at `max_open_files` in case either falls behind. Under pressure the table
-/// cache closes the rarely read log files and keeps the state files every point read probes.
-/// The process open-file limit must cover the cap.
+/// Store options for the served simulator. Every commit group adds a log SST and a state SST. The
+/// log merge and state compaction reduce their number in the background, and RocksDB's open tables
+/// are capped at `max_open_files` in case either falls behind. Under pressure the table cache
+/// closes the rarely read log files and keeps the state files every point read probes. The process
+/// open-file limit must cover the cap.
 fn store_config(max_open_files: i32) -> RocksConfig {
     if let Ok(limit) = rlimit::Resource::NOFILE.get_soft() {
         if limit <= max_open_files as u64 {

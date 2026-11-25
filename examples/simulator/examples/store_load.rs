@@ -127,9 +127,10 @@ fn certificate(height: u64) -> Vec<(Bytes, Bytes)> {
 }
 
 /// A block's publication barrier, shaped like the chain indexer's publication request for one
-/// block. It holds the watermarks of the account-state and transaction QMDBs, with the block
-/// height standing in for both operation locations, and the block's target, a 32-byte digest
-/// keyed by the height.
+/// block. Its keys run from the QMDB watermarks to the target, so its state file overlaps the
+/// stored rows, as the indexer's does. It holds a watermark row for each of the account-state and
+/// transaction QMDBs and the block's 32-byte target. The block height stands in for both operation
+/// locations and keys the target.
 fn barrier(height: u64) -> Vec<(Bytes, Bytes)> {
     let key = |prefix: &[u8]| Bytes::from([prefix, &height.to_be_bytes()].concat());
     vec![
@@ -320,12 +321,19 @@ async fn run_verify(store: RocksStore, dir: &Path) {
             .into_iter()
             .map(|entry| (Bytes::from(entry.key), entry.value))
             .collect();
-        assert_eq!(logged, rows, "log row of sequence {sequence}");
+        assert_eq!(
+            logged, rows,
+            "the log row of sequence {sequence} must equal the rows of that Put"
+        );
 
         // Each row must read back from the state as written.
         for (key, value) in rows {
             let stored = store.get(key).await.expect("get").value;
-            assert_eq!(stored, Some(value), "state of sequence {sequence}");
+            assert_eq!(
+                stored,
+                Some(value),
+                "the state of sequence {sequence} must hold the rows of that Put"
+            );
         }
     }
     eprintln!(
@@ -387,7 +395,7 @@ async fn run_mixed(
         }
     }
 
-    // Closing the channel stops each writer at its next Put. A writer that panicked fails the
+    // Closing the channel stops each writer after its next Put. A writer that panicked fails the
     // run, because the Puts of its unfinished block are missing from the report.
     drop(latencies);
     while let Some(writer) = tasks.join_next().await {

@@ -44,8 +44,8 @@ fn open(path: &Path) -> RocksStore {
     .expect("open store")
 }
 
-/// The rows of the batch committed as `sequence`, `ROWS` rows of `VALUE_LEN` bytes. A merge has
-/// that much to copy for each log file, so a kill has time to land inside it.
+/// The `ROWS` rows of `VALUE_LEN` bytes committed as `sequence`. Each log file gives a merge
+/// that much to copy, so a kill has time to land inside the merge.
 fn batch(sequence: u64) -> Vec<(Bytes, Bytes)> {
     (0..ROWS)
         .map(|row| {
@@ -170,10 +170,18 @@ async fn killed_writer_reopens_with_every_acknowledged_row() {
                 .into_iter()
                 .map(|entry| (Bytes::from(entry.key), entry.value))
                 .collect();
-            assert_eq!(logged, batch(sequence), "round {round}: batch {sequence}");
+            assert_eq!(
+                logged,
+                batch(sequence),
+                "round {round}: the log row of batch {sequence} must match what was written"
+            );
             for (key, value) in batch(sequence) {
                 let stored = store.get(key).await.expect("get").value;
-                assert_eq!(stored, Some(value), "round {round}: state of {sequence}");
+                assert_eq!(
+                    stored,
+                    Some(value),
+                    "round {round}: the state of batch {sequence} must match what was written"
+                );
             }
         }
         assert!(
