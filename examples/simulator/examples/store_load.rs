@@ -1,26 +1,31 @@
-//! Load driver for the RocksDB store. It records Put latency and the number of live SST files
-//! against the commit count, which is how a per-commit cost that grows with the store's file
-//! count shows up.
+//! Load driver for the RocksDB store. It reports Put latency and the SST file count as the
+//! commit count grows, so a per-commit cost that grows with the file count shows up as rising
+//! latency.
 //!
 //! Run with
 //! `LOAD_DIR=<empty dir> cargo run --release -p exoware-simulator --example store_load`.
 //!
-//! `LOAD_MODE=small` (the default) issues one Put at a time, shaped like a chain indexer
-//! following empty blocks. Each block is a few SQL and QMDB rows, a certificate, and a tiny
-//! publication barrier, each as its own Put. `LOAD_MODE=mixed` adds a Put of `LOAD_BLOCK_ROWS`
-//! 90-byte rows per block (default 14,000, which is 1.26 MB) and issues blocks from
-//! `LOAD_WRITERS` tasks (default 4) at once.
-//! `LOAD_COMMITS` is the number of Puts (default 100,000), `LOAD_WINDOW` the number of
-//! Puts per output row (default 1,000), and `LOAD_MAX_GIB` the on-disk size at which the run
-//! aborts (default 15). `LOAD_MERGE_FILES` is the number of commit groups between log file
-//! merges (default 1,024). The store otherwise uses the chain indexer's settings.
-//! `LOAD_SLOW_MS`, when set, reports every Put slower than that on stderr with the wall-clock
-//! time it finished, to line up with the RocksDB info log. `LOAD_BACKGROUND_JOBS`, when set,
-//! overrides RocksDB's `max_background_jobs`, and `LOAD_SUBCOMPACTIONS` its `max_subcompactions`.
+//! `LOAD_MODE` picks the workload:
 //!
-//! `LOAD_MODE=verify` writes nothing. It opens a store that a `small` run filled and checks
-//! that every sequence is in the log and in the state exactly as that run wrote it, then
-//! prints the SST file count before and after the checks.
+//! - `small` (the default) issues one Put at a time, shaped like a chain indexer following empty
+//!   blocks. Each block is three Puts: twelve SQL and QMDB rows, a certificate, and a tiny
+//!   publication barrier.
+//! - `mixed` makes the first Put of each block `LOAD_BLOCK_ROWS` rows of 90 bytes (default
+//!   14,000, or 1.26 MB) and issues blocks from `LOAD_WRITERS` tasks at once (default 4).
+//! - `verify` issues no Puts. It opens a store that a `small` run filled, checks that every
+//!   sequence is in the log and in the state exactly as that run wrote it, and prints the SST
+//!   file count before and after the checks.
+//!
+//! The other settings are:
+//!
+//! - `LOAD_COMMITS`, the number of Puts (default 100,000).
+//! - `LOAD_WINDOW`, the number of Puts per output row (default 1,000).
+//! - `LOAD_MAX_GIB`, the on-disk size at which the run stops (default 15).
+//! - `LOAD_MERGE_FILES`, the store's `log_merge_files` (default 1,024).
+//! - `LOAD_SLOW_MS`, when set, reports every Put slower than that many milliseconds on stderr
+//!   with a wall-clock timestamp, to line up with the RocksDB info log.
+//! - `LOAD_BACKGROUND_JOBS` and `LOAD_SUBCOMPACTIONS`, when set, override RocksDB's
+//!   `max_background_jobs` and `max_subcompactions`.
 //!
 //! Each output row is
 //! `commits,elapsed_s,puts_per_s,mean_us,p50_us,p99_us,max_us,sst_files,disk_mib`.
@@ -40,20 +45,23 @@ use std::{
 };
 use tokio::sync::mpsc;
 
+// Key namespaces of the chain indexer's rows.
 const NS_QMDB: u8 = 0x00;
 const NS_SIMPLEX: u8 = 0x02;
 const NS_SQL: u8 = 0x03;
 const NS_TARGET: u8 = 0x04;
 
+/// Reads setting `name` from the environment, or `default` when it is unset.
 fn setting<T: std::str::FromStr>(name: &str, default: T) -> T {
     match std::env::var(name) {
         Ok(raw) => raw
             .parse()
-            .unwrap_or_else(|_| panic!("{name} is not a valid value: {raw}")),
+            .unwrap_or_else(|_| panic!("{name} must be a valid value, got {raw}")),
         Err(_) => default,
     }
 }
 
+/// SplitMix64's output for state `x`.
 const fn mix(mut x: u64) -> u64 {
     x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
     x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -61,7 +69,7 @@ const fn mix(mut x: u64) -> u64 {
     x ^ (x >> 31)
 }
 
-/// A value of `len` bytes that does not repeat across rows.
+/// A pseudo-random value of `len` bytes derived from `seed`.
 fn value(seed: u64, len: usize) -> Bytes {
     let mut out = Vec::with_capacity(len + 8);
     let mut word = seed;
@@ -83,7 +91,7 @@ fn ordered_key(namespace: u8, height: u64, row: u64) -> Bytes {
     Bytes::from(key)
 }
 
-/// A digest-like key in `namespace`, spread over the whole key space.
+/// A digest-like key in `namespace`, spread uniformly over it.
 fn digest_key(namespace: u8, height: u64, row: u64) -> Bytes {
     let mut key = Vec::with_capacity(33);
     key.push(namespace);
@@ -95,7 +103,7 @@ fn digest_key(namespace: u8, height: u64, row: u64) -> Bytes {
     Bytes::from(key)
 }
 
-/// A block's rows, half ordered SQL rows and half digest-keyed QMDB rows.
+/// A block's rows, alternating ordered SQL rows and digest-keyed QMDB rows.
 fn block_rows(height: u64, rows: u64, value_len: usize) -> Vec<(Bytes, Bytes)> {
     (0..rows)
         .map(|row| {
@@ -109,10 +117,12 @@ fn block_rows(height: u64, rows: u64, value_len: usize) -> Vec<(Bytes, Bytes)> {
         .collect()
 }
 
+/// A block's certificate, one 400-byte row.
 fn certificate(height: u64) -> Vec<(Bytes, Bytes)> {
     vec![(ordered_key(NS_SIMPLEX, height, 0), value(!height, 400))]
 }
 
+/// A block's publication barrier, one row holding the block height.
 fn barrier(height: u64) -> Vec<(Bytes, Bytes)> {
     vec![(
         ordered_key(NS_TARGET, height, 0),
@@ -120,7 +130,8 @@ fn barrier(height: u64) -> Vec<(Bytes, Bytes)> {
     )]
 }
 
-/// Live SST files and total bytes under the store directory, staging files excluded.
+/// SST files and total bytes of the files in the store directory. The staging subdirectory is
+/// not counted.
 fn disk_usage(dir: &Path) -> (usize, u64) {
     let mut files = 0;
     let mut bytes = 0;
@@ -142,6 +153,7 @@ fn disk_usage(dir: &Path) -> (usize, u64) {
     (files, bytes)
 }
 
+/// Collects Put latencies and prints one output row per window of Puts.
 struct Report {
     dir: PathBuf,
     window: usize,
@@ -173,10 +185,12 @@ impl Report {
     /// has outgrown the disk cap.
     fn record(&mut self, latency: Duration) -> bool {
         self.commits += 1;
+
+        // A slow Put is reported with the wall-clock time, to line up with the RocksDB info log.
         if self.slow.is_some_and(|slow| latency > slow) {
             let finished = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock is after the epoch");
+                .expect("the clock must be after the Unix epoch");
             eprintln!(
                 "slow put {} finished at {}.{:06} after {} ms",
                 self.commits,
@@ -185,6 +199,8 @@ impl Report {
                 latency.as_millis()
             );
         }
+
+        // Latencies accumulate until the window is full, and then one row summarizes it.
         self.latencies.push(latency.as_micros() as u64);
         if self.latencies.len() < self.window {
             return true;
@@ -211,15 +227,23 @@ impl Report {
     }
 }
 
+/// Opens the store with the load driver's settings and the environment's overrides.
 fn open(dir: &Path, log_merge_files: usize) -> RocksStore {
     let mut db_options = Options::default();
     db_options.set_max_open_files(16_384);
     db_options.set_max_subcompactions(8);
     if let Ok(jobs) = std::env::var("LOAD_BACKGROUND_JOBS") {
-        db_options.set_max_background_jobs(jobs.parse().expect("LOAD_BACKGROUND_JOBS"));
+        db_options.set_max_background_jobs(
+            jobs.parse()
+                .expect("LOAD_BACKGROUND_JOBS must be an integer"),
+        );
     }
     if let Ok(threads) = std::env::var("LOAD_SUBCOMPACTIONS") {
-        db_options.set_max_subcompactions(threads.parse().expect("LOAD_SUBCOMPACTIONS"));
+        db_options.set_max_subcompactions(
+            threads
+                .parse()
+                .expect("LOAD_SUBCOMPACTIONS must be an integer"),
+        );
     }
     db_options.set_bytes_per_sync(8 * 1024 * 1024);
     db_options.set_compaction_readahead_size(8 * 1024 * 1024);
@@ -230,12 +254,14 @@ fn open(dir: &Path, log_merge_files: usize) -> RocksStore {
             max_commit_batch_bytes: NonZeroUsize::new(256 * 1024 * 1024).expect("nonzero"),
             stage_workers: four,
             max_queued_waves: four,
-            log_merge_files: NonZeroUsize::new(log_merge_files).expect("LOAD_MERGE_FILES is zero"),
+            log_merge_files: NonZeroUsize::new(log_merge_files)
+                .expect("LOAD_MERGE_FILES must be nonzero"),
         },
     };
     RocksStore::open(dir, Some(config)).expect("open store")
 }
 
+/// Puts `rows` and returns how long the Put took.
 async fn timed_put(store: &RocksStore, rows: Vec<(Bytes, Bytes)>) -> Duration {
     let start = Instant::now();
     store.put_batch(rows).await.expect("put");
@@ -271,12 +297,13 @@ async fn run_verify(store: RocksStore, dir: &Path) {
         disk_usage(dir).0
     );
     for sequence in 1..=newest {
+        // The log row must hold exactly the rows that Put wrote.
         let rows = small_rows(sequence - 1);
         let logged = store
             .get_batch(sequence)
             .await
             .expect("get batch")
-            .unwrap_or_else(|| panic!("sequence {sequence} is missing from the log"))
+            .unwrap_or_else(|| panic!("sequence {sequence} must be in the log"))
             .decode_response()
             .expect("decode batch");
         let logged: Vec<_> = logged
@@ -285,6 +312,8 @@ async fn run_verify(store: RocksStore, dir: &Path) {
             .map(|entry| (Bytes::from(entry.key), entry.value))
             .collect();
         assert_eq!(logged, rows, "log row of sequence {sequence}");
+
+        // Each row must read back from the state as written.
         for (key, value) in rows {
             let stored = store.get(key).await.expect("get").value;
             assert_eq!(stored, Some(value), "state of sequence {sequence}");
@@ -308,7 +337,11 @@ async fn run_mixed(
     let blocks = (commits as u64).div_ceil(3);
     let next = Arc::new(AtomicU64::new(0));
     let (sender, mut latencies) = mpsc::unbounded_channel();
+
+    // A 90-byte row is a 33-byte key and a 57-byte value.
     let value_len = 90 - 33;
+
+    // Each writer claims the next block height until every block is issued.
     for _ in 0..writers {
         let store = store.clone();
         let next = next.clone();
@@ -319,6 +352,8 @@ async fn run_mixed(
                 if height >= blocks {
                     return;
                 }
+
+                // Building a block is CPU work, so it runs off the async threads.
                 let rows = tokio::task::spawn_blocking(move || {
                     block_rows(height, rows_per_block, value_len)
                 })
@@ -332,6 +367,8 @@ async fn run_mixed(
             }
         });
     }
+
+    // Only the writers hold senders after this drop, so the channel closes when they finish.
     drop(sender);
     while let Some(latency) = latencies.recv().await {
         if !report.record(latency) {
@@ -342,7 +379,7 @@ async fn run_mixed(
 }
 
 fn main() {
-    let dir = PathBuf::from(std::env::var("LOAD_DIR").expect("LOAD_DIR is required"));
+    let dir = PathBuf::from(std::env::var("LOAD_DIR").expect("LOAD_DIR must be set"));
     let mode = setting("LOAD_MODE", "small".to_string());
     let commits = setting("LOAD_COMMITS", 100_000usize);
     let window = setting("LOAD_WINDOW", 1_000usize);
@@ -352,7 +389,7 @@ fn main() {
     let rows_per_block = setting("LOAD_BLOCK_ROWS", 14_000u64);
     let slow = std::env::var("LOAD_SLOW_MS")
         .ok()
-        .map(|raw| Duration::from_millis(raw.parse().expect("LOAD_SLOW_MS is not a number")));
+        .map(|raw| Duration::from_millis(raw.parse().expect("LOAD_SLOW_MS must be an integer")));
 
     // The store may keep thousands of table files open.
     rlimit::increase_nofile_limit(u64::MAX).expect("raise the open-file limit");
@@ -370,7 +407,7 @@ fn main() {
             "small" => run_small(store.clone(), commits, report).await,
             "mixed" => run_mixed(store.clone(), commits, writers, rows_per_block, report).await,
             "verify" => run_verify(store.clone(), &dir).await,
-            other => panic!("unknown LOAD_MODE {other}"),
+            other => panic!("LOAD_MODE must be small, mixed, or verify, got {other}"),
         }
         let (files, bytes) = disk_usage(&dir);
         eprintln!(

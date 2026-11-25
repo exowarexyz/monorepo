@@ -1,11 +1,10 @@
-//! Kills a writing store while its log files are being merged and checks that the reopened
-//! store still holds every row.
+//! Kills a writing store at commits that wake its log merge and checks that the reopened store
+//! holds every acknowledged row.
 //!
 //! The writer is this test binary run again as a child process, so the kill is a real process
 //! crash at a point the test does not choose. It can land inside an ingestion, inside a
-//! merge, or between the two. A kill leaves the operating system's page cache intact, so this
-//! covers crash consistency of the engine's own steps and not what a power loss does to
-//! unsynced files.
+//! merge, or between the two. A kill leaves the operating system's page cache intact, so the
+//! test covers the crash consistency of the engine's own steps, not a power loss.
 
 use bytes::Bytes;
 use exoware_server::{Log, Query, Sequence};
@@ -20,10 +19,17 @@ use std::{
 
 /// Set for the child process to the directory it writes to.
 const WRITER_DIR: &str = "LOG_MERGE_CRASH_WRITER_DIR";
+
+/// Commit groups between log merges, low so that the writer merges often.
 const MERGE_FILES: usize = 8;
+
+/// Rows in each large batch.
 const ROWS: u64 = 4;
+
+/// Bytes of each value in a large batch.
 const VALUE_LEN: usize = 64 * 1024;
 
+/// Opens the store with a merge every `MERGE_FILES` commit groups.
 fn open(path: &Path) -> RocksStore {
     RocksStore::open(
         path,
@@ -38,9 +44,10 @@ fn open(path: &Path) -> RocksStore {
     .expect("open store")
 }
 
-/// The rows of the batch committed as `sequence`. Even sequences are large enough that a
-/// merge takes a while and that their state is ingested as a file, and odd ones are small
-/// enough that their state is written as a batch.
+/// The rows of the batch committed as `sequence`. Even sequences carry `ROWS` rows of
+/// `VALUE_LEN` bytes, too many for a state batch, so their state is ingested as a file and
+/// their log files give a merge more bytes to copy. Odd sequences carry one small row above
+/// every earlier key, so their state is written as a batch.
 fn batch(sequence: u64) -> Vec<(Bytes, Bytes)> {
     let (rows, value_len) = if sequence.is_multiple_of(2) {
         (ROWS, VALUE_LEN)
@@ -69,8 +76,9 @@ async fn write_until_killed(dir: &Path) -> ! {
     }
 }
 
-/// Counts the log column family's compactions the killed process started and never reported
-/// finished, from the RocksDB info log it left behind.
+/// Counts the log column family's compactions whose start the killed process logged without a
+/// finish, from the RocksDB info log it left behind. RocksDB buffers that log, so a merge that
+/// finished just before the kill counts too.
 fn interrupted_merges(dir: &Path) -> usize {
     let log = std::fs::read_to_string(dir.join("LOG")).expect("read RocksDB info log");
     let jobs = |event: &str, family: &str| -> BTreeSet<u64> {
@@ -95,16 +103,24 @@ fn interrupted_merges(dir: &Path) -> usize {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn killed_writer_reopens_with_every_acknowledged_row() {
+    // Spawned with the writer directory set, this test is the child writer.
     if let Some(dir) = std::env::var_os(WRITER_DIR) {
         write_until_killed(Path::new(&dir)).await;
     }
 
+    // Kill the writer and reopen its store until five kills have come during or just after a
+    // merge.
     let dir = tempfile::tempdir().expect("tempdir");
     let mut interrupted = 0;
     let mut round = 0;
     while interrupted < 5 {
         round += 1;
-        assert!(round <= 60, "no kill landed inside a merge");
+        assert!(
+            round <= 60,
+            "five kills must come during or just after a merge within 60 rounds"
+        );
+
+        // Run this test binary again as the child writer on the shared directory.
         let mut writer = Command::new(std::env::current_exe().expect("test binary"))
             .args([
                 "killed_writer_reopens_with_every_acknowledged_row",
@@ -116,8 +132,8 @@ async fn killed_writer_reopens_with_every_acknowledged_row() {
             .spawn()
             .expect("spawn writer");
 
-        // A merge starts right after every MERGE_FILES-th commit of the process, so a kill
-        // shortly after one of those acknowledgements tends to find it running.
+        // The commit worker wakes the merge after every MERGE_FILES-th commit of the process, so
+        // a kill shortly after one of those acknowledgements tends to find a merge running.
         let wanted = MERGE_FILES * (2 + round % 5) + round % 2;
         let mut acked = 0;
         let mut seen = 0;
@@ -133,14 +149,16 @@ async fn killed_writer_reopens_with_every_acknowledged_row() {
         }
         writer.kill().expect("kill writer");
         writer.wait().expect("reap writer");
-        assert_eq!(seen, wanted, "the writer stopped by itself");
+        assert_eq!(seen, wanted, "the writer must run until it is killed");
         interrupted += interrupted_merges(dir.path());
 
+        // The reopened store holds every acknowledged batch in the log and the state, and no
+        // batch above its frontier.
         let store = open(dir.path());
         let frontier = store.current_sequence();
         assert!(
             frontier >= acked,
-            "acknowledged sequence {acked} is above the reopened frontier {frontier}"
+            "the reopened frontier {frontier} must cover acknowledged sequence {acked}"
         );
         assert_eq!(
             store.oldest_retained_batch().await.expect("oldest"),
@@ -151,7 +169,7 @@ async fn killed_writer_reopens_with_every_acknowledged_row() {
                 .get_batch(sequence)
                 .await
                 .expect("get batch")
-                .unwrap_or_else(|| panic!("round {round}: batch {sequence} is missing"))
+                .unwrap_or_else(|| panic!("round {round}: batch {sequence} must be retained"))
                 .decode_response()
                 .expect("decode batch");
             let logged: Vec<_> = logged
@@ -167,7 +185,7 @@ async fn killed_writer_reopens_with_every_acknowledged_row() {
         }
         assert!(
             store.get_batch(frontier + 1).await.expect("get").is_none(),
-            "a batch above the frontier is readable"
+            "a batch above the frontier must not be readable"
         );
     }
 }
