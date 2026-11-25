@@ -161,9 +161,13 @@ returns. The policy stays in force until another one whose key prefix overlaps
 this table's replaces it.
 
 Store pruning removes base rows but leaves their index entries, so this policy
-is for a table that stays unindexed. Before adding an index, replace it with a
-policy that keeps every version. The schema cannot check policies built directly
-with the SDK or schema changes made after the policy was applied.
+is for a table that stays unindexed. To end it, apply a policy with the same
+scope that keeps every version, for example the policy above with `retain` set
+to `RetainPolicy::GreaterThanOrEqual { threshold: 0 }`. Versions the old policy
+had already selected can still disappear after that call returns, so an index
+added later can hold entries for versions that are gone. The schema cannot check
+policies built directly with the SDK or schema changes made after the policy was
+applied.
 
 ### Secondary indexes
 

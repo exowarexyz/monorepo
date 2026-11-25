@@ -93,6 +93,9 @@
 //! rows a policy removes leave later, when RocksDB compacts the files that hold them, and
 //! nothing schedules a compaction for that.
 //!
+//! An install refuses a `KeepLatest` count above `MAX_KEEP_LATEST_COUNT` and a merged document
+//! whose encoding is longer than `MAX_REQUEST_MESSAGE_BYTES`.
+//!
 //! ```text
 //!   Prune call   --[ merge ][ write row ][ swap ]--> reply
 //!                                       |       |
@@ -107,9 +110,11 @@
 //! ```
 //!
 //! Both rows are ones a policy removes, k1 in the oldest file and k8 in a new one. A compaction
-//! of the newer files removes k8, and k1 stays readable until a compaction rewrites every file.
-//! A policy stands, so it also removes rows written after the call. It ends when a request
-//! names its prefix, or a prefix that contains it or lies inside it, and so replaces it.
+//! of the newer files removes k8, and k1 stays readable until a compaction takes the oldest
+//! file. A policy stands, so it also removes rows written after the call. It ends when a
+//! request names its prefix, or a prefix that contains it or lies inside it, and so replaces
+//! it. A replaced policy stops deciding at the next key a compaction is shown. The removals it
+//! had already decided still land when their compaction finishes (see `PruneFilter`).
 //!
 //! Which rows `KeepLatest` removes depends on the other rows of their group, and a filter is
 //! shown one row at a time. So the filter reads ahead in the live state (see
@@ -118,7 +123,8 @@
 //!
 //! `open` loads the document before the store serves. It also re-applies the newest log row
 //! (see `replay_newest_log_row`), which can bring back rows of that group that a compaction had
-//! removed. A policy that is still installed removes them again when a compaction takes them.
+//! removed. A policy that is still installed removes them again when a compaction takes them,
+//! and a row that no installed policy removes stays.
 
 #[cfg(test)]
 use buffa::Message;
@@ -306,7 +312,10 @@ impl Drop for Database {
     fn drop(&mut self) {
         // Stopping background work ends every compaction, and a compaction destroys its
         // filter as it ends. A filter left holding `db` would otherwise close the database
-        // on a compaction thread, from inside the compaction the close then waits for.
+        // on a compaction thread, from inside the compaction the close then waits for. The
+        // stop also waits for this database's queued jobs to leave RocksDB's thread pools,
+        // which every store in the process shares, so a close can wait for another store's
+        // compaction.
         self.db.cancel_all_background_work(true);
     }
 }
@@ -701,9 +710,11 @@ impl CompactionFilterFactory for PruneFilterFactory {
     }
 }
 
-/// Applies the installed prune policies to the keys of one compaction. RocksDB shows it the
-/// newest version of each key the compaction rewrites, and writes a tombstone for a key it
-/// removes.
+/// Applies the installed prune policies to the keys of one compaction. For each key, RocksDB
+/// shows it the newest version among the files the compaction rewrites, when that version is a
+/// value, and puts a tombstone in place of a version it removes. A compaction that takes the
+/// oldest file can drop the tombstone, and it keeps the tombstone while an open snapshot still
+/// shows an older version of the key.
 //
 // It is never shown a flush or an ingestion, so a row leaves only when a compaction takes the
 // file that holds it. It never writes to the database and never takes the publication lock.
@@ -715,9 +726,18 @@ impl CompactionFilterFactory for PruneFilterFactory {
 // sees all the removals of a finished compaction or none of them. A range cursor keeps the
 // files it opened on for all its pages. A query that captured its snapshot before a compaction
 // finished and starts its read afterward misses a row when the version that compaction removed
-// is the one its snapshot showed. It still sees a version older than the removed one. The rows
-// that stand behind a `KeepLatest` removal can be newer than that snapshot, so such a query can
-// find fewer than `count` rows of a group.
+// is the one its snapshot showed. A query whose snapshot predates the removed version still
+// sees the version that snapshot showed, until a compaction removes that one too. The rows that
+// stand behind a `KeepLatest` removal can be newer than that snapshot, so such a query can find
+// fewer than `count` rows of a group.
+//
+// A request can replace a policy while compactions run. The replaced policy stops deciding at
+// the next key, and the removals it has already decided still land when their compaction
+// finishes. They take only rows written before the request is answered, so a group can hold
+// fewer rows than a `KeepLatest` policy from the request would keep. Until they land those rows
+// are live. A second state compaction that runs meanwhile, which takes options above RocksDB's
+// defaults, counts them among the rows that follow a key under the new `KeepLatest` policy. It
+// can then remove a row the new policy alone would keep, even one written after the request.
 struct PruneFilter {
     shared: Arc<PrunePolicies>,
     /// The generation at which `policies` was taken.
@@ -823,8 +843,8 @@ impl ReadAhead {
         #[cfg(test)]
         drop(shared.read_ahead_gate.lock());
 
-        // The cursor reads each block once, in order. Caching the blocks would only push out
-        // what queries use.
+        // The cursor uses blocks that are already cached and adds none, so reading ahead does
+        // not push out what queries use.
         let mut options = ReadOptions::default();
         options.fill_cache(false);
 
@@ -872,8 +892,9 @@ impl ReadAhead {
     // of the group are newer than `key` whatever else the group holds. The latest `count`
     // members never have `count` members after them, so no chain of removals reaches them.
     //
-    // The cursor's view can be stale. A row in it can only have left through this same rule,
-    // and then rows newer than that row stand behind it, and behind `key` too.
+    // The cursor's view can be stale. A row in it can have left through this same rule, and
+    // then rows newer than that row stand behind it, and behind `key` too. It can also have
+    // left through a policy that this one replaced (see `PruneFilter`).
     //
     // A group is pruned in full when its keys sort together, oldest first. Under another
     // layout the chain breaks early, and the group can keep more than `count`.
@@ -921,7 +942,9 @@ impl ReadAhead {
         }
 
         // The chain grows until it holds `count` keys, breaks, or the keys run out. Each key
-        // is read once and linked once, however many keys before it ask.
+        // is read once and linked once, however many keys before it ask. So the cursor's work
+        // follows the live keys it passes and not the keys the compaction shows. A key shown
+        // past the window drops the window and pays a seek and up to `count` reads of its own.
         loop {
             while self.chain < self.window.len() && self.links(self.chain, &policy.scope) {
                 self.chain += 1;
@@ -2087,7 +2110,7 @@ const fn retention_floor(policy: &RetentionPolicy, frontier: u64) -> u64 {
 ///
 /// Re-applying can bring back rows of the group that a compaction had pruned (see
 /// `PruneFilter`). A policy that is still installed removes them again when a compaction takes
-/// them.
+/// them, and a row that no installed policy removes stays.
 fn replay_newest_log_row(db: &DB, floor: u64) -> Result<u64, String> {
     let log_cf = db
         .cf_handle(LOG_CF)
@@ -2537,9 +2560,10 @@ impl RocksStore {
         self.enforce_retention()
     }
 
-    /// Compacts the whole state column family, memtable included, and returns once RocksDB has
-    /// rewritten it, which applies the installed prune policies to every row. This is a test
-    /// tool, and the store never calls it.
+    /// Asks RocksDB to compact the whole state column family, memtable included, and returns
+    /// when RocksDB is done. A compaction that succeeds applies the installed prune policies
+    /// to every value it shows the filter. This call does not report a failed compaction. This
+    /// is a test tool, and the store never calls it.
     #[doc(hidden)]
     pub fn compact_state(&self) {
         self.db.compact_range(None::<&[u8]>, None::<&[u8]>);

@@ -24,8 +24,11 @@ impl KvSchema {
     /// replaces it.
     ///
     /// Store pruning does not cascade to secondary indexes, so this policy is
-    /// for a table that stays unindexed. Before adding an index, replace it
-    /// with a policy that keeps every version.
+    /// for a table that stays unindexed. To end it, apply a policy with the
+    /// same scope and `RetainPolicy::GreaterThanOrEqual { threshold: 0 }`,
+    /// which keeps every version. Versions this policy had already selected
+    /// can still disappear after that call returns, so an index added later
+    /// can hold entries for versions that are gone.
     pub fn keep_latest_versions_policy(
         &self,
         table_name: &str,
