@@ -1,7 +1,8 @@
 //! Naive reference storage for local development. User keys and values are written as-is to
 //! RocksDB. A `log` column family keeps one row per commit group, the exact
 //! `log.stream.v1.GetResponse` bytes the stream service serves for that sequence, loaded on
-//! demand. A `meta` column family holds the state-floor row and the retention rule.
+//! demand. A `meta` column family holds the state-floor row, the retention rule and the prune
+//! policies.
 //!
 //! Everything is addressed by key. Recovery and pruning never assume which SST files rows live
 //! in for their correctness, so RocksDB is free to place and compact them however it likes.
@@ -83,6 +84,36 @@
 //! that key pruning and retention enforcement raise (see `RocksStore::raise_state_floor` and
 //! `RocksStore::prune_log`). A separate meta row persists the active retention rule (see the
 //! [`Retention`] impl), and the ingest path re-enforces that rule as the log grows.
+//!
+//! # Key pruning
+//!
+//! A Prune call installs policies and replies. It merges them into the stored document, writes
+//! the document to a meta row, and swaps the compiled policies that the state family's
+//! compaction filter reads (see `RocksStore::install_prune_policies` and `PruneFilter`). The
+//! rows a policy removes leave later, when RocksDB compacts the files that hold them, and
+//! nothing schedules a compaction for that.
+//!
+//! ```text
+//!   Prune call   --[ merge ][ write row ][ swap ]--> reply
+//!                                       |       |
+//!   meta row     .......................[############ stored document ########################
+//!   policies     ...............................[####### compiled policies ###################
+//!                                                            |                     |
+//!                                                            v                     v
+//!   compactions  -------------------------------------[ newer files ]-------[ every file ]--->
+//!   a read finds k1 and k8 .........................................| k1 ................| none
+//!
+//!   # in force from here on      | the compaction above has finished
+//! ```
+//!
+//! Both rows are ones a policy removes, k1 in the oldest file and k8 in a new one. A compaction
+//! of the newer files removes k8, and k1 stays readable until a compaction rewrites every file.
+//! A policy stands, so it also removes rows written after the call. It ends when a request
+//! names its prefix, or a prefix that contains it or lies inside it, and so replaces it. `open`
+//! loads the document before the store serves.
+//!
+//! `KeepLatest` is the exception. Which rows it removes depends on the other rows of their
+//! group, so the call applies it once with a scan (see `RocksStore::apply_key_prune_policy`).
 
 #[cfg(test)]
 use buffa::Message;
@@ -101,7 +132,10 @@ use exoware_sdk::{
         MAX_RESPONSE_ELEMENT_MEMORY_BYTES, MAX_RESPONSE_MESSAGE_BYTES,
     },
     log::stream::v1::GetResponseView as StreamGetResponseView,
-    prune_policy::{KeysScope, OrderEncoding, PrunePolicyDocument, RetainPolicy},
+    prune_policy::{
+        encode_policy_document, validate_policy_document, KeysScope, OrderEncoding, PrunePolicy,
+        PrunePolicyDocument, RetainPolicy, PRUNE_POLICY_CONTROL_KEY,
+    },
     retention::{validate_retention_policy, RetentionPolicy},
     selector::compile_payload_regex,
 };
@@ -111,15 +145,19 @@ use exoware_server::{
     RangeScan, RangeScanBatch, RangeScanResult, Retention, Sequence, StreamNotifier,
 };
 use parking_lot::Mutex;
-use regex::bytes::Regex;
+use regex::bytes::{Captures, Regex};
 use rocksdb::{
+    compaction_filter::CompactionFilter,
+    compaction_filter_factory::{CompactionFilterContext, CompactionFilterFactory},
     BlockBasedOptions, BottommostLevelCompaction, ColumnFamily, ColumnFamilyDescriptor,
-    CompactOptions, DBCompactionStyle, DBCompressionType, DBIterator, Direction,
-    IngestExternalFileOptions, IteratorMode, Options, Snapshot, SstFileWriter, WriteOptions, DB,
+    CompactOptions, CompactionDecision, DBCompactionStyle, DBCompressionType, DBIterator,
+    Direction, IngestExternalFileOptions, IteratorMode, Options, Snapshot, SstFileWriter,
+    WriteOptions, DB,
 };
 use std::{
     cmp::Ordering as CmpOrdering,
     collections::BTreeMap,
+    ffi::CStr,
     num::NonZeroUsize,
     ops::Range,
     path::{Path, PathBuf},
@@ -135,7 +173,8 @@ use tracing::debug;
 /// Column family of the state rows, RocksDB's default one.
 const STATE_CF: &str = rocksdb::DEFAULT_COLUMN_FAMILY_NAME;
 
-/// Column family of the store's own rows, the state floor and the retention rule.
+/// Column family of the store's own rows, the state floor, the retention rule and the prune
+/// policies.
 const META_CF: &str = "meta";
 
 /// Meta row holding the state floor, a sequence number (see [`read_state_floor`]).
@@ -144,6 +183,10 @@ const SEQ_META_KEY: &[u8] = b"sequence";
 /// Meta row holding the active sequence-log retention rule (the codec-encoded
 /// [`RetentionPolicy`]). Absence of the row means no rule is installed.
 const RETENTION_META_KEY: &[u8] = b"retention";
+
+/// Meta row holding the installed prune policies, the SDK's encoded [`PrunePolicyDocument`]
+/// under the SDK's name for it. Absence of the row means no policy is installed.
+const PRUNE_META_KEY: &[u8] = PRUNE_POLICY_CONTROL_KEY.as_bytes();
 
 /// Rows a key prune copies out of its scan in one step. It holds no more values than that at
 /// once. The value is a round number.
@@ -423,9 +466,8 @@ struct KeyEntry {
 }
 
 /// Extracts the per-key ordering value used to decide which matching keys a prune policy retains.
-fn extract_order_value(payload: &[u8], regex: &Regex, scope: &KeysScope) -> Option<Vec<u8>> {
+fn extract_order_value(captures: &Captures<'_>, scope: &KeysScope) -> Option<Vec<u8>> {
     let order_by = scope.order_by.as_ref()?;
-    let captures = regex.captures(payload)?;
     let matched = captures.name(&order_by.capture_group)?;
     let raw = matched.as_bytes();
     match order_by.encoding {
@@ -441,11 +483,10 @@ fn extract_order_value(payload: &[u8], regex: &Regex, scope: &KeysScope) -> Opti
 }
 
 /// Builds the grouping key that scopes retention independently within a key prune policy.
-fn extract_group_key(payload: &[u8], regex: &Regex, scope: &KeysScope) -> Option<Vec<u8>> {
+fn extract_group_key(captures: &Captures<'_>, scope: &KeysScope) -> Option<Vec<u8>> {
     if scope.group_by.capture_groups.is_empty() {
         return Some(Vec::new());
     }
-    let captures = regex.captures(payload)?;
     let mut group_key = Vec::new();
     for group_name in &scope.group_by.capture_groups {
         let matched = captures.name(group_name)?;
@@ -523,6 +564,176 @@ fn keys_to_delete(
                 .collect())
         }
         RetainPolicy::DropAll => Ok(entries.iter().map(|e| e.key.clone()).collect()),
+    }
+}
+
+/// A policy's retain rule as the compaction filter evaluates it, with a threshold already in
+/// the encoding of the order values it is compared with.
+enum PruneRule {
+    KeepLatest,
+    GreaterThan { threshold: [u8; 8] },
+    GreaterThanOrEqual { threshold: [u8; 8] },
+    DropAll,
+}
+
+/// One installed prune policy, compiled once when it is installed.
+struct CompiledPolicy {
+    prefix: Prefix,
+    regex: Regex,
+    scope: KeysScope,
+    rule: PruneRule,
+}
+
+impl CompiledPolicy {
+    /// Compiles `policy`, or says why the store cannot apply it.
+    fn compile(policy: &PrunePolicy) -> Result<Self, String> {
+        let scope = policy.scope.clone();
+        let prefix =
+            Prefix::new(scope.selector.prefix.clone()).map_err(|e| format!("policy: {e}"))?;
+        let regex = compile_payload_regex(&scope.selector.payload_regex)
+            .map_err(|e| format!("policy: {e}"))?;
+        let rule = match policy.retain {
+            RetainPolicy::KeepLatest { .. } => PruneRule::KeepLatest,
+            RetainPolicy::GreaterThan { threshold } => PruneRule::GreaterThan {
+                threshold: threshold_order_value(&scope, threshold)?,
+            },
+            RetainPolicy::GreaterThanOrEqual { threshold } => PruneRule::GreaterThanOrEqual {
+                threshold: threshold_order_value(&scope, threshold)?,
+            },
+            RetainPolicy::DropAll => PruneRule::DropAll,
+        };
+        Ok(Self {
+            prefix,
+            regex,
+            scope,
+            rule,
+        })
+    }
+
+    /// The group and the order value of `key`, or `None` when the policy does not select it.
+    fn member(&self, key: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+        let payload = self.prefix.strip_slice(key)?;
+        let captures = self.regex.captures(payload)?;
+        let group = extract_group_key(&captures, &self.scope)?;
+        let order = extract_order_value(&captures, &self.scope).unwrap_or_default();
+        Some((group, order))
+    }
+
+    /// Whether the policy removes `key` under a rule that the key alone decides.
+    fn removes(&self, key: &[u8]) -> bool {
+        let Some((_, order)) = self.member(key) else {
+            return false;
+        };
+        match &self.rule {
+            PruneRule::DropAll => true,
+            PruneRule::GreaterThan { threshold } => {
+                compare_order_values(&order, threshold, &self.scope) != CmpOrdering::Greater
+            }
+            PruneRule::GreaterThanOrEqual { threshold } => {
+                compare_order_values(&order, threshold, &self.scope) == CmpOrdering::Less
+            }
+
+            // Which keys this rule removes depends on the other keys of the group, and a
+            // filter is shown one key at a time. The Prune call applies it with a scan.
+            PruneRule::KeepLatest => false,
+        }
+    }
+}
+
+/// Compiles every policy of a document, in document order.
+fn compile_policies(policies: &[PrunePolicy]) -> Result<Arc<[CompiledPolicy]>, String> {
+    policies.iter().map(CompiledPolicy::compile).collect()
+}
+
+/// The policies a Prune request leaves in force. Its policies replace every stored policy
+/// whose prefix equals one of theirs, extends it or is extended by it, and the rest stay.
+fn merge_prune_policies(stored: &[PrunePolicy], request: Vec<PrunePolicy>) -> Vec<PrunePolicy> {
+    let replaced = |kept: &PrunePolicy| {
+        let kept = &kept.scope.selector.prefix;
+        request.iter().any(|new| {
+            let new = &new.scope.selector.prefix;
+            kept.starts_with(new) || new.starts_with(kept)
+        })
+    };
+    let mut merged: Vec<PrunePolicy> = stored
+        .iter()
+        .filter(|kept| !replaced(kept))
+        .cloned()
+        .collect();
+    merged.extend(request);
+    merged
+}
+
+/// The installed prune policies, shared by the Prune call and the state family's filters.
+//
+// The two locks are separate so that a filter never waits for an install. An install holds
+// `install` across a synced write, the write can wait on a write stall, and a stall ends only
+// when compactions run, each of which builds a filter first.
+#[derive(Default)]
+struct PrunePolicies {
+    /// Held by an install from its read of the meta row to its swap, so the row and `compiled`
+    /// change in the same order.
+    install: Mutex<()>,
+    /// The policies of the meta row as compiled. Each new filter takes the list as it is then.
+    compiled: Mutex<Arc<[CompiledPolicy]>>,
+}
+
+/// Builds the state family's compaction filters.
+//
+// RocksDB calls `create` from any of its compaction threads, at times together, and the
+// binding hands each call a `&mut self` to this one object. So it holds a handle to shared
+// state and nothing of its own.
+struct PruneFilterFactory(Arc<PrunePolicies>);
+
+impl CompactionFilterFactory for PruneFilterFactory {
+    type Filter = PruneFilter;
+
+    fn create(&mut self, _context: CompactionFilterContext) -> PruneFilter {
+        PruneFilter {
+            policies: self.0.compiled.lock().clone(),
+        }
+    }
+
+    fn name(&self) -> &CStr {
+        c"exoware.prune"
+    }
+}
+
+/// Applies the installed prune policies to the keys of one compaction. RocksDB shows it the
+/// newest version of each key the compaction rewrites, and writes a tombstone for a key it
+/// removes.
+//
+// It is never shown a flush or an ingestion, so a row leaves only when a compaction takes the
+// file that holds it.
+//
+// A removal does not advance the store's sequence, and a snapshot does not shield the version
+// of a row that a compaction removes. What a query sees depends on when its read starts,
+// because RocksDB fixes the files a read uses at that moment. A point read or a multi-key read
+// sees all the removals of a finished compaction or none of them. A range cursor keeps the
+// files it opened on for all its pages. A query that captured its snapshot before a compaction
+// finished and starts its read afterward misses a removed row whose newest version it could
+// see. It still sees the older version of a row that was overwritten after its snapshot.
+struct PruneFilter {
+    policies: Arc<[CompiledPolicy]>,
+}
+
+impl CompactionFilter for PruneFilter {
+    fn filter(&mut self, _level: u32, key: &[u8], _value: &[u8]) -> CompactionDecision {
+        // Policy prefixes never nest, so at most one policy selects a key.
+        let removes = self
+            .policies
+            .iter()
+            .find(|policy| policy.prefix.matches(key))
+            .is_some_and(|policy| policy.removes(key));
+        if removes {
+            CompactionDecision::Remove
+        } else {
+            CompactionDecision::Keep
+        }
+    }
+
+    fn name(&self) -> &CStr {
+        c"exoware.prune"
     }
 }
 
@@ -1578,6 +1789,27 @@ fn read_retention_policy(db: &DB) -> Result<Option<RetentionPolicy>, String> {
     }
 }
 
+/// Reads the stored prune policies. Absence of the row means none is installed. A row that
+/// fails to decode or validate is corruption and fails the open.
+fn read_prune_policies(db: &DB) -> Result<Vec<PrunePolicy>, String> {
+    let meta_cf = db
+        .cf_handle(META_CF)
+        .expect("meta CF must exist (created on open)");
+    match db
+        .get_cf(meta_cf, PRUNE_META_KEY)
+        .map_err(|e| e.to_string())?
+    {
+        Some(bytes) => {
+            let document = PrunePolicyDocument::decode(Copying(bytes.as_slice()))
+                .map_err(|e| format!("corrupt prune policy meta row: {e}"))?;
+            validate_policy_document(&document)
+                .map_err(|e| format!("corrupt prune policy meta row: {e}"))?;
+            Ok(document.policies)
+        }
+        None => Ok(Vec::new()),
+    }
+}
+
 /// Lowest sequence a retention rule keeps against `frontier`: the exclusive cutoff for log
 /// trimming, so every row below it is evicted and the row at it (if any) is the oldest retained.
 /// Mirrors the floor math the stream service owns end to end.
@@ -1763,6 +1995,8 @@ pub struct RocksStore {
     /// across reopens). The ingest path reads it on every commit to trim continuously, so a
     /// cheap cache keeps a rule-less store off the disk on that hot path.
     retention: Arc<Mutex<Option<RetentionPolicy>>>,
+    /// The installed prune policies, which the state family's compaction filters apply.
+    prune: Arc<PrunePolicies>,
 }
 
 impl RocksStore {
@@ -1818,7 +2052,14 @@ impl RocksStore {
         let mut env = rocksdb::Env::new().map_err(|e| e.to_string())?;
         env.set_bottom_priority_background_threads(BOTTOM_POOL_THREADS);
 
-        let cf_state = ColumnFamilyDescriptor::new(STATE_CF, state_cf_options());
+        // The filter factory has to be in the options before the database opens, and the
+        // policies are stored inside the database. So the factory gets an empty cell now, and
+        // the stored policies go into it below. Until then a filter has no policy and keeps
+        // every key.
+        let prune = Arc::new(PrunePolicies::default());
+        let mut state_options = state_cf_options();
+        state_options.set_compaction_filter_factory(PruneFilterFactory(prune.clone()));
+        let cf_state = ColumnFamilyDescriptor::new(STATE_CF, state_options);
         let cf_meta = ColumnFamilyDescriptor::new(META_CF, Options::default());
         let cf_log = ColumnFamilyDescriptor::new(LOG_CF, log_cf_options());
         let db = DB::open_cf_descriptors(&db_options, path, vec![cf_state, cf_meta, cf_log])
@@ -1838,6 +2079,9 @@ impl RocksStore {
         // Restore the retention rule so the ingest path keeps enforcing it after a reopen.
         let retention = Arc::new(Mutex::new(read_retention_policy(&db)?));
 
+        // Restore the prune policies so compactions keep applying them after a reopen.
+        *prune.compiled.lock() = compile_policies(&read_prune_policies(&db)?)?;
+
         let frontiers = Arc::new(Frontiers::new(seq, state_key_span(&db)?));
         let writer = Arc::new(Writer::start(
             db.clone(),
@@ -1850,6 +2094,7 @@ impl RocksStore {
             frontiers,
             writer,
             retention,
+            prune,
         };
         // Re-apply the rule against the reopened log before serving reads: a crash can
         // lose the last (unsynced) trim, and a batch observed as evicted must never
@@ -1983,13 +2228,41 @@ impl RocksStore {
         Ok(())
     }
 
-    /// Applies each prune policy in document order to current rows. A prune document is
-    /// Keys-only; sequence-log retention is handled by `log.retention.v1.SetRetention`
-    /// (see the [`Retention`] impl).
+    /// Installs the document's policies, then applies its `KeepLatest` policies once to the
+    /// current rows, in document order. A prune document is Keys-only; sequence-log retention
+    /// is handled by `log.retention.v1.SetRetention` (see the [`Retention`] impl).
     fn apply_prune_policies(&self, document: PrunePolicyDocument) -> Result<(), String> {
-        for policy in &document.policies {
+        let keep_latest: Vec<PrunePolicy> = document
+            .policies
+            .iter()
+            .filter(|policy| matches!(policy.retain, RetainPolicy::KeepLatest { .. }))
+            .cloned()
+            .collect();
+        self.install_prune_policies(document)?;
+        for policy in &keep_latest {
             self.apply_key_prune_policy(&policy.scope, &policy.retain)?;
         }
+        Ok(())
+    }
+
+    /// Merges a request into the stored prune policies (see `merge_prune_policies`), persists
+    /// the result and puts it in force for every compaction that starts afterward. The rows a
+    /// policy removes leave when a compaction takes the files that hold them.
+    fn install_prune_policies(&self, document: PrunePolicyDocument) -> Result<(), String> {
+        let _install = self.prune.install.lock();
+        let merged = PrunePolicyDocument {
+            version: document.version,
+            policies: merge_prune_policies(&read_prune_policies(&self.db)?, document.policies),
+        };
+        let compiled = compile_policies(&merged.policies)?;
+        let row = encode_policy_document(&merged).map_err(|e| e.to_string())?;
+
+        // The row is durable before the swap, so no compaction applies a policy that a crash
+        // could forget.
+        let mut batch = rocksdb::WriteBatch::default();
+        batch.put_cf(self.meta_cf(), PRUNE_META_KEY, row);
+        write_synced_batch(&self.db, batch)?;
+        *self.prune.compiled.lock() = compiled;
         Ok(())
     }
 
@@ -2025,15 +2298,15 @@ impl RocksStore {
                     Ok(payload) => payload,
                     Err(_) => continue,
                 };
-                if !regex.is_match(&payload) {
+                let Some(captures) = regex.captures(&payload) else {
                     continue;
-                }
+                };
 
-                let group_key = match extract_group_key(&payload, &regex, scope) {
+                let group_key = match extract_group_key(&captures, scope) {
                     Some(group_key) => group_key,
                     None => continue,
                 };
-                let order_value = extract_order_value(&payload, &regex, scope).unwrap_or_default();
+                let order_value = extract_order_value(&captures, scope).unwrap_or_default();
 
                 groups
                     .entry(group_key)
@@ -2135,7 +2408,8 @@ impl RocksStore {
     }
 
     /// Compacts the whole state column family, memtable included, and returns once RocksDB has
-    /// rewritten it. This is a test tool, and the store never calls it.
+    /// rewritten it, which applies the installed prune policies to every row. This is a test
+    /// tool, and the store never calls it.
     #[doc(hidden)]
     pub fn compact_state(&self) {
         self.db.compact_range(None::<&[u8]>, None::<&[u8]>);
@@ -2426,8 +2700,11 @@ mod tests {
     use super::*;
     use buffa::encoding::varint_len;
     use exoware_sdk::{
+        kv_codec::Utf8,
         limits::{put_entry_encoded_len, MAX_VALUE_LEN},
         log::ingest::v1::PutRequest,
+        prune_policy::{GroupBy, OrderBy, PRUNE_POLICY_DOCUMENT_VERSION},
+        selector::Selector,
     };
     use exoware_server::{Ingest, Log, Sequence};
     use std::collections::BTreeSet;
@@ -3617,6 +3894,169 @@ mod tests {
 
         let Err(error) = RocksStore::open(dir.path(), None) else {
             panic!("invalid rule must fail open");
+        };
+        assert!(error.contains("keep_latest count must be > 0"), "{error}");
+    }
+
+    /// A policy over keys of the form group, two zero bytes, big-endian version, under
+    /// `prefix`.
+    fn versioned_policy(prefix: &[u8], retain: RetainPolicy) -> PrunePolicy {
+        PrunePolicy {
+            scope: KeysScope {
+                selector: Selector {
+                    prefix: Bytes::copy_from_slice(prefix),
+                    payload_regex: Utf8::from(
+                        "(?s-u)^(?P<group>[^\\x00]*)\\x00\\x00(?P<version>.{8})$",
+                    ),
+                },
+                group_by: GroupBy {
+                    capture_groups: vec![Utf8::from("group")],
+                },
+                order_by: Some(OrderBy {
+                    capture_group: Utf8::from("version"),
+                    encoding: OrderEncoding::U64Be,
+                }),
+            },
+            retain,
+        }
+    }
+
+    /// The key of `version` of `group` for [`versioned_policy`].
+    fn versioned_key(prefix: &[u8], group: &[u8], version: u64) -> Vec<u8> {
+        [prefix, group, &[0, 0], &version.to_be_bytes()].concat()
+    }
+
+    #[test]
+    fn prune_request_merges_by_prefix() {
+        let prefixes = |policies: &[PrunePolicy]| -> Vec<(Vec<u8>, RetainPolicy)> {
+            policies
+                .iter()
+                .map(|policy| (policy.scope.selector.prefix.to_vec(), policy.retain.clone()))
+                .collect()
+        };
+        let stored = vec![
+            versioned_policy(&[1], RetainPolicy::DropAll),
+            versioned_policy(&[2, 7], RetainPolicy::DropAll),
+            versioned_policy(&[3], RetainPolicy::DropAll),
+            versioned_policy(&[4], RetainPolicy::DropAll),
+        ];
+
+        // The request names an equal prefix, a prefix that a stored one extends, and a prefix
+        // that extends a stored one. Each replaces the stored policy, and the fourth stays.
+        let keep = RetainPolicy::KeepLatest { count: 1 };
+        let merged = merge_prune_policies(
+            &stored,
+            vec![
+                versioned_policy(&[1], keep.clone()),
+                versioned_policy(&[2], keep.clone()),
+                versioned_policy(&[3, 9], keep.clone()),
+            ],
+        );
+        assert_eq!(
+            prefixes(&merged),
+            [
+                (vec![4], RetainPolicy::DropAll),
+                (vec![1], keep.clone()),
+                (vec![2], keep.clone()),
+                (vec![3, 9], keep),
+            ]
+        );
+
+        // The merged policies form a document the SDK accepts.
+        encode_policy_document(&PrunePolicyDocument {
+            version: PRUNE_POLICY_DOCUMENT_VERSION,
+            policies: merged,
+        })
+        .expect("merged document validates");
+    }
+
+    #[test]
+    fn prune_rules_decide_from_one_key() {
+        let compile =
+            |retain| CompiledPolicy::compile(&versioned_policy(&[1], retain)).expect("compile");
+        let key = |version| versioned_key(&[1], b"row", version);
+
+        let drop_all = compile(RetainPolicy::DropAll);
+        assert!(drop_all.removes(&key(1)));
+        // Outside the prefix, and under it with a payload the regex rejects.
+        assert!(!drop_all.removes(&versioned_key(&[2], b"row", 1)));
+        assert!(!drop_all.removes(&[1, b'r', 0, 0, 9]));
+
+        let greater_than = compile(RetainPolicy::GreaterThan { threshold: 4 });
+        assert!(greater_than.removes(&key(3)));
+        assert!(greater_than.removes(&key(4)));
+        assert!(!greater_than.removes(&key(5)));
+
+        let at_least = compile(RetainPolicy::GreaterThanOrEqual { threshold: 4 });
+        assert!(at_least.removes(&key(3)));
+        assert!(!at_least.removes(&key(4)));
+        assert!(!at_least.removes(&key(5)));
+
+        // A group capture that did not take part in the match leaves the key alone, and an
+        // order capture of the wrong length orders as zero.
+        let mut loose = versioned_policy(&[1], RetainPolicy::GreaterThanOrEqual { threshold: 1 });
+        loose.scope.selector.payload_regex =
+            Utf8::from("(?s-u)^(?:(?P<group>a)|b)(?P<version>.*)$");
+        let loose = CompiledPolicy::compile(&loose).expect("compile");
+        assert!(!loose.removes(&[1, b'b', 0, 0, 0, 0, 0, 0, 0, 0]));
+        assert!(loose.removes(&[1, b'a', 9, 9, 9]));
+        assert!(!loose.removes(&[1, b'a', 0, 0, 0, 0, 0, 0, 0, 1]));
+    }
+
+    #[test]
+    fn reopen_rejects_corrupt_prune_policies() {
+        // A row that does not decode.
+        let dir = tempdir().expect("tempdir");
+        {
+            let store = RocksStore::open(dir.path(), None).expect("open db");
+            store
+                .db
+                .put_cf(store.meta_cf(), PRUNE_META_KEY, [0xFF; 3])
+                .expect("write row");
+        }
+        let Err(error) = RocksStore::open(dir.path(), None) else {
+            panic!("an undecodable document must fail open");
+        };
+        assert!(error.contains("corrupt prune policy meta row"), "{error}");
+
+        // A valid document with a byte after it.
+        let dir = tempdir().expect("tempdir");
+        {
+            let store = RocksStore::open(dir.path(), None).expect("open db");
+            let document = PrunePolicyDocument {
+                version: PRUNE_POLICY_DOCUMENT_VERSION,
+                policies: vec![versioned_policy(&[1], RetainPolicy::DropAll)],
+            };
+            let mut row = document.encode().to_vec();
+            row.push(0);
+            store
+                .db
+                .put_cf(store.meta_cf(), PRUNE_META_KEY, row)
+                .expect("write row");
+        }
+        let Err(error) = RocksStore::open(dir.path(), None) else {
+            panic!("a document with trailing bytes must fail open");
+        };
+        assert!(error.contains("corrupt prune policy meta row"), "{error}");
+
+        // A row that decodes to a document the SDK rejects.
+        let dir = tempdir().expect("tempdir");
+        {
+            let store = RocksStore::open(dir.path(), None).expect("open db");
+            let document = PrunePolicyDocument {
+                version: PRUNE_POLICY_DOCUMENT_VERSION,
+                policies: vec![versioned_policy(
+                    &[1],
+                    RetainPolicy::KeepLatest { count: 0 },
+                )],
+            };
+            store
+                .db
+                .put_cf(store.meta_cf(), PRUNE_META_KEY, document.encode())
+                .expect("write row");
+        }
+        let Err(error) = RocksStore::open(dir.path(), None) else {
+            panic!("an invalid document must fail open");
         };
         assert!(error.contains("keep_latest count must be > 0"), "{error}");
     }

@@ -15,7 +15,7 @@ use exoware_sdk::{
     retention::RetentionPolicy,
     selector::Selector,
 };
-use exoware_server::{Log, Prune, Query, Retention, Sequence};
+use exoware_server::{Log, Prune, Query, RangeScan, Retention, Sequence};
 use exoware_simulator::RocksStore;
 use std::future::Future;
 use tempfile::tempdir;
@@ -30,16 +30,19 @@ fn block_on<T>(future: impl Future<Output = T>) -> T {
         .block_on(future)
 }
 
-fn prefix() -> Prefix {
-    Prefix::from_byte(TEST_PREFIX)
+fn versioned_key(logical: &[u8], version: u64) -> Bytes {
+    versioned_key_in(TEST_PREFIX, logical, version)
 }
 
-fn versioned_key(logical: &[u8], version: u64) -> Bytes {
+/// A versioned key under the one-byte prefix `family`.
+fn versioned_key_in(family: u8, logical: &[u8], version: u64) -> Bytes {
     let mut payload = Vec::new();
     payload.extend_from_slice(logical);
     payload.extend_from_slice(b"\0\0");
     payload.extend_from_slice(&version.to_be_bytes());
-    prefix().encode(&payload).expect("encode key")
+    Prefix::from_byte(family)
+        .encode(&payload)
+        .expect("encode key")
 }
 
 fn put_batch(store: &RocksStore, kvs: Vec<(Bytes, Bytes)>) -> u64 {
@@ -89,10 +92,15 @@ fn apply_prune(store: &RocksStore, policies: &[PrunePolicy]) {
 }
 
 fn version_policy_with_encoding(retain: RetainPolicy, encoding: OrderEncoding) -> PrunePolicy {
+    version_policy_in(TEST_PREFIX, retain, encoding)
+}
+
+/// A policy over the versioned keys under the one-byte prefix `family`.
+fn version_policy_in(family: u8, retain: RetainPolicy, encoding: OrderEncoding) -> PrunePolicy {
     PrunePolicy {
         scope: KeysScope {
             selector: Selector {
-                prefix: Bytes::from(vec![TEST_PREFIX]),
+                prefix: Bytes::from(vec![family]),
                 payload_regex: Utf8::from(
                     "(?s-u)^(?P<logical>(?:\\x00\\xFF|[^\\x00])*)\\x00\\x00(?P<version>.{8})$",
                 ),
@@ -487,4 +495,243 @@ fn key_pruned_state_survives_reopen_when_versions_share_a_batch() {
     assert!(get_value(&store, &v1).is_none());
     assert!(get_value(&store, &v2).is_none());
     assert_eq!(get_value(&store, &v3).as_deref(), Some(b"v3".as_slice()));
+}
+
+#[test]
+fn keys_threshold_retains_greater_than_versions() {
+    let dir = tempdir().expect("tempdir");
+    let store = RocksStore::open(dir.path(), None).expect("open db");
+    let v3 = versioned_key(b"row", 3);
+    let v4 = versioned_key(b"row", 4);
+    let v5 = versioned_key(b"row", 5);
+    put_batch(
+        &store,
+        vec![
+            (v3.clone(), Bytes::from_static(b"v3")),
+            (v4.clone(), Bytes::from_static(b"v4")),
+            (v5.clone(), Bytes::from_static(b"v5")),
+        ],
+    );
+
+    apply_prune(
+        &store,
+        &[version_policy(RetainPolicy::GreaterThan { threshold: 4 })],
+    );
+    store.compact_state();
+
+    assert!(get_value(&store, &v3).is_none());
+    assert!(get_value(&store, &v4).is_none());
+    assert_eq!(get_value(&store, &v5).as_deref(), Some(b"v5".as_slice()));
+}
+
+/// A prune reply means the policy is installed. The rows it removes stay readable until a
+/// compaction takes the files that hold them.
+#[test]
+fn prune_reply_leaves_rows_until_a_compaction() {
+    let dir = tempdir().expect("tempdir");
+    let store = RocksStore::open(dir.path(), None).expect("open db");
+    let a1 = versioned_key(b"a", 1);
+    put_batch(&store, vec![(a1.clone(), Bytes::from_static(b"a1"))]);
+
+    apply_prune(&store, &[version_policy(RetainPolicy::DropAll)]);
+    assert_eq!(get_value(&store, &a1).as_deref(), Some(b"a1".as_slice()));
+
+    store.compact_state();
+    assert!(get_value(&store, &a1).is_none());
+}
+
+/// A policy stands. It removes a row written after the request as it removes one written
+/// before.
+#[test]
+fn prune_policy_stands_for_rows_written_later() {
+    let dir = tempdir().expect("tempdir");
+    let store = RocksStore::open(dir.path(), None).expect("open db");
+    apply_prune(&store, &[version_policy(RetainPolicy::DropAll)]);
+
+    let a1 = versioned_key(b"a", 1);
+    put_batch(
+        &store,
+        vec![
+            (a1.clone(), Bytes::from_static(b"a1")),
+            (Bytes::from_static(b"raw"), Bytes::from_static(b"raw")),
+        ],
+    );
+    store.compact_state();
+
+    assert!(get_value(&store, &a1).is_none());
+    assert_eq!(
+        get_value(&store, &Bytes::from_static(b"raw")).as_deref(),
+        Some(b"raw".as_slice())
+    );
+}
+
+/// A request replaces the stored policies whose prefixes it overlaps and leaves the others in
+/// force.
+#[test]
+fn prune_request_replaces_only_the_policies_it_overlaps() {
+    const OTHER_PREFIX: u8 = 2;
+    let dir = tempdir().expect("tempdir");
+    let store = RocksStore::open(dir.path(), None).expect("open db");
+    let drop_all = version_policy(RetainPolicy::DropAll);
+    let threshold = |threshold| {
+        version_policy_in(
+            OTHER_PREFIX,
+            RetainPolicy::GreaterThanOrEqual { threshold },
+            OrderEncoding::U64Be,
+        )
+    };
+    let first = versioned_key(b"row", 1);
+    let other_v3 = versioned_key_in(OTHER_PREFIX, b"row", 3);
+    let other_v5 = versioned_key_in(OTHER_PREFIX, b"row", 5);
+    let seed = |store: &RocksStore| {
+        put_batch(
+            store,
+            vec![
+                (first.clone(), Bytes::from_static(b"first")),
+                (other_v3.clone(), Bytes::from_static(b"v3")),
+                (other_v5.clone(), Bytes::from_static(b"v5")),
+            ],
+        );
+    };
+
+    // Two requests for two prefixes. The second leaves the first in force.
+    apply_prune(&store, &[drop_all]);
+    apply_prune(&store, &[threshold(4)]);
+    seed(&store);
+    store.compact_state();
+    assert!(get_value(&store, &first).is_none());
+    assert!(get_value(&store, &other_v3).is_none());
+    assert_eq!(
+        get_value(&store, &other_v5).as_deref(),
+        Some(b"v5".as_slice())
+    );
+
+    // A request for the first prefix replaces its policy with one that keeps every row, and
+    // the other prefix keeps its threshold.
+    apply_prune(
+        &store,
+        &[version_policy(RetainPolicy::GreaterThanOrEqual {
+            threshold: 0,
+        })],
+    );
+    seed(&store);
+    store.compact_state();
+    assert_eq!(
+        get_value(&store, &first).as_deref(),
+        Some(b"first".as_slice())
+    );
+    assert!(get_value(&store, &other_v3).is_none());
+    assert_eq!(
+        get_value(&store, &other_v5).as_deref(),
+        Some(b"v5".as_slice())
+    );
+}
+
+#[test]
+fn prune_policies_survive_reopen() {
+    let dir = tempdir().expect("tempdir");
+    {
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        apply_prune(
+            &store,
+            &[version_policy(RetainPolicy::GreaterThanOrEqual {
+                threshold: 4,
+            })],
+        );
+    }
+
+    // No request reaches the reopened store, and the stored policy still applies.
+    let store = RocksStore::open(dir.path(), None).expect("reopen db");
+    let v3 = versioned_key(b"row", 3);
+    let v5 = versioned_key(b"row", 5);
+    put_batch(
+        &store,
+        vec![
+            (v3.clone(), Bytes::from_static(b"v3")),
+            (v5.clone(), Bytes::from_static(b"v5")),
+        ],
+    );
+    store.compact_state();
+    assert!(get_value(&store, &v3).is_none());
+    assert_eq!(get_value(&store, &v5).as_deref(), Some(b"v5".as_slice()));
+}
+
+/// Reopening re-applies the newest log row, which can bring back rows of that batch that a
+/// compaction had pruned. The stored policy removes them again at the next compaction.
+#[test]
+fn reopen_restores_pruned_rows_of_the_newest_batch_until_a_compaction() {
+    let dir = tempdir().expect("tempdir");
+    let v1 = versioned_key(b"row", 1);
+    let v2 = versioned_key(b"row", 2);
+    let v3 = versioned_key(b"row", 3);
+    {
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        put_batch(
+            &store,
+            vec![
+                (v1.clone(), Bytes::from_static(b"v1")),
+                (v2.clone(), Bytes::from_static(b"v2")),
+                (v3.clone(), Bytes::from_static(b"v3")),
+            ],
+        );
+        apply_prune(
+            &store,
+            &[version_policy(RetainPolicy::GreaterThanOrEqual {
+                threshold: 3,
+            })],
+        );
+        store.compact_state();
+        assert!(get_value(&store, &v1).is_none());
+        assert!(get_value(&store, &v2).is_none());
+    }
+
+    let store = RocksStore::open(dir.path(), None).expect("reopen db");
+    assert_eq!(get_value(&store, &v1).as_deref(), Some(b"v1".as_slice()));
+    assert_eq!(get_value(&store, &v2).as_deref(), Some(b"v2".as_slice()));
+
+    store.compact_state();
+    assert!(get_value(&store, &v1).is_none());
+    assert!(get_value(&store, &v2).is_none());
+    assert_eq!(get_value(&store, &v3).as_deref(), Some(b"v3".as_slice()));
+}
+
+/// A range cursor opened before a compaction prunes its rows still returns them, page after
+/// page, while a query that starts after the compaction does not find them.
+#[test]
+fn range_cursor_keeps_its_rows_across_a_pruning_compaction() {
+    let dir = tempdir().expect("tempdir");
+    let store = RocksStore::open(dir.path(), None).expect("open db");
+    let keys: Vec<Bytes> = (1..=3)
+        .map(|version| versioned_key(b"row", version))
+        .collect();
+    put_batch(
+        &store,
+        keys.iter()
+            .map(|key| (key.clone(), Bytes::from_static(b"value")))
+            .collect(),
+    );
+
+    let (start, end) = Prefix::from_byte(TEST_PREFIX).bounds();
+    let mut cursor = block_on(store.range_scan(start.clone(), end.clone(), usize::MAX, true))
+        .expect("open scan")
+        .scan;
+    let first = block_on(cursor.next_batch(1)).expect("first page").rows;
+    assert_eq!(first[0].0, keys[0]);
+
+    apply_prune(&store, &[version_policy(RetainPolicy::DropAll)]);
+    store.compact_state();
+    assert!(get_value(&store, &keys[1]).is_none());
+    let mut fresh = block_on(store.range_scan(start, end, usize::MAX, true))
+        .expect("open scan")
+        .scan;
+    assert!(block_on(fresh.next_batch(usize::MAX))
+        .expect("fresh scan")
+        .rows
+        .is_empty());
+
+    let rest = block_on(cursor.next_batch(usize::MAX))
+        .expect("later pages")
+        .rows;
+    let rest: Vec<&Bytes> = rest.iter().map(|(key, _)| key).collect();
+    assert_eq!(rest, [&keys[1], &keys[2]]);
 }
