@@ -207,6 +207,12 @@ const DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
 /// the limits of a single put, so every sequence fits in one response.
 const MAX_SEQUENCE_ENTRIES: usize = MAX_PUT_ENTRIES;
 
+/// Largest `count` of a `KeepLatest` policy. A filter holds up to `count` keys in its window
+/// and can read `count` keys for one key it is shown. At this limit the keys of a window take
+/// under 16 MiB at the longest key the protocol allows, and each key's group and order value
+/// are held beside it. The value is a round number.
+const MAX_KEEP_LATEST_COUNT: usize = 65_536;
+
 /// Directory inside the store path where commit groups stage their SST files, so that ingestion
 /// can hard-link them into the database. Where hard links are unsupported, as across
 /// filesystems, RocksDB copies the file.
@@ -560,7 +566,15 @@ impl CompiledPolicy {
         let regex = compile_payload_regex(&scope.selector.payload_regex)
             .map_err(|e| format!("policy: {e}"))?;
         let rule = match policy.retain {
-            RetainPolicy::KeepLatest { count } => PruneRule::KeepLatest { count },
+            RetainPolicy::KeepLatest { count } => {
+                if count > MAX_KEEP_LATEST_COUNT {
+                    return Err(format!(
+                        "policy: keep_latest count {count} exceeds the limit of \
+                         {MAX_KEEP_LATEST_COUNT}"
+                    ));
+                }
+                PruneRule::KeepLatest { count }
+            }
             RetainPolicy::GreaterThan { threshold } => PruneRule::GreaterThan {
                 threshold: threshold_order_value(&scope, threshold)?,
             },
@@ -775,7 +789,8 @@ struct ReadAhead {
     cursor: DBRawIterator<'static>,
     _db: Arc<DB>,
     /// The keys the cursor has read after the key last asked about, in key order. The cursor
-    /// is on the last of them unless it ran off the end.
+    /// is on the last of them unless it ran off the end. It holds at most as many keys as the
+    /// `count` of the policy that reads ahead.
     window: VecDeque<Ahead>,
     /// How many keys at the front of `window` form a chain, members of one group whose order
     /// values never decrease from one key to the next.
@@ -4215,6 +4230,64 @@ mod tests {
     }
 
     #[test]
+    fn keep_latest_count_above_the_limit_is_refused() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        let keep = |count| PrunePolicyDocument {
+            version: PRUNE_POLICY_DOCUMENT_VERSION,
+            policies: vec![versioned_policy(&[1], RetainPolicy::KeepLatest { count })],
+        };
+        let installed = || {
+            let row = store
+                .db
+                .get_cf(store.meta_cf(), PRUNE_META_KEY)
+                .expect("read row");
+            (row, store.prune.current())
+        };
+        install(&store, vec![versioned_policy(&[2], RetainPolicy::DropAll)]);
+        let (row, (generation, compiled)) = installed();
+
+        // A count above the limit is refused, and the refusal changes nothing.
+        let error = store
+            .install_prune_policies(keep(MAX_KEEP_LATEST_COUNT + 1))
+            .expect_err("a count above the limit");
+        assert!(
+            error.contains(&format!("exceeds the limit of {MAX_KEEP_LATEST_COUNT}")),
+            "{error}"
+        );
+        let (row_after, (generation_after, compiled_after)) = installed();
+        assert_eq!(row_after, row);
+        assert_eq!(generation_after, generation);
+        assert!(Arc::ptr_eq(&compiled_after, &compiled));
+
+        // A count at the limit is installed beside the policy that was there.
+        store
+            .install_prune_policies(keep(MAX_KEEP_LATEST_COUNT))
+            .expect("a count at the limit");
+        let (_, (generation_after, compiled_after)) = installed();
+        assert_eq!(generation_after, generation + 1);
+        assert_eq!(compiled_after.len(), 2);
+
+        // A stored document with a count above the limit fails the open.
+        store
+            .db
+            .put_cf(
+                store.meta_cf(),
+                PRUNE_META_KEY,
+                keep(MAX_KEEP_LATEST_COUNT + 1).encode(),
+            )
+            .expect("write row");
+        drop(store);
+        let Err(error) = RocksStore::open(dir.path(), None) else {
+            panic!("a stored count above the limit must fail open");
+        };
+        assert!(
+            error.contains(&format!("exceeds the limit of {MAX_KEEP_LATEST_COUNT}")),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn keep_latest_reads_ahead_in_the_live_state() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
@@ -4427,12 +4500,22 @@ mod tests {
         store.db.write(batch).expect("write");
 
         // All but the latest `count` are removed. A dropped cursor costs its window again, and
-        // the cursor is dropped rarely enough that the walk stays under two steps a key.
+        // the cursor is dropped rarely enough that the walk stays under two steps a key. The
+        // window fills to `count` keys and never holds more.
         let mut filter = filter_over(&store.prune);
         let mut gone = Vec::new();
-        let (steps, _) = cursor_work(|| gone = removed(&mut filter, &keys));
+        let mut longest = 0;
+        let (steps, _) = cursor_work(|| {
+            for key in &keys {
+                if removes(&mut filter, key) {
+                    gone.push(key.clone());
+                }
+                longest = longest.max(filter.ahead.as_ref().map_or(0, |a| a.window.len()));
+            }
+        });
         assert_eq!(gone, keys[..versions - count]);
         assert!(steps < 2 * versions as u64, "{steps}");
+        assert_eq!(longest, count);
     }
 
     #[test]
