@@ -569,21 +569,19 @@ fn prune_policy_stands_for_rows_written_later() {
     );
 }
 
-/// A request replaces the stored policies whose prefixes it overlaps and leaves the others in
-/// force.
+/// A request's document replaces the installed one as a whole. A policy that the request does
+/// not repeat no longer applies, and the rows that it alone selected stay.
 #[test]
-fn prune_request_replaces_only_the_policies_it_overlaps() {
+fn prune_request_replaces_the_policies_of_earlier_requests() {
     const OTHER_PREFIX: u8 = 2;
     let dir = tempdir().expect("tempdir");
     let store = RocksStore::open(dir.path(), None).expect("open db");
     let drop_all = version_policy(RetainPolicy::DropAll);
-    let threshold = |threshold| {
-        version_policy_in(
-            OTHER_PREFIX,
-            RetainPolicy::GreaterThanOrEqual { threshold },
-            OrderEncoding::U64Be,
-        )
-    };
+    let threshold = version_policy_in(
+        OTHER_PREFIX,
+        RetainPolicy::GreaterThanOrEqual { threshold: 4 },
+        OrderEncoding::U64Be,
+    );
     let first = versioned_key(b"row", 1);
     let other_v3 = versioned_key_in(OTHER_PREFIX, b"row", 3);
     let other_v5 = versioned_key_in(OTHER_PREFIX, b"row", 5);
@@ -598,9 +596,8 @@ fn prune_request_replaces_only_the_policies_it_overlaps() {
         );
     };
 
-    // Two requests for two prefixes. The second leaves the first in force.
-    apply_prune(&store, &[drop_all]);
-    apply_prune(&store, &[threshold(4)]);
+    // One request installs a policy for each prefix, and both apply.
+    apply_prune(&store, &[drop_all, threshold.clone()]);
     seed(&store);
     store.compact_state();
     assert!(get_value(&store, &first).is_none());
@@ -610,14 +607,10 @@ fn prune_request_replaces_only_the_policies_it_overlaps() {
         Some(b"v5".as_slice())
     );
 
-    // A request for the first prefix replaces its policy with one that keeps every row, and
-    // the other prefix keeps its threshold.
-    apply_prune(
-        &store,
-        &[version_policy(RetainPolicy::GreaterThanOrEqual {
-            threshold: 0,
-        })],
-    );
+    // The next request repeats the threshold alone. The policy it leaves out no longer
+    // applies, so a row under that prefix survives a compaction, and the threshold still
+    // removes its rows.
+    apply_prune(&store, &[threshold]);
     seed(&store);
     store.compact_state();
     assert_eq!(
@@ -629,6 +622,31 @@ fn prune_request_replaces_only_the_policies_it_overlaps() {
         get_value(&store, &other_v5).as_deref(),
         Some(b"v5".as_slice())
     );
+}
+
+/// A document with no policies leaves none installed. The RPC refuses a request without
+/// policies, so only a direct call of the trait passes one.
+#[test]
+fn prune_document_without_policies_installs_none() {
+    let dir = tempdir().expect("tempdir");
+    let row = versioned_key(b"row", 1);
+    let seed = |store: &RocksStore| {
+        put_batch(store, vec![(row.clone(), Bytes::from_static(b"row"))]);
+    };
+    {
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        apply_prune(&store, &[version_policy(RetainPolicy::DropAll)]);
+        apply_prune(&store, &[]);
+        seed(&store);
+        store.compact_state();
+        assert_eq!(get_value(&store, &row).as_deref(), Some(b"row".as_slice()));
+    }
+
+    // The empty document is what a reopen loads.
+    let store = RocksStore::open(dir.path(), None).expect("reopen db");
+    seed(&store);
+    store.compact_state();
+    assert_eq!(get_value(&store, &row).as_deref(), Some(b"row".as_slice()));
 }
 
 #[test]

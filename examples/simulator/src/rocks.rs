@@ -87,17 +87,16 @@
 //!
 //! # Key pruning
 //!
-//! A Prune call installs policies and replies. It merges them into the stored document, writes
-//! the document to a meta row, and swaps the compiled policies that the state family's
-//! compaction filter reads (see `RocksStore::install_prune_policies` and `PruneFilter`). The
-//! rows a policy removes leave later, when RocksDB compacts the files that hold them, and
-//! nothing schedules a compaction for that.
+//! A Prune call installs its policies in place of the ones installed before, and replies. It
+//! writes the request's document to a meta row and swaps the compiled policies that the state
+//! family's compaction filter reads (see `RocksStore::install_prune_policies` and
+//! `PruneFilter`). The rows a policy removes leave later, when RocksDB compacts the files that
+//! hold them, and nothing schedules a compaction for that.
 //!
-//! An install refuses a `KeepLatest` count above `MAX_KEEP_LATEST_COUNT` and a merged document
-//! whose encoding is longer than `MAX_REQUEST_MESSAGE_BYTES`.
+//! An install refuses a `KeepLatest` count above `MAX_KEEP_LATEST_COUNT`.
 //!
 //! ```text
-//!   Prune call   --[ merge ][ write row ][ swap ]--> reply
+//!   Prune call   -----------[ write row ][ swap ]--> reply
 //!                                       |       |
 //!   meta row     .......................[############ stored document ########################
 //!   policies     ...............................[####### compiled policies ###################
@@ -111,10 +110,10 @@
 //!
 //! Both rows are ones a policy removes, k1 in the oldest file and k8 in a new one. A compaction
 //! of the newer files removes k8, and k1 stays readable until a compaction takes the oldest
-//! file. A policy stands, so it also removes rows written after the call. It ends when a
-//! request names its prefix, or a prefix that contains it or lies inside it, and so replaces
-//! it. A replaced policy stops deciding at the next key a compaction is shown. The removals it
-//! had already decided still land when their compaction finishes (see `PruneFilter`).
+//! file. A policy stands, so it also removes rows written after the call. It ends with the next
+//! request the store accepts, whose document replaces every installed policy. A replaced policy
+//! stops deciding at the next key a compaction is shown. The removals it had already decided
+//! still land when their compaction finishes (see `PruneFilter`).
 //!
 //! Which rows `KeepLatest` removes depends on the other rows of their group, and a filter is
 //! shown one row at a time. So the filter reads ahead in the live state (see
@@ -130,7 +129,7 @@
 use buffa::Message;
 use buffa::{DecodeOptions, ViewEncode};
 use bytes::Bytes;
-use commonware_codec::{Copying, DecodeExt, Encode, EncodeSize};
+use commonware_codec::{Copying, DecodeExt, Encode};
 #[cfg(test)]
 use exoware_sdk::common::kv::v1::Entry;
 #[cfg(test)]
@@ -615,37 +614,6 @@ fn compile_policies(policies: &[PrunePolicy]) -> Result<Arc<[CompiledPolicy]>, S
     policies.iter().map(CompiledPolicy::compile).collect()
 }
 
-/// The policies a Prune request leaves in force. Its policies replace every stored policy
-/// whose prefix equals one of theirs, extends it or is extended by it, and the rest stay.
-fn merge_prune_policies(stored: &[PrunePolicy], request: Vec<PrunePolicy>) -> Vec<PrunePolicy> {
-    let replaced = |kept: &PrunePolicy| {
-        let kept = &kept.scope.selector.prefix;
-        request.iter().any(|new| {
-            let new = &new.scope.selector.prefix;
-            kept.starts_with(new) || new.starts_with(kept)
-        })
-    };
-    let mut merged: Vec<PrunePolicy> = stored
-        .iter()
-        .filter(|kept| !replaced(kept))
-        .cloned()
-        .collect();
-    merged.extend(request);
-    merged
-}
-
-/// Encodes `document` as the meta row. A document whose encoding is longer than `limit` bytes
-/// is refused before the row is allocated.
-fn encode_prune_document(document: &PrunePolicyDocument, limit: usize) -> Result<Vec<u8>, String> {
-    let len = document.encode_size();
-    if len > limit {
-        return Err(format!(
-            "prune policy document is {len} bytes, above the limit of {limit}"
-        ));
-    }
-    encode_policy_document(document).map_err(|e| e.to_string())
-}
-
 /// The installed prune policies, shared by the Prune call and the state family's filters.
 //
 // The two locks are separate so that a filter never waits for an install. An install holds
@@ -653,7 +621,7 @@ fn encode_prune_document(document: &PrunePolicyDocument, limit: usize) -> Result
 // when compactions run, each of which builds a filter first.
 #[derive(Default)]
 struct PrunePolicies {
-    /// Held by an install from its read of the meta row to its swap, so the row and `compiled`
+    /// Held by an install from its write of the meta row to its swap, so the row and `compiled`
     /// change in the same order.
     install: Mutex<()>,
     /// The policies of the meta row as compiled. Each new filter takes the list as it is then.
@@ -2458,32 +2426,34 @@ impl RocksStore {
         Ok(())
     }
 
-    /// Merges a request into the stored prune policies (see `merge_prune_policies`), persists
-    /// the result and puts it in force. The rows a policy removes leave when a compaction takes
-    /// the files that hold them.
+    /// Installs a request's policies in place of the stored ones. It persists the document and
+    /// puts it in force. The rows a policy removes leave when a compaction takes the files that
+    /// hold them.
     //
     // A prune document covers keys only. Sequence-log retention is set through
     // `log.retention.v1.SetRetention` (see the `Retention` impl).
     fn install_prune_policies(&self, document: PrunePolicyDocument) -> Result<(), String> {
-        let _install = self.prune.install.lock();
-        let merged = PrunePolicyDocument {
-            version: document.version,
-            policies: merge_prune_policies(&read_prune_policies(&self.db)?, document.policies),
-        };
-        let compiled = compile_policies(&merged.policies)?;
-
-        // The stored document is bounded by the byte limit of one request. RocksDB refuses a
-        // value above 4 GiB and the binding does not report that refusal, so a larger document
-        // could be acknowledged without being stored.
-        let row = encode_prune_document(&merged, MAX_REQUEST_MESSAGE_BYTES)?;
+        let compiled = compile_policies(&document.policies)?;
+        let row = encode_policy_document(&document).map_err(|e| e.to_string())?;
 
         // The row is durable before the swap, so no compaction applies a policy that a crash
         // could forget.
-        let mut batch = rocksdb::WriteBatch::default();
-        batch.put_cf(self.meta_cf(), PRUNE_META_KEY, row);
-        write_synced_batch(&self.db, batch)?;
+        let _install = self.prune.install.lock();
+        self.write_prune_row(row)?;
         self.prune.publish(compiled);
         Ok(())
+    }
+
+    /// Writes the prune policy row with one synced put, so it is durable once this returns.
+    //
+    // A single put reports a value that RocksDB refuses to store. A put into a write batch
+    // does not report that through the binding.
+    fn write_prune_row(&self, row: Vec<u8>) -> Result<(), String> {
+        let mut synced = WriteOptions::default();
+        synced.set_sync(true);
+        self.db
+            .put_cf_opt(self.meta_cf(), PRUNE_META_KEY, row, &synced)
+            .map_err(|e| e.to_string())
     }
 
     /// Lowest retained log sequence at or below the published frontier, or `None` when the log
@@ -4127,6 +4097,15 @@ mod tests {
             .collect()
     }
 
+    /// The prefixes of the policies in the stored document, in document order.
+    fn stored_prefixes(store: &RocksStore) -> Vec<Vec<u8>> {
+        read_prune_policies(&store.db)
+            .expect("read row")
+            .iter()
+            .map(|policy| policy.scope.selector.prefix.to_vec())
+            .collect()
+    }
+
     /// Waits until `ready` holds, and panics with `what` if thirty seconds pass first.
     fn wait_until(ready: impl Fn() -> bool, what: &str) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -4137,51 +4116,30 @@ mod tests {
     }
 
     #[test]
-    fn prune_request_merges_by_prefix() {
-        let prefixes = |policies: &[PrunePolicy]| -> Vec<(Vec<u8>, RetainPolicy)> {
-            policies
-                .iter()
-                .map(|policy| (policy.scope.selector.prefix.to_vec(), policy.retain.clone()))
-                .collect()
-        };
-        let stored = vec![
-            versioned_policy(&[1], RetainPolicy::DropAll),
-            versioned_policy(&[2, 7], RetainPolicy::DropAll),
-            versioned_policy(&[3], RetainPolicy::DropAll),
-            versioned_policy(&[4], RetainPolicy::DropAll),
-        ];
-
-        // The request names an equal prefix, a prefix that a stored one extends, and a prefix
-        // that extends a stored one. Each replaces the stored policy, and the fourth stays.
-        let keep = RetainPolicy::KeepLatest { count: 1 };
-        let merged = merge_prune_policies(
-            &stored,
+    fn prune_request_replaces_every_installed_policy() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        install(
+            &store,
             vec![
-                versioned_policy(&[1], keep.clone()),
-                versioned_policy(&[2], keep.clone()),
-                versioned_policy(&[3, 9], keep.clone()),
+                versioned_policy(&[1], RetainPolicy::DropAll),
+                versioned_policy(&[2], RetainPolicy::DropAll),
             ],
         );
-        assert_eq!(
-            prefixes(&merged),
-            [
-                (vec![4], RetainPolicy::DropAll),
-                (vec![1], keep.clone()),
-                (vec![2], keep.clone()),
-                (vec![3, 9], keep),
-            ]
-        );
+        assert_eq!(stored_prefixes(&store), [[1], [2]]);
 
-        // The merged policies form a document the SDK accepts.
-        encode_policy_document(&PrunePolicyDocument {
-            version: PRUNE_POLICY_DOCUMENT_VERSION,
-            policies: merged,
-        })
-        .expect("merged document validates");
+        // The second request names another prefix. The policies of the first are gone from the
+        // row, and a filter no longer applies them.
+        install(&store, vec![versioned_policy(&[3], RetainPolicy::DropAll)]);
+        assert_eq!(stored_prefixes(&store), [[3]]);
+        let mut filter = filter_over(&store.prune);
+        assert!(!removes(&mut filter, &versioned_key(&[1], b"row", 1)));
+        assert!(!removes(&mut filter, &versioned_key(&[2], b"row", 1)));
+        assert!(removes(&mut filter, &versioned_key(&[3], b"row", 1)));
     }
 
     #[test]
-    fn prune_requests_for_separate_prefixes_survive_reopen() {
+    fn only_the_last_prune_request_decides_after_reopen() {
         let dir = tempdir().expect("tempdir");
         {
             let store = RocksStore::open(dir.path(), None).expect("open db");
@@ -4189,12 +4147,13 @@ mod tests {
             install(&store, vec![versioned_policy(&[2], RetainPolicy::DropAll)]);
         }
 
-        // The stored document holds both requests, so both policies decide after a reopen.
+        // The stored document is the second request's, so only its policy decides after a
+        // reopen.
         let store = RocksStore::open(dir.path(), None).expect("reopen db");
+        assert_eq!(stored_prefixes(&store), [[2]]);
         let mut filter = filter_over(&store.prune);
-        assert!(removes(&mut filter, &versioned_key(&[1], b"row", 1)));
+        assert!(!removes(&mut filter, &versioned_key(&[1], b"row", 1)));
         assert!(removes(&mut filter, &versioned_key(&[2], b"row", 1)));
-        assert!(!removes(&mut filter, &versioned_key(&[3], b"row", 1)));
     }
 
     #[test]
@@ -4222,57 +4181,26 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
         install(&store, vec![versioned_policy(&[1], RetainPolicy::DropAll)]);
-        let stored = || -> Vec<Vec<u8>> {
-            read_prune_policies(&store.db)
-                .expect("read row")
-                .iter()
-                .map(|policy| policy.scope.selector.prefix.to_vec())
-                .collect()
-        };
 
         // The test holds the compiled list, so a second install writes its row and then waits
         // at the swap. It still holds the install lock there, which keeps a third install from
-        // reading the row and swapping ahead of it.
+        // writing its row and swapping ahead of it.
         let compiled = store.prune.compiled.lock();
         thread::scope(|scope| {
             let second = scope
                 .spawn(|| install(&store, vec![versioned_policy(&[2], RetainPolicy::DropAll)]));
             wait_until(
-                || stored() == [[1], [2]],
+                || stored_prefixes(&store) == [[2]],
                 "the second install must write its row",
             );
             assert!(store.prune.install.is_locked());
             drop(compiled);
             second.join().expect("install");
         });
-        assert_eq!(stored(), [[1], [2]]);
+        assert_eq!(stored_prefixes(&store), [[2]]);
         let mut filter = filter_over(&store.prune);
-        assert!(removes(&mut filter, &versioned_key(&[1], b"row", 1)));
+        assert!(!removes(&mut filter, &versioned_key(&[1], b"row", 1)));
         assert!(removes(&mut filter, &versioned_key(&[2], b"row", 1)));
-    }
-
-    #[test]
-    fn prune_document_is_bounded_in_bytes() {
-        let document = PrunePolicyDocument {
-            version: PRUNE_POLICY_DOCUMENT_VERSION,
-            policies: vec![versioned_policy(&[1], RetainPolicy::DropAll)],
-        };
-        let len = document.encode_size();
-
-        // The document is encoded under a limit of its own length and refused under a limit
-        // one byte shorter.
-        assert_eq!(
-            encode_prune_document(&document, len).expect("at the limit"),
-            document.encode()
-        );
-        let error = encode_prune_document(&document, len - 1).expect_err("above the limit");
-        assert_eq!(
-            error,
-            format!(
-                "prune policy document is {len} bytes, above the limit of {}",
-                len - 1
-            )
-        );
     }
 
     #[test]
@@ -4414,13 +4342,13 @@ mod tests {
         assert_eq!(generation_after, generation);
         assert!(Arc::ptr_eq(&compiled_after, &compiled));
 
-        // A count at the limit is installed beside the policy that was there.
+        // A count at the limit is installed.
         store
             .install_prune_policies(keep(MAX_KEEP_LATEST_COUNT))
             .expect("a count at the limit");
         let (_, (generation_after, compiled_after)) = installed();
         assert_eq!(generation_after, generation + 1);
-        assert_eq!(compiled_after.len(), 2);
+        assert_eq!(compiled_after.len(), 1);
 
         // A stored document with a count above the limit fails the open.
         store
