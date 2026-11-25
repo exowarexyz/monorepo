@@ -124,7 +124,7 @@
 use buffa::Message;
 use buffa::{DecodeOptions, ViewEncode};
 use bytes::Bytes;
-use commonware_codec::{Copying, DecodeExt, Encode};
+use commonware_codec::{Copying, DecodeExt, Encode, EncodeSize};
 #[cfg(test)]
 use exoware_sdk::common::kv::v1::Entry;
 #[cfg(test)]
@@ -623,6 +623,18 @@ fn merge_prune_policies(stored: &[PrunePolicy], request: Vec<PrunePolicy>) -> Ve
         .collect();
     merged.extend(request);
     merged
+}
+
+/// Encodes `document` as the meta row. A document whose encoding is longer than `limit` bytes
+/// is refused before the row is allocated.
+fn encode_prune_document(document: &PrunePolicyDocument, limit: usize) -> Result<Vec<u8>, String> {
+    let len = document.encode_size();
+    if len > limit {
+        return Err(format!(
+            "prune policy document is {len} bytes, above the limit of {limit}"
+        ));
+    }
+    encode_policy_document(document).map_err(|e| e.to_string())
 }
 
 /// The installed prune policies, shared by the Prune call and the state family's filters.
@@ -2426,7 +2438,11 @@ impl RocksStore {
             policies: merge_prune_policies(&read_prune_policies(&self.db)?, document.policies),
         };
         let compiled = compile_policies(&merged.policies)?;
-        let row = encode_policy_document(&merged).map_err(|e| e.to_string())?;
+
+        // The stored document is bounded by the byte limit of one request. RocksDB refuses a
+        // value above 4 GiB and the binding does not report that refusal, so a larger document
+        // could be acknowledged without being stored.
+        let row = encode_prune_document(&merged, MAX_REQUEST_MESSAGE_BYTES)?;
 
         // The row is durable before the swap, so no compaction applies a policy that a crash
         // could forget.
@@ -4119,6 +4135,30 @@ mod tests {
             policies: merged,
         })
         .expect("merged document validates");
+    }
+
+    #[test]
+    fn prune_document_is_bounded_in_bytes() {
+        let document = PrunePolicyDocument {
+            version: PRUNE_POLICY_DOCUMENT_VERSION,
+            policies: vec![versioned_policy(&[1], RetainPolicy::DropAll)],
+        };
+        let len = document.encode_size();
+
+        // The document is encoded under a limit of its own length and refused under a limit
+        // one byte shorter.
+        assert_eq!(
+            encode_prune_document(&document, len).expect("at the limit"),
+            document.encode()
+        );
+        let error = encode_prune_document(&document, len - 1).expect_err("above the limit");
+        assert_eq!(
+            error,
+            format!(
+                "prune policy document is {len} bytes, above the limit of {}",
+                len - 1
+            )
+        );
     }
 
     #[test]
