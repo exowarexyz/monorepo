@@ -2050,8 +2050,12 @@ impl RocksStore {
             return Ok(());
         }
 
-        // The floor is raised before the deletes so the final synced chunk makes it durable
-        // by ack: an acked prune must never be undone by the newest-log-row replay at reopen.
+        // The floor is raised before the deletes, and the final synced chunk makes both durable
+        // before the reply. It keeps the newest-log-row replay at reopen from restoring the rows
+        // this prune scanned. Pruning is garbage collection and stays best-effort against a
+        // concurrent put. A put that publishes after the floor is raised and rewrites a key this
+        // prune then deletes loses that row, and a reopen replays it while it is still the
+        // newest log row.
         self.raise_state_floor()?;
         self.delete_keys(&all_deletes)
     }
