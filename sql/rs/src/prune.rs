@@ -18,8 +18,22 @@ impl KvSchema {
     /// the policy through the same [`exoware_sdk::PrefixedStoreClient`] used to
     /// create this schema.
     ///
-    /// Store pruning does not cascade to secondary indexes. Disable this
-    /// primary-row retention policy before adding indexes to the table.
+    /// The policy stays in force from the moment the Store accepts it until the
+    /// next Prune request the Store accepts, and it also covers versions
+    /// written later. That next request replaces every installed policy, so
+    /// send the policies of all tables in one request. Old versions can stay
+    /// readable for a while after the Store accepts the policy.
+    ///
+    /// Store pruning does not cascade to secondary indexes, so end this policy
+    /// before adding an index to the table. Versions it had already selected
+    /// can still disappear for a while after it ends, so an index added right
+    /// away can hold entries for versions that are gone.
+    ///
+    /// To end the policy, send a request that leaves it out. A request needs at
+    /// least one policy, so if no other policy should stay installed, send one
+    /// with the same scope and
+    /// `RetainPolicy::GreaterThanOrEqual { threshold: 0 }` to keep every
+    /// version.
     pub fn keep_latest_versions_policy(
         &self,
         table_name: &str,

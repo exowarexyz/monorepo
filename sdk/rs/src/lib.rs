@@ -2811,7 +2811,11 @@ impl<'a> Query<'a> {
 }
 
 impl<'a> Prune<'a> {
-    /// `store.prune.v1.Service.Prune` — apply each policy in turn.
+    /// Calls `store.prune.v1.Service.Prune` with `policies` under this client's key prefix. The
+    /// request replaces every policy installed on the store, including policies sent under other
+    /// key prefixes. An installed policy also applies to keys written after the request. `Ok`
+    /// means the store has accepted the policies. It does not mean the keys they remove are gone,
+    /// because the store can remove them later.
     pub async fn prune(
         &self,
         policies: &[crate::prune_policy::PrunePolicy],
@@ -2821,9 +2825,9 @@ impl<'a> Prune<'a> {
 }
 
 impl<'a> Stream<'a> {
-    /// `log.stream.v1.Service.Subscribe` — see `StreamSubscription::next`
+    /// Calls `log.stream.v1.Service.Subscribe`. See `StreamSubscription::next`
     /// for consuming delivered frames. `since_sequence_number = None` starts
-    /// live from the next Put; `Some(N)` replays retained batches before
+    /// live from the next Put. `Some(N)` replays retained batches before
     /// transitioning to live, and never delivers a batch below `N`, even when
     /// `N` is past the latest published batch. An evicted `since` returns a
     /// `ConnectError::out_of_range` carrying `ErrorInfo.reason = "BATCH_EVICTED"`.
@@ -2835,7 +2839,7 @@ impl<'a> Stream<'a> {
         self.c.subscribe(filter, since_sequence_number).await
     }
 
-    /// `log.stream.v1.Service.Get` — `Ok(None)` collapses the server's
+    /// Calls `log.stream.v1.Service.Get`. `Ok(None)` collapses the server's
     /// `BATCH_EVICTED` / `BATCH_NOT_FOUND` error details.
     pub async fn get(&self, sequence_number: u64) -> Result<Option<StoreBatch>, ClientError> {
         self.c.get_batch(sequence_number).await
@@ -2843,9 +2847,9 @@ impl<'a> Stream<'a> {
 }
 
 impl<'a> Retention<'a> {
-    /// `log.retention.v1.Service.SetRetention` — install (`Some`) or clear
-    /// (`None`) the sequence-log retention rule. The rule is persistent and
-    /// continuously enforced as the log grows; eviction surfaces to
+    /// Calls `log.retention.v1.Service.SetRetention` to install (`Some`) or
+    /// clear (`None`) the sequence-log retention rule. The rule is persistent
+    /// and continuously enforced as the log grows. Eviction surfaces to
     /// `log.stream.v1` subscribers as `BATCH_EVICTED`. Returns the lowest
     /// retained sequence after one synchronous enforcement (`None` when the log
     /// is empty / no floor exists yet).
@@ -5056,7 +5060,8 @@ mod tests {
         let merged = prefix.prefix_selector(&logical).unwrap();
         assert_eq!(merged.prefix.as_ref(), &[0x05, 0x06, 0x07]);
 
-        // Reconstruct the codec EXACTLY as apply_key_prune_policy does.
+        // Rebuild the codec from the merged prefix, as the simulator does when it compiles a
+        // prune policy.
         let codec = Prefix::new(merged.prefix).unwrap();
 
         // Round-trip a real key through the reconstructed codec.

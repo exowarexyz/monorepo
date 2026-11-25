@@ -244,9 +244,15 @@ restart. Every upload to a namespace must belong to one operation history.
 Current-state rows are versioned by batch location. Unchanged chunks and nodes
 are inherited from earlier batches. Retain the rows needed for every historical
 tip you promise to serve. Source bitmap pruning does not delete Store rows or set
-backend retention. The [`adapter::prune`](src/adapter/prune.rs) helpers construct
-policies for update-index rows. Applications choose Store pruning and replay-log
-retention separately.
+backend retention. Applications choose Store pruning and replay-log retention
+separately.
+
+The [`adapter::prune`](src/adapter/prune.rs) helpers build Store prune policies
+for update-index rows. A policy stays in force from the moment the Store accepts
+it until the next Prune request the Store accepts, and it also covers rows
+written later. That next request replaces every installed policy, so send every
+policy that should hold in one request. Rows a policy removes can stay readable
+for a while after the Store accepts it.
 
 ### Pin omission
 

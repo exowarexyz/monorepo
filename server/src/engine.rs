@@ -137,7 +137,10 @@ pub trait Query: Sequence {
 
 /// Prune mutation capability.
 pub trait Prune: Send + Sync + 'static {
-    /// Apply a validated prune policy document sequentially.
+    /// Install a validated prune policy document in place of the one installed before. An
+    /// installed policy also applies to keys written after this call. `Ok` means the backend has
+    /// accepted the document. It does not mean the keys its policies remove are gone, because the
+    /// backend can remove them later.
     fn apply_prune_policies(
         &self,
         document: PrunePolicyDocument,
