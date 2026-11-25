@@ -247,8 +247,10 @@ tip you promise to serve. Source bitmap pruning does not delete Store rows or se
 backend retention. The [`adapter::prune`](src/adapter/prune.rs) helpers construct
 policies for update-index rows. A policy stands once the Store accepts it. The
 Store also applies it to rows written later, and it removes rows in the
-background, so a reply does not mean they are gone. Applications choose Store
-pruning and replay-log retention separately.
+background, so a reply does not mean they are gone. The next Prune request the
+Store accepts replaces every installed policy, so put every policy that should
+hold into one request. Applications choose Store pruning and replay-log
+retention separately.
 
 ### Pin omission
 

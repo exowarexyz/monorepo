@@ -133,7 +133,7 @@ impl KvSchema {
     /// End a primary-row retention policy before adding indexes (see
     /// `keep_latest_versions_policy`). Store pruning does not remove the
     /// corresponding secondary index entries, and versions the policy had
-    /// already selected can still disappear after it ends.
+    /// already selected can still disappear for a while after it ends.
     ///
     /// Operational ordering requirement: start writing new rows with the new
     /// index specs before backfilling historical rows, or rows written during

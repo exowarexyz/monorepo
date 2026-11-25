@@ -2811,9 +2811,10 @@ impl<'a> Query<'a> {
 }
 
 impl<'a> Prune<'a> {
-    /// Calls `store.prune.v1.Service.Prune`. A reply means the store has accepted the
-    /// policies. It does not mean the rows they remove are gone, since a store may remove
-    /// them later, for example as it compacts.
+    /// Calls `store.prune.v1.Service.Prune`. The request replaces every policy installed on
+    /// the store, those sent under other key prefixes included. A reply means the store has
+    /// accepted the policies. It does not mean the rows they remove are gone, since a store
+    /// may remove them later, for example as it compacts.
     pub async fn prune(
         &self,
         policies: &[crate::prune_policy::PrunePolicy],

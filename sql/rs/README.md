@@ -157,17 +157,19 @@ This policy requires an unindexed table whose primary key is exactly
 `(entity, UInt64 version)`. The policy stands once the Store accepts it. The Store
 also applies it to versions written later, and it removes rows in the
 background, so an old version can stay readable for a while after the call
-returns. The policy stays in force until another one whose key prefix overlaps
-this table's replaces it.
+returns. The policy stays in force until the next Prune request the Store
+accepts, which replaces every installed policy, so send the policies of all
+tables in one request.
 
 Store pruning removes base rows but leaves their index entries, so this policy
-is for a table that stays unindexed. To end it, apply a policy with the same
-scope that keeps every version, for example the policy above with `retain` set
-to `RetainPolicy::GreaterThanOrEqual { threshold: 0 }`. Versions the old policy
-had already selected can still disappear after that call returns, so an index
-added later can hold entries for versions that are gone. The schema cannot check
-policies built directly with the SDK or schema changes made after the policy was
-applied.
+is for a table that stays unindexed. To end it, send a request that leaves it
+out. A request needs at least one policy, so when nothing else is installed send
+one that keeps every version, for example the policy above with `retain` set to
+`RetainPolicy::GreaterThanOrEqual { threshold: 0 }`. Versions the policy had
+already selected can still disappear for a while after that call returns, so an
+index added right away can hold entries for versions that are gone. The schema
+cannot check policies built directly with the SDK or schema changes made after
+the policy was applied.
 
 ### Secondary indexes
 

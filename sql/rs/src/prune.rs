@@ -19,16 +19,18 @@ impl KvSchema {
     /// create this schema.
     ///
     /// The policy stands once the Store accepts it. The Store also applies it
-    /// to versions written later, removes rows in the background, and keeps
-    /// the policy until another one whose key prefix overlaps this table's
-    /// replaces it.
+    /// to versions written later and removes rows in the background. It keeps
+    /// the policy until the next Prune request it accepts, which replaces every
+    /// installed policy, so send the policies of all tables in one request.
     ///
     /// Store pruning does not cascade to secondary indexes, so this policy is
-    /// for a table that stays unindexed. To end it, apply a policy with the
-    /// same scope and `RetainPolicy::GreaterThanOrEqual { threshold: 0 }`,
-    /// which keeps every version. Versions this policy had already selected
-    /// can still disappear after that call returns, so an index added later
-    /// can hold entries for versions that are gone.
+    /// for a table that stays unindexed. To end it, send a request that leaves
+    /// it out. A request needs at least one policy, so when nothing else is
+    /// installed send one with the same scope and
+    /// `RetainPolicy::GreaterThanOrEqual { threshold: 0 }`, which keeps every
+    /// version. Versions this policy had already selected can still disappear
+    /// for a while after that call returns, so an index added right away can
+    /// hold entries for versions that are gone.
     pub fn keep_latest_versions_policy(
         &self,
         table_name: &str,
