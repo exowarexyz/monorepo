@@ -981,7 +981,10 @@ fn merge_log_run(db: &DB, trigger: usize) -> Result<bool, String> {
     let mut options = CompactOptions::default();
 
     // By default a manual compaction skips files that are already in the bottom level, and
-    // `Force` makes it rewrite them.
+    // `Force` makes it rewrite them. When a retention tombstone overlaps the run, RocksDB first
+    // rewrites the bottom-level files under the tombstone without their deleted rows, and
+    // `Force` then merges that output with the rest of the run. That copies the surviving rows
+    // of those files twice and leaves the run merged after one call.
     options.set_bottommost_level_compaction(BottommostLevelCompaction::Force);
 
     // A non-exclusive manual compaction leaves automatic compactions running in every family.
@@ -4071,6 +4074,48 @@ mod tests {
                 store.get_raw(&key).expect("get").as_deref(),
                 Some(&value[..])
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn log_merge_joins_a_file_that_retention_cut_with_its_neighbor() {
+        let dir = tempdir().expect("tempdir");
+
+        // The default trigger is far above nine files, so the merge worker stays idle and the
+        // test runs each merge itself.
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        for sequence in 1..=8 {
+            store.put_batch(small_batch(sequence)).await.expect("put");
+        }
+        assert_eq!(merge_log_run(&store.db, 8), Ok(true));
+        store.put_batch(small_batch(9)).await.expect("put");
+        assert_eq!(log_files(&store).len(), 2);
+
+        // The cutoff, sequence 5, falls inside the merged file, and its tombstone is still in
+        // the memtable when the next merge compacts the run of two.
+        store
+            .set_retention(Some(RetentionPolicy::KeepLatest { count: 5 }))
+            .expect("set retention");
+
+        // One call joins the two files. A run of two that stayed two files would be planned
+        // again at every wake-up, ahead of every newer run.
+        assert_eq!(merge_log_run(&store.db, 2), Ok(true));
+        assert_eq!(log_files(&store).len(), 1);
+
+        // The merged file holds exactly the retained window.
+        assert_eq!(
+            store.oldest_retained_batch().await.expect("oldest"),
+            Some(5)
+        );
+        assert_eq!(log_file_keys_present(&store, 4), [false; 3]);
+        for sequence in 5..=9 {
+            let batch = store
+                .get_batch(sequence)
+                .await
+                .expect("get batch")
+                .unwrap_or_else(|| panic!("batch {sequence} retained"));
+            assert_eq!(batch_entries(batch), small_batch(sequence));
+            assert_eq!(log_file_keys_present(&store, sequence), [true; 3]);
         }
     }
 
