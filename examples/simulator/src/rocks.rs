@@ -4497,13 +4497,22 @@ mod tests {
         // Two rows of one group share an order value. The later key counts as the newer.
         let mut policy = versioned_policy(&[1], RetainPolicy::KeepLatest { count: 1 });
         policy.scope.selector.payload_regex =
-            Utf8::from("(?s-u)^(?P<group>[a-z])(?P<version>.{8})[xy]$");
-        install(&store, vec![policy]);
+            Utf8::from("(?s-u)^(?P<group>[a-z])(?P<version>.{8})[xyz]$");
+        install(&store, vec![policy.clone()]);
         let key = |last: u8| [&[1, b'a'][..], &7u64.to_be_bytes(), &[last]].concat();
         let keys = [key(b'x'), key(b'y')];
         for key in &keys {
             store.db.put(key, b"row").expect("put");
         }
+        let mut filter = filter_over(&store.prune);
+        assert_eq!(removed(&mut filter, &keys), [key(b'x')]);
+
+        // A third row with the same order value continues the chain behind the second. With a
+        // count of two the first row has two newer rows behind it, and the second has one.
+        policy.retain = RetainPolicy::KeepLatest { count: 2 };
+        install(&store, vec![policy]);
+        store.db.put(key(b'z'), b"row").expect("put");
+        let keys = [key(b'x'), key(b'y'), key(b'z')];
         let mut filter = filter_over(&store.prune);
         assert_eq!(removed(&mut filter, &keys), [key(b'x')]);
     }
@@ -4703,6 +4712,37 @@ mod tests {
         let (steps, seeks) = cursor_work(|| gone = removed(&mut filter, &newest));
         assert!(gone.is_empty());
         assert_eq!((steps, seeks), (u64::from(GROUPS), u64::from(GROUPS)));
+    }
+
+    #[test]
+    fn keep_latest_stops_reading_where_the_chain_breaks() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        let count = 4;
+        install(
+            &store,
+            vec![versioned_policy(&[1], RetainPolicy::KeepLatest { count })],
+        );
+
+        // Group a has three versions, and group b has a hundred behind them.
+        let mut batch = rocksdb::WriteBatch::default();
+        for version in 1..=3 {
+            batch.put(versioned_key(&[1], b"a", version), b"row");
+        }
+        for version in 1..=100 {
+            batch.put(versioned_key(&[1], b"b", version), b"row");
+        }
+        store.db.write(batch).expect("write");
+
+        // The oldest key of group a has two followers in its group and then a key of group b.
+        // The cursor reads those three and stops, whatever lies behind them.
+        let mut filter = filter_over(&store.prune);
+        let mut gone = false;
+        let (steps, seeks) =
+            cursor_work(|| gone = removes(&mut filter, &versioned_key(&[1], b"a", 1)));
+        assert!(!gone);
+        assert_eq!((steps, seeks), (3, 1));
+        assert_eq!(filter.ahead.as_ref().expect("cursor").window.len(), 3);
     }
 
     #[test]
