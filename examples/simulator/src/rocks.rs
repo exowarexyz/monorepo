@@ -1373,10 +1373,11 @@ fn commit_group(db: &DB, frontiers: &Frontiers, group: PreparedWrite) {
     // published frontier until publish.
     ingest_staged_file(db, LOG_CF, &group.log);
 
-    // Apply and publish under the floor lock. A prune loads the published frontier as its state
-    // floor under the same lock, so no scan-visible state row can outrun the frontier covering
-    // it (a key prune must never delete a row the floor does not cover). A state batch that
-    // waits on a write stall holds the lock, so snapshot capture waits with it.
+    // Apply and publish under the floor lock, so no applied state row outruns the published
+    // frontier. A key prune loads that frontier as its state floor under the same lock once its
+    // deletes are written, so the floor covers every row a delete removed before the prune is
+    // acknowledged. A state batch that waits on a write stall holds the lock, so snapshot
+    // capture waits with it.
     let publish_guard = frontiers.persist.lock();
     apply_staged_state(db, frontiers, &group.state);
 
@@ -1610,7 +1611,8 @@ const fn retention_floor(policy: &RetentionPolicy, frontier: u64) -> u64 {
 /// its state, and the next group's row only after that state). The returned sequence is
 /// therefore a lower bound on the durable frontier, and at most the newest group can be missing
 /// its state. Re-applying is idempotent because the row's entries are the newest writes for
-/// their keys.
+/// their keys. The one exception is a key prune that a crash cut short before it raised the
+/// floor. The replay undoes its deletes of those keys.
 ///
 /// A row at or below `floor` is never replayed, because its state is authoritative and key
 /// pruning may have deleted rows a replay would resurrect. Ingestion is atomic, so no partial
@@ -1880,13 +1882,12 @@ impl RocksStore {
         self.db.get(key)
     }
 
-    /// Raises the durable state floor to the published frontier, marking every published row
-    /// as state the open-time replay must never re-apply. Loaded and written under the
-    /// publish lock, so the floor covers every row a prune's scan could have observed (a
-    /// group's state becomes scan-visible only under the same lock hold that publishes it)
-    /// and concurrent raises never regress it. Unsynced: the floor only has to be durable by
-    /// the time the prune acks, and the caller's final synced write flushes it.
+    /// Raises the durable state floor to the published frontier, so the open-time replay never
+    /// re-applies a row at or below it. A key prune calls this after its deletes.
     fn raise_state_floor(&self) -> Result<(), String> {
+        // The frontier is loaded and the floor written under the publication lock. A commit
+        // holds that lock from applying its state to publishing it, so the floor covers every
+        // row applied before this call, and concurrent floor writes never regress it.
         let _guard = self.frontiers.persist.lock();
         let mut batch = rocksdb::WriteBatch::default();
         batch.put_cf(
@@ -1897,22 +1898,26 @@ impl RocksStore {
                 .load(Ordering::Acquire)
                 .to_le_bytes(),
         );
-        self.db.write(batch).map_err(|e| e.to_string())
+
+        // The write is synced, so the floor and the unsynced deletes ahead of it in the WAL are
+        // durable when the prune is acknowledged. Commits and snapshot captures wait for the
+        // sync.
+        write_synced_batch(&self.db, batch)
     }
 
-    /// Deletes keys in bounded chunks. The final synced write makes every deletion durable.
+    /// Deletes keys in bounded chunks. The writes are unsynced, and a key prune makes them
+    /// durable with the synced floor write that follows them.
     fn delete_keys(&self, keys: &[Bytes]) -> Result<(), String> {
-        let mut chunks = keys.chunks(PRUNE_DELETE_CHUNK_KEYS).peekable();
-        while let Some(chunk) = chunks.next() {
+        // Lets a test publish a put between a prune's scan and its deletes.
+        #[cfg(test)]
+        tests::before_prune_deletes();
+
+        for chunk in keys.chunks(PRUNE_DELETE_CHUNK_KEYS) {
             let mut batch = rocksdb::WriteBatch::default();
             for k in chunk {
                 batch.delete(k.as_ref());
             }
-            if chunks.peek().is_none() {
-                write_synced_batch(&self.db, batch)?;
-            } else {
-                self.db.write(batch).map_err(|e| e.to_string())?;
-            }
+            self.db.write(batch).map_err(|e| e.to_string())?;
         }
         Ok(())
     }
@@ -1994,6 +1999,18 @@ impl RocksStore {
     }
 
     /// Scans matching current keys in bounded chunks, groups them, and deletes non-retained rows.
+    /// Then raises the state floor over every row the deletes removed.
+    ///
+    /// ```text
+    ///   prune     --[#]---------- scan ----------[ delete ]--[# floor = 8, sync #]--[ reply ]-->
+    ///               snapshot at 7
+    ///   put       ------[# apply 8, publish 8 #]----------------------------------------------->
+    ///
+    ///   # holds the publication lock
+    /// ```
+    ///
+    /// A delete removes whatever its key holds, here a row that sequence 8 wrote after the scan.
+    /// The floor of 8 keeps a reopen from re-applying log row 8 over that delete.
     fn apply_key_prune_policy(
         &self,
         scope: &KeysScope,
@@ -2050,10 +2067,16 @@ impl RocksStore {
             return Ok(());
         }
 
-        // The floor is raised before the deletes so the final synced chunk makes it durable
-        // by ack: an acked prune must never be undone by the newest-log-row replay at reopen.
-        self.raise_state_floor()?;
-        self.delete_keys(&all_deletes)
+        // An acknowledged prune must never be undone by the newest-log-row replay at reopen, so
+        // the floor has to cover every row a delete removed. Such a row was applied before its
+        // delete, and its group published under the same lock hold, so a floor loaded after the
+        // last delete covers it. A group that publishes later applies its state over the
+        // deletes, and replaying its row rewrites the same values.
+        //
+        // A crash before the floor write leaves the prune unacknowledged, and the next open may
+        // re-apply the newest log row over its deletes.
+        self.delete_keys(&all_deletes)?;
+        self.raise_state_floor()
     }
 
     /// Lowest retained log sequence at or below the published frontier, or `None` when the log
@@ -2415,11 +2438,14 @@ mod tests {
     use super::*;
     use buffa::encoding::varint_len;
     use exoware_sdk::{
+        kv_codec::Utf8,
         limits::{put_entry_encoded_len, MAX_VALUE_LEN},
         log::ingest::v1::PutRequest,
+        prune_policy::{GroupBy, PrunePolicy, PRUNE_POLICY_DOCUMENT_VERSION},
+        selector::Selector,
     };
     use exoware_server::{Ingest, Log, Sequence};
-    use std::collections::BTreeSet;
+    use std::{cell::Cell, collections::BTreeSet};
     use tempfile::tempdir;
 
     fn wire_request(key: &[u8], value: &[u8]) -> Bytes {
@@ -3106,10 +3132,10 @@ mod tests {
                 ],
             ),
         );
-        store.raise_state_floor().expect("floor");
         store
             .delete_keys(&[Bytes::from_static(b"b")])
             .expect("prune");
+        store.raise_state_floor().expect("floor");
         let values = snapshot.snapshot.multi_get([b"a", b"b"]);
         assert_eq!(snapshot.sequence_number, 1);
         for value in values {
@@ -4331,6 +4357,110 @@ mod tests {
             store.get_raw(b"k2").expect("get").as_deref(),
             Some(b"v2" as &[u8])
         );
+    }
+
+    thread_local! {
+        /// Taken and run by the next key prune on this thread, once it has chosen its deletes
+        /// and before it writes any of them.
+        static BEFORE_PRUNE_DELETES: Cell<Option<Box<dyn FnOnce()>>> = const { Cell::new(None) };
+    }
+
+    /// Runs the hook a test parked for the key prune on this thread, if there is one.
+    pub(super) fn before_prune_deletes() {
+        if let Some(hook) = BEFORE_PRUNE_DELETES.take() {
+            hook();
+        }
+    }
+
+    /// Commits one row through the write pipeline and returns its sequence.
+    fn put_row(store: &RocksStore, key: &Bytes, value: &'static [u8]) -> u64 {
+        futures::executor::block_on(store.put_batch(vec![(key.clone(), Bytes::from_static(value))]))
+            .expect("put")
+    }
+
+    /// A prune document that deletes every key under `prefix`.
+    fn drop_all_under(prefix: &'static [u8]) -> PrunePolicyDocument {
+        PrunePolicyDocument {
+            version: PRUNE_POLICY_DOCUMENT_VERSION,
+            policies: vec![PrunePolicy {
+                scope: KeysScope {
+                    selector: Selector {
+                        prefix: Bytes::from_static(prefix),
+                        payload_regex: Utf8::from("(?s-u)^.*$"),
+                    },
+                    group_by: GroupBy::default(),
+                    order_by: None,
+                },
+                retain: RetainPolicy::DropAll,
+            }],
+        }
+    }
+
+    /// Puts a key as sequence 1 and prunes it, while sequence 2 rewrites it after the prune's
+    /// scan and before its deletes. The put and the prune are acknowledged when this returns,
+    /// and the put is the newest log row, the one row a reopen replays.
+    fn prune_key_rewritten_before_its_delete(store: &RocksStore) -> Bytes {
+        let key = Bytes::from_static(b"\x01row");
+        assert_eq!(put_row(store, &key, b"old"), 1);
+        BEFORE_PRUNE_DELETES.set(Some(Box::new({
+            let (store, key) = (store.clone(), key.clone());
+            move || assert_eq!(put_row(&store, &key, b"new"), 2)
+        })));
+        store
+            .apply_prune_policies(drop_all_under(b"\x01"))
+            .expect("prune");
+        key
+    }
+
+    #[test]
+    fn key_prune_survives_reopen_when_a_put_publishes_before_its_deletes() {
+        let dir = tempdir().expect("tempdir");
+        let get = |store: &RocksStore, key: &Bytes| {
+            let result = futures::executor::block_on(store.get(key.clone())).expect("get");
+            (result.value, result.sequence_number)
+        };
+        let key = {
+            let store = RocksStore::open(dir.path(), None).expect("open db");
+            let key = prune_key_rewritten_before_its_delete(&store);
+
+            // The delete landed after the rewrite, so the acknowledged prune removed the key.
+            assert_eq!(get(&store, &key), (None, 2));
+            key
+        };
+
+        // Replaying sequence 2 would write the key back.
+        let store = RocksStore::open(dir.path(), None).expect("reopen db");
+        assert_eq!(get(&store, &key), (None, 2));
+    }
+
+    /// Under `manual_wal_flush` an unsynced write stays in RocksDB's buffer until a synced write
+    /// carries it to the WAL file, so a read-only open of the directory sees exactly what a key
+    /// prune had synced when it was acknowledged. That has to include a floor that covers the
+    /// put whose row it deleted.
+    #[test]
+    fn key_prune_floor_is_durable_once_acknowledged() {
+        let dir = tempdir().expect("tempdir");
+        let mut config = RocksConfig::default();
+        config.db_options.set_manual_wal_flush(true);
+        let store = RocksStore::open(dir.path(), Some(config)).expect("open db");
+        let key = prune_key_rewritten_before_its_delete(&store);
+
+        // The put's log file was ingested under the prune's snapshot, and RocksDB rewrites such
+        // a file once the snapshot is released. The read-only open waits for that compaction,
+        // so no file changes under it.
+        store
+            .db
+            .wait_for_compact(&rocksdb::WaitForCompactOptions::default())
+            .expect("wait for compaction");
+        let durable = DB::open_cf_for_read_only(
+            &Options::default(),
+            dir.path(),
+            [STATE_CF, META_CF, LOG_CF],
+            false,
+        )
+        .expect("open read-only");
+        assert_eq!(durable.get(&key).expect("get"), None);
+        assert_eq!(read_state_floor(&durable).expect("floor"), 2);
     }
 
     #[tokio::test]
