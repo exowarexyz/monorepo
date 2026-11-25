@@ -1118,13 +1118,30 @@ fn coalesce_queued_write(
     )
 }
 
+/// Name of the staged file of `kind` (`log` or `state`) for `sequence`. The sequence is written
+/// as 20 digits, the width of the largest `u64`.
+fn staged_file_name(kind: &str, sequence: u64) -> String {
+    format!("{kind}-{sequence:020}.sst")
+}
+
+/// Whether `name` is one that [`staged_file_name`] gives a file.
+fn is_staged_file_name(name: &str) -> bool {
+    ["log", "state"].into_iter().any(|kind| {
+        name.strip_prefix(kind)
+            .and_then(|rest| rest.strip_prefix('-'))
+            .and_then(|rest| rest.strip_suffix(".sst"))
+            .and_then(|digits| digits.parse().ok())
+            .is_some_and(|sequence| name == staged_file_name(kind, sequence))
+    })
+}
+
 /// Stages one wave's two SST files in parallel, the log SST on this thread and the sorted state
 /// SST on a scoped thread. A staging failure is fatal, and the next open removes leftover files.
 fn stage_wave(ingest_dir: &Path, wave: QueuedWave) -> PreparedWrite {
     let sequence = wave.sequence;
     let rows = &wave.rows;
-    let log = ingest_dir.join(format!("log-{sequence:020}.sst"));
-    let state = ingest_dir.join(format!("state-{sequence:020}.sst"));
+    let log = ingest_dir.join(staged_file_name("log", sequence));
+    let state = ingest_dir.join(staged_file_name("state", sequence));
     let (log_result, state_result) = thread::scope(|scope| {
         let state_task = thread::Builder::new()
             .name(format!("{WRITER_THREAD_PREFIX}stage"))
@@ -1342,10 +1359,10 @@ fn write_synced_batch(db: &DB, batch: rocksdb::WriteBatch) -> Result<(), String>
 /// because the database owns its own link to every ingested file. Nothing here decides
 /// whether a group committed: the retained log rows alone do.
 ///
-/// `stage_wave` names its files `log-*.sst` and `state-*.sst`, and only those are deleted.
-/// [`RocksConfig::db_options`] can place RocksDB's WAL, SST files and info log in this directory
-/// (`wal_dir`, `db_paths`, `db_log_dir`). The open database is using those files, and RocksDB
-/// gives none of them such a name.
+/// Only a file that carries a [`staged_file_name`] is deleted. [`RocksConfig::db_options`] can
+/// place RocksDB's WAL, SST files and info log in this directory (`wal_dir`, `db_paths`,
+/// `db_log_dir`). The open database is using those files, and RocksDB gives none of them such a
+/// name.
 fn prepare_ingest_dir(store_path: &Path) -> Result<PathBuf, String> {
     let ingest_dir = store_path.join(LOG_INGEST_DIR);
     std::fs::create_dir_all(&ingest_dir)
@@ -1354,10 +1371,7 @@ fn prepare_ingest_dir(store_path: &Path) -> Result<PathBuf, String> {
         .map_err(|e| format!("failed to read staging directory: {e}"))?
     {
         let entry = entry.map_err(|e| format!("failed to read staging directory: {e}"))?;
-        let staged = entry.file_name().to_str().is_some_and(|name| {
-            (name.starts_with("log-") || name.starts_with("state-")) && name.ends_with(".sst")
-        });
-        if staged {
+        if entry.file_name().to_str().is_some_and(is_staged_file_name) {
             std::fs::remove_file(entry.path())
                 .map_err(|e| format!("failed to remove staged file: {e}"))?;
         }
@@ -3487,8 +3501,14 @@ mod tests {
             assert!(path.exists(), "{} must be staged", path.display());
         }
 
+        // Two more files have names that only resemble a staged one.
+        let others = ["state-backup.sst", "log-4.sst"].map(|name| ingest_dir.join(name));
+        for path in &others {
+            std::fs::write(path, b"").expect("write file");
+        }
+
         // The reopened store has the rule and the trim, so the evicted groups stay evicted. The
-        // staged leftovers are gone.
+        // staged leftovers are gone, and the other files are not.
         let store = open();
         assert_eq!(
             store.oldest_retained_batch().await.expect("oldest"),
@@ -3497,6 +3517,9 @@ mod tests {
         assert!(store.get_batch(2).await.expect("get").is_none());
         for path in &leftovers {
             assert!(!path.exists(), "open must remove {}", path.display());
+        }
+        for path in &others {
+            assert!(path.exists(), "open must keep {}", path.display());
         }
 
         // The rule is installed, so the next group moves the cutoff.
