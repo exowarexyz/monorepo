@@ -1332,6 +1332,11 @@ fn write_synced_batch(db: &DB, batch: rocksdb::WriteBatch) -> Result<(), String>
 /// original behind while its rows are already visible. Deleting leftovers is safe either way
 /// because the database owns its own link to every ingested file. Nothing here decides
 /// whether a group committed: the retained log rows alone do.
+///
+/// `stage_wave` names its files `log-*.sst` and `state-*.sst`, and only those are deleted.
+/// [`RocksConfig::db_options`] can place RocksDB's WAL, SST files and info log in this directory
+/// (`wal_dir`, `db_paths`, `db_log_dir`). The open database is using those files, and RocksDB
+/// gives none of them such a name.
 fn prepare_ingest_dir(store_path: &Path) -> Result<PathBuf, String> {
     let ingest_dir = store_path.join(LOG_INGEST_DIR);
     std::fs::create_dir_all(&ingest_dir)
@@ -1340,8 +1345,13 @@ fn prepare_ingest_dir(store_path: &Path) -> Result<PathBuf, String> {
         .map_err(|e| format!("failed to read staging directory: {e}"))?
     {
         let entry = entry.map_err(|e| format!("failed to read staging directory: {e}"))?;
-        std::fs::remove_file(entry.path())
-            .map_err(|e| format!("failed to remove staged file: {e}"))?;
+        let staged = entry.file_name().to_str().is_some_and(|name| {
+            (name.starts_with("log-") || name.starts_with("state-")) && name.ends_with(".sst")
+        });
+        if staged {
+            std::fs::remove_file(entry.path())
+                .map_err(|e| format!("failed to remove staged file: {e}"))?;
+        }
     }
     Ok(ingest_dir)
 }
@@ -3432,6 +3442,59 @@ mod tests {
             panic!("invalid rule must fail open");
         };
         assert!(error.contains("keep_latest count must be > 0"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn open_removes_only_staged_files_from_the_staging_directory() {
+        // RocksDB keeps its WAL in the staging directory.
+        let dir = tempdir().expect("tempdir");
+        let ingest_dir = dir.path().join(LOG_INGEST_DIR);
+        let open = || {
+            let mut config = RocksConfig::default();
+            config.db_options.set_wal_dir(&ingest_dir);
+            RocksStore::open(dir.path(), Some(config)).expect("open db")
+        };
+
+        // A retention rule evicts the first two of three groups, and only the WAL holds the rule
+        // and the trim when the store closes. A fourth group is staged and never committed, as a
+        // crash would leave it.
+        let leftovers = {
+            let store = open();
+            for sequence in 1..=3 {
+                store.put_batch(small_batch(sequence)).await.expect("put");
+            }
+            store
+                .set_retention(Some(RetentionPolicy::KeepLatest { count: 1 }))
+                .expect("set retention");
+            assert_eq!(
+                store.oldest_retained_batch().await.expect("oldest"),
+                Some(3)
+            );
+            let group = prepared_write(&store, 3, small_batch(4));
+            [group.log, group.state]
+        };
+        for path in &leftovers {
+            assert!(path.exists(), "{} must be staged", path.display());
+        }
+
+        // The reopened store has the rule and the trim, so the evicted groups stay evicted, and the
+        // staged leftovers are gone.
+        let store = open();
+        assert_eq!(
+            store.oldest_retained_batch().await.expect("oldest"),
+            Some(3)
+        );
+        assert!(store.get_batch(2).await.expect("get").is_none());
+        for path in &leftovers {
+            assert!(!path.exists(), "open must remove {}", path.display());
+        }
+
+        // The rule is installed, so the next group moves the cutoff.
+        store.put_batch(small_batch(4)).await.expect("put");
+        assert_eq!(
+            store.oldest_retained_batch().await.expect("oldest"),
+            Some(4)
+        );
     }
 
     /// Number of retained rows in the log column family.
