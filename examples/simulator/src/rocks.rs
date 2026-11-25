@@ -166,6 +166,7 @@ use rocksdb::{
     Snapshot, SstFileWriter, WriteOptions, DB,
 };
 use std::{
+    cell::Cell,
     cmp::Ordering as CmpOrdering,
     collections::{BTreeMap, VecDeque},
     ffi::CStr,
@@ -1080,6 +1081,23 @@ struct Writer {
     local_budget: Arc<IngestBudget>,
 }
 
+thread_local! {
+    /// Whether this thread belongs to a write pipeline, of any store. `Drop for Writer` reads it.
+    static ON_WRITER_THREAD: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Spawns one thread of a write pipeline, named `role` under [`WRITER_THREAD_PREFIX`] and
+/// marked as a writer thread.
+fn spawn_writer_thread(role: &str, run: impl FnOnce() + Send + 'static) -> thread::JoinHandle<()> {
+    thread::Builder::new()
+        .name(format!("{WRITER_THREAD_PREFIX}{role}"))
+        .spawn(move || {
+            ON_WRITER_THREAD.set(true);
+            run();
+        })
+        .unwrap_or_else(|error| panic!("failed to spawn the {role} thread: {error}"))
+}
+
 impl Writer {
     /// Starts the write pipeline the module docs describe: the `prepare` thread, the stage
     /// workers, the `commit` thread, and the log merge worker beside them.
@@ -1105,30 +1123,24 @@ impl Writer {
         // The channel holds one wake-up, since an unread one covers every file ingested before
         // the merge worker reads it.
         let (merge_sender, merge_receiver) = mpsc::sync_channel(1);
-        let merge = thread::Builder::new()
-            .name(format!("{WRITER_THREAD_PREFIX}merge"))
-            .spawn({
-                let db = db.clone();
-                move || run_log_merge(db, merge_receiver, log_merge_files)
-            })
-            .expect("RocksDB log merge worker must spawn");
+        let merge = spawn_writer_thread("merge", {
+            let db = db.clone();
+            move || run_log_merge(db, merge_receiver, log_merge_files)
+        });
 
-        let commit = thread::Builder::new()
-            .name(format!("{WRITER_THREAD_PREFIX}commit"))
-            .spawn({
-                let db = db.clone();
-                move || {
-                    run_commit(
-                        db,
-                        frontiers,
-                        staged_receiver,
-                        next,
-                        merge_sender,
-                        log_merge_files,
-                    )
-                }
-            })
-            .expect("failed to spawn RocksDB commit worker");
+        let commit = spawn_writer_thread("commit", {
+            let db = db.clone();
+            move || {
+                run_commit(
+                    db,
+                    frontiers,
+                    staged_receiver,
+                    next,
+                    merge_sender,
+                    log_merge_files,
+                )
+            }
+        });
 
         // One shared bounded queue, so `prepare` blocks once `max_queued_waves` waves wait for
         // staging, and any idle worker takes the next wave.
@@ -1140,20 +1152,16 @@ impl Writer {
             let ingest_dir = ingest_dir.clone();
             let staged_sender = staged_sender.clone();
             let wave_receiver = wave_receiver.clone();
-            handles.push(
-                thread::Builder::new()
-                    .name(format!("{WRITER_THREAD_PREFIX}stage-{worker}"))
-                    .spawn(move || run_stage(db, ingest_dir, wave_receiver, staged_sender))
-                    .expect("failed to spawn RocksDB stage worker"),
-            );
+            handles.push(spawn_writer_thread(&format!("stage-{worker}"), move || {
+                run_stage(db, ingest_dir, wave_receiver, staged_sender)
+            }));
         }
         drop(staged_sender);
         drop(wave_receiver);
 
-        let prepare = thread::Builder::new()
-            .name(format!("{WRITER_THREAD_PREFIX}prepare"))
-            .spawn(move || run_prepare(next, request_receiver, wave_sender, max_commit_batch_bytes))
-            .expect("failed to spawn RocksDB prepare worker");
+        let prepare = spawn_writer_thread("prepare", move || {
+            run_prepare(next, request_receiver, wave_sender, max_commit_batch_bytes)
+        });
 
         handles.insert(0, prepare);
         handles.push(commit);
@@ -1253,18 +1261,15 @@ impl Drop for Writer {
         // worker's channel as it exits.
         self.sender.take();
 
-        // A queued request owns its notifier, and a notifier can hold the last store handle, so
-        // this can run on one of the pipeline's own threads. Such a thread joins none of them,
-        // because the others may need it to keep receiving, or to close a channel, before they
-        // can exit. Each of those threads that uses the database or its directory holds the
-        // database until it exits, so the database, and a directory the store owns, outlive the
-        // pipeline's use of them without a join.
-        let current = thread::current().id();
-        if self
-            .handles
-            .iter()
-            .any(|handle| handle.thread().id() == current)
-        {
+        // A queued request owns its notifier, and a notifier can hold the last handle to a
+        // store, this one or another, so this can run on a writer thread. A writer thread joins
+        // no pipeline. The threads of its own pipeline may need it to keep receiving, or to
+        // close a channel, before they can exit. If it joined another store's pipeline, a
+        // thread of that pipeline could be joining this thread's pipeline at the same moment,
+        // and each would wait for the other. The stage workers, `commit` and the merge worker
+        // each hold the database until they exit, so the database, and a directory the store
+        // owns, outlive the pipeline's use of them without a join.
+        if ON_WRITER_THREAD.get() {
             return;
         }
 
@@ -1631,7 +1636,10 @@ fn stage_wave(ingest_dir: &Path, wave: QueuedWave) -> PreparedWrite {
     let (log_result, state_result) = thread::scope(|scope| {
         let state_task = thread::Builder::new()
             .name(format!("{WRITER_THREAD_PREFIX}stage"))
-            .spawn_scoped(scope, || stage_state_file(&state, rows))
+            .spawn_scoped(scope, || {
+                ON_WRITER_THREAD.set(true);
+                stage_state_file(&state, rows)
+            })
             .expect("failed to spawn SST staging thread");
         let log_result = stage_log_file(&log, sequence, rows);
         (
@@ -2134,10 +2142,10 @@ fn log_cf_options() -> Options {
 #[derive(Clone)]
 pub struct RocksStore {
     /// Declared before `db` so the last store drop joins the writer threads before it releases
-    /// its database handle. A last drop on a writer thread joins nothing (see
-    /// `Drop for Writer`). The writer threads that use the database or its directory hold the
-    /// database themselves, so neither the database nor a directory the store owns goes away
-    /// under them in either case.
+    /// its database handle. A last drop on a writer thread, of this store or another, joins
+    /// nothing (see `Drop for Writer`). The stage workers, `commit` and the merge worker hold
+    /// the database themselves, so neither the database nor a directory the store owns goes
+    /// away under the pipeline in either case.
     writer: Arc<Writer>,
     db: Arc<Database>,
     frontiers: Arc<Frontiers>,
@@ -2159,10 +2167,10 @@ impl RocksStore {
     ///
     /// The caller keeps the directory at `path` alive until every handle to the store (clones,
     /// open cursors, in-flight operations) has dropped and the database has closed. If a put's
-    /// notifier owns a handle, the last handle can drop on one of the store's own threads, and
-    /// the store keeps using the directory after that drop returns, so the caller cannot tell
-    /// from its handles when the directory is free. [`RocksStore::open_owned`] hands that
-    /// ordering to the store instead.
+    /// notifier owns a handle, the last handle can drop on a writer thread, of this store or
+    /// another, and the store can keep using the directory after that drop returns, so the
+    /// caller cannot tell from its handles when the directory is free.
+    /// [`RocksStore::open_owned`] hands that ordering to the store instead.
     pub fn open(path: &Path, config: Option<RocksConfig>) -> Result<Self, String> {
         Self::open_database(path, config, None)
     }
@@ -3199,78 +3207,67 @@ mod tests {
         assert_eq!(Arc::strong_count(&store.db), 3 + stage_workers);
     }
 
-    // Keep publication blocked while cancelling an accepted request.
-    #[allow(clippy::await_holding_lock)]
-    #[tokio::test]
-    async fn store_closes_when_its_commit_thread_drops_the_last_handle() {
-        /// A notifier that owns a handle to the store and reports the thread that drops it.
-        struct OwnsStore {
-            store: Option<RocksStore>,
-            hub: Arc<exoware_server::StreamHub>,
-            dropped_on: mpsc::Sender<Option<String>>,
+    /// A notifier that owns a handle to a store and reports the thread that drops it.
+    struct OwnsStore {
+        store: Option<RocksStore>,
+        hub: Arc<exoware_server::StreamHub>,
+        dropped_on: mpsc::Sender<Option<String>>,
+    }
+
+    impl StreamNotifier for OwnsStore {
+        fn subscribe(&self) -> exoware_server::StreamNotification {
+            self.hub.subscribe()
         }
 
-        impl StreamNotifier for OwnsStore {
-            fn subscribe(&self) -> exoware_server::StreamNotification {
-                self.hub.subscribe()
-            }
-
-            fn current_sequence(&self) -> u64 {
-                self.hub.current_sequence()
-            }
-
-            fn advance(&self, sequence: u64) {
-                self.hub.advance(sequence);
-            }
+        fn current_sequence(&self) -> u64 {
+            self.hub.current_sequence()
         }
 
-        impl Drop for OwnsStore {
-            fn drop(&mut self) {
-                drop(self.store.take());
-                let thread = thread::current().name().map(str::to_string);
-                let _ = self.dropped_on.send(thread);
-            }
+        fn advance(&self, sequence: u64) {
+            self.hub.advance(sequence);
         }
+    }
 
-        /// Stands for the store's data directory. When the store releases it, it reopens the
-        /// store, which succeeds only if the database has closed.
-        struct ReopensOnRelease {
-            path: PathBuf,
-            reopened: mpsc::Sender<Result<RocksStore, String>>,
+    impl Drop for OwnsStore {
+        fn drop(&mut self) {
+            drop(self.store.take());
+            let thread = thread::current().name().map(str::to_string);
+            let _ = self.dropped_on.send(thread);
         }
+    }
 
-        impl AsRef<Path> for ReopensOnRelease {
-            fn as_ref(&self) -> &Path {
-                &self.path
-            }
+    /// Stands for a store's data directory. When the store releases it, it reopens the store,
+    /// which succeeds only if the database has closed.
+    struct ReopensOnRelease {
+        path: PathBuf,
+        reopened: mpsc::Sender<Result<RocksStore, String>>,
+    }
+
+    impl AsRef<Path> for ReopensOnRelease {
+        fn as_ref(&self) -> &Path {
+            &self.path
         }
+    }
 
-        impl Drop for ReopensOnRelease {
-            fn drop(&mut self) {
-                let _ = self.reopened.send(RocksStore::open(&self.path, None));
-            }
+    impl Drop for ReopensOnRelease {
+        fn drop(&mut self) {
+            let _ = self.reopened.send(RocksStore::open(&self.path, None));
         }
+    }
 
-        // One stage worker and one request per wave, so that staged groups queue up for
-        // `commit` one at a time.
-        let dir = tempdir().unwrap();
-        let (reopened_sender, reopened) = mpsc::channel();
-        let directory = ReopensOnRelease {
-            path: dir.path().to_path_buf(),
-            reopened: reopened_sender,
-        };
-        let mut config = RocksConfig::default();
-        config.write_pipeline.stage_workers = NonZeroUsize::new(1).unwrap();
-        config.write_pipeline.max_commit_batch_bytes = NonZeroUsize::new(1).unwrap();
-        let store = RocksStore::open_owned(directory, Some(config)).unwrap();
+    /// Starts the first put on `store`, carrying `notifier`, and returns its task once the put's
+    /// log row is ingested. The caller holds the publication lock, so `commit` cannot publish
+    /// the put yet.
+    async fn queue_first_put(
+        store: &RocksStore,
+        notifier: Arc<dyn StreamNotifier>,
+    ) -> tokio::task::JoinHandle<Result<u64, PutError>> {
         let budget = IngestBudget::new(BudgetConfig {
             max_requests: 1,
             max_bytes: 1024 * 1024,
         });
         let wire = wire_request(b"accepted", b"durable");
         let admission = budget.try_admit(wire.len()).unwrap();
-        let hub = Arc::new(exoware_server::StreamHub::new(0));
-        let (dropped_on, dropped) = mpsc::channel();
         let mut input = PutInput::new(
             exoware_server::ingest::box_body(axum::body::Body::from(wire)),
             exoware_server::ingest::PutMetadata::default(),
@@ -3278,16 +3275,7 @@ mod tests {
             tokio::time::Instant::now() + std::time::Duration::from_secs(5),
             admission,
         )
-        .with_notifier(Some(Arc::new(OwnsStore {
-            store: Some(store.clone()),
-            hub: hub.clone(),
-            dropped_on,
-        })));
-
-        // The put is queued and its log row is ingested, and `commit` waits for the publication
-        // lock.
-        let frontiers = store.frontiers.clone();
-        let publish_guard = frontiers.persist.lock();
+        .with_notifier(Some(notifier));
         let put_store = store.clone();
         let task = tokio::spawn(async move { put_store.put(&mut input).await });
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -3302,6 +3290,37 @@ mod tests {
         })
         .await
         .unwrap();
+        task
+    }
+
+    // Keep publication blocked while cancelling an accepted request.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn store_closes_when_its_commit_thread_drops_the_last_handle() {
+        // One stage worker and one request per wave, so that staged groups queue up for
+        // `commit` one at a time.
+        let dir = tempdir().unwrap();
+        let (reopened_sender, reopened) = mpsc::channel();
+        let directory = ReopensOnRelease {
+            path: dir.path().to_path_buf(),
+            reopened: reopened_sender,
+        };
+        let mut config = RocksConfig::default();
+        config.write_pipeline.stage_workers = NonZeroUsize::new(1).unwrap();
+        config.write_pipeline.max_commit_batch_bytes = NonZeroUsize::new(1).unwrap();
+        let store = RocksStore::open_owned(directory, Some(config)).unwrap();
+
+        // A put whose notifier owns a handle to the store is queued.
+        let frontiers = store.frontiers.clone();
+        let publish_guard = frontiers.persist.lock();
+        let hub = Arc::new(exoware_server::StreamHub::new(0));
+        let (dropped_on, dropped) = mpsc::channel();
+        let notifier = Arc::new(OwnsStore {
+            store: Some(store.clone()),
+            hub: hub.clone(),
+            dropped_on,
+        });
+        let task = queue_first_put(&store, notifier).await;
 
         // Six more requests queue behind it, with no caller waiting for them. `commit`'s queue
         // holds one staged group, so the stage worker has to wait for `commit` to take that one
@@ -3342,6 +3361,147 @@ mod tests {
         for key in &queued {
             assert_eq!(store.db.get(key).unwrap().unwrap(), b"queued");
         }
+    }
+
+    // Keep publication blocked while cancelling accepted requests.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn stores_close_when_their_commit_threads_drop_each_others_last_handle() {
+        let dirs = [tempdir().unwrap(), tempdir().unwrap()];
+        let (reopened_sender, reopened) = mpsc::channel();
+        let [a, b] = dirs.each_ref().map(|dir| {
+            let directory = ReopensOnRelease {
+                path: dir.path().to_path_buf(),
+                reopened: reopened_sender.clone(),
+            };
+            RocksStore::open_owned(directory, None).unwrap()
+        });
+        drop(reopened_sender);
+
+        // A put is queued on each store, and its notifier owns a handle to the other store.
+        let frontiers = [a.frontiers.clone(), b.frontiers.clone()];
+        let publish_guards = frontiers
+            .each_ref()
+            .map(|frontiers| frontiers.persist.lock());
+        let (dropped_on, dropped) = mpsc::channel();
+        let mut tasks = Vec::new();
+        for (store, other) in [(&a, &b), (&b, &a)] {
+            let notifier = Arc::new(OwnsStore {
+                store: Some(other.clone()),
+                hub: Arc::new(exoware_server::StreamHub::new(0)),
+                dropped_on: dropped_on.clone(),
+            });
+            tasks.push(queue_first_put(store, notifier).await);
+        }
+        drop(dropped_on);
+
+        // The callers go away, and each queued request's notifier holds the other store's last
+        // handle.
+        for task in tasks {
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+        }
+        drop(a);
+        drop(b);
+
+        // Each `commit` publishes its request and drops it, and with it the notifier and the
+        // other store's last handle.
+        drop(publish_guards);
+        for _ in 0..2 {
+            let thread = dropped
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("each last handle must drop");
+            assert_eq!(thread, Some(format!("{WRITER_THREAD_PREFIX}commit")));
+        }
+
+        // Each database closes, and only then does its store release its directory, whose drop
+        // reopens that store.
+        for _ in 0..2 {
+            let store = reopened
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("each store must release its directory")
+                .expect("each database must close before its store releases its directory");
+            assert_eq!(store.db.get(b"accepted").unwrap().unwrap(), b"durable");
+        }
+    }
+
+    #[test]
+    fn drop_waits_on_a_caller_thread_named_like_a_writer_thread() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+
+        // A request is queued and `commit` waits for the publication lock, so the pipeline
+        // cannot finish yet.
+        let frontiers = store.frontiers.clone();
+        let publish_guard = frontiers.persist.lock();
+        let sender = store.writer.sender.as_ref().expect("request sender");
+        sender
+            .send(write_request(b"queued"))
+            .expect("queue request");
+        wait_until(
+            || {
+                store
+                    .db
+                    .get_cf(store.log_cf(), sequence_log_key(1))
+                    .expect("get")
+                    .is_some()
+            },
+            "the request's log row must be ingested",
+        );
+
+        // A caller's thread carries the name prefix of the writer threads. It drops the last
+        // handle and reopens the store at once. While `commit` is held up, that reopen can
+        // succeed only if the drop waits for the database to close.
+        let path = dir.path().to_path_buf();
+        let (reopened_sender, reopened) = mpsc::channel();
+        let caller = thread::Builder::new()
+            .name(format!("{WRITER_THREAD_PREFIX}caller"))
+            .spawn(move || {
+                drop(store);
+                let sequence = RocksStore::open(&path, None).map(|store| store.current_sequence());
+                let _ = reopened_sender.send(sequence);
+            })
+            .expect("spawn caller thread");
+
+        // The drop cannot return while `commit` waits, so nothing is reopened yet.
+        assert!(
+            reopened
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
+            "the drop must wait for the pipeline"
+        );
+        drop(publish_guard);
+        let sequence = reopened
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the caller must reopen the store")
+            .expect("the database must close before the drop returns");
+        assert_eq!(sequence, 1);
+        caller.join().expect("the caller thread must not panic");
+    }
+
+    #[test]
+    fn only_pipeline_threads_carry_the_writer_mark() {
+        let (sender, marked) = mpsc::channel();
+
+        // A thread spawned for a pipeline carries the mark.
+        let report = sender.clone();
+        spawn_writer_thread("probe", move || {
+            report.send(ON_WRITER_THREAD.get()).expect("report mark");
+        })
+        .join()
+        .expect("the pipeline thread must not panic");
+        assert!(marked.recv().expect("receive mark"));
+
+        // A caller's thread does not, though it carries the name prefix of the writer threads.
+        thread::Builder::new()
+            .name(format!("{WRITER_THREAD_PREFIX}caller"))
+            .spawn(move || {
+                sender.send(ON_WRITER_THREAD.get()).expect("report mark");
+            })
+            .expect("spawn caller thread")
+            .join()
+            .expect("the caller thread must not panic");
+        assert!(!marked.recv().expect("receive mark"));
     }
 
     // Keep publication blocked while cancelling an accepted request.
