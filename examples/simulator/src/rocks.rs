@@ -804,8 +804,9 @@ struct ReadAhead {
     /// is on the last of them unless it ran off the end. It holds at most as many keys as the
     /// `count` of the policy that reads ahead.
     window: VecDeque<Ahead>,
-    /// How many keys at the front of `window` form a chain, members of one group whose order
-    /// values never decrease from one key to the next.
+    /// How many keys at the front of `window` have been linked into a chain, members of one
+    /// group whose order values never decrease from one key to the next. Keys behind them can
+    /// continue the chain, and the next key that needs it links those.
     chain: usize,
     /// Whether the cursor ran off the end of the state. Then no key follows a later key
     /// either.
@@ -901,6 +902,24 @@ impl ReadAhead {
             }
         }
 
+        // `key` is removed only if the first key after it follows it in its group. When that
+        // key does not, as behind the newest key of a group, `key` is kept after this one read
+        // and the cursor does not read into the next group.
+        if self.window.is_empty() && !self.advance(policy) {
+            return false;
+        }
+        let follows = self
+            .window
+            .front()
+            .and_then(|first| first.member.as_ref())
+            .is_some_and(|(its_group, its_order)| {
+                its_group == group
+                    && compare_order_values(its_order, order, &policy.scope) != CmpOrdering::Less
+            });
+        if !follows {
+            return false;
+        }
+
         // The chain grows until it holds `count` keys, breaks, or the keys run out. Each key
         // is read once and linked once, however many keys before it ask.
         loop {
@@ -912,15 +931,6 @@ impl ReadAhead {
             }
         }
         self.chain >= count
-            && self
-                .window
-                .front()
-                .and_then(|first| first.member.as_ref())
-                .is_some_and(|(its_group, its_order)| {
-                    its_group == group
-                        && compare_order_values(its_order, order, &policy.scope)
-                            != CmpOrdering::Less
-                })
     }
 
     /// Whether the window key at `index` continues the chain of the keys before it.
@@ -4556,6 +4566,39 @@ mod tests {
         assert_eq!(gone, keys[..versions - count]);
         assert!(steps < 2 * versions as u64, "{steps}");
         assert_eq!(longest, count);
+    }
+
+    #[test]
+    fn keep_latest_reads_one_key_for_the_newest_of_a_group() {
+        const GROUPS: u8 = 8;
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        let count = 256;
+        install(
+            &store,
+            vec![versioned_policy(&[1], RetainPolicy::KeepLatest { count })],
+        );
+
+        // Every group is twice as long as `count`.
+        let versions = 2 * count as u64;
+        let key = |group: u8, version| versioned_key(&[1], &[b'a' + group], version);
+        let mut batch = rocksdb::WriteBatch::default();
+        for group in 0..GROUPS {
+            for version in 1..=versions {
+                batch.put(key(group, version), b"row");
+            }
+        }
+        store.db.write(batch).expect("write");
+
+        // The compaction shows the newest key of each group and nothing else. The key after
+        // it is the oldest of the next group, and after the last group the cursor steps off
+        // the end. Either way the key is kept at the cost of one seek and one step.
+        let newest: Vec<Vec<u8>> = (0..GROUPS).map(|group| key(group, versions)).collect();
+        let mut filter = filter_over(&store.prune);
+        let mut gone = Vec::new();
+        let (steps, seeks) = cursor_work(|| gone = removed(&mut filter, &newest));
+        assert!(gone.is_empty());
+        assert_eq!((steps, seeks), (u64::from(GROUPS), u64::from(GROUPS)));
     }
 
     #[test]
