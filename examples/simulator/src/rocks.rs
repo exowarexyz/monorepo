@@ -169,6 +169,7 @@ use std::{
     cmp::Ordering as CmpOrdering,
     collections::{BTreeMap, VecDeque},
     ffi::CStr,
+    marker::PhantomPinned,
     num::NonZeroUsize,
     ops::Range,
     path::{Path, PathBuf},
@@ -650,10 +651,11 @@ impl PrunePolicies {
 
 /// Builds the state family's compaction filters.
 //
-// RocksDB can call `create` from several compaction threads at once, and the binding hands
-// each call a `&mut self` to this one object. So the factory holds only a handle to shared
-// state.
-struct PruneFilterFactory(Arc<PrunePolicies>);
+// RocksDB can call `create` from several compaction threads at once, and the binding forms a
+// `&mut` to this one object for each call. So the factory holds only a handle to shared
+// state. The marker makes it `!Unpin`, and the compiler does not assume a `&mut` to such a
+// type to be unique, since a pinned value can hold pointers into itself.
+struct PruneFilterFactory(Arc<PrunePolicies>, PhantomPinned);
 
 impl CompactionFilterFactory for PruneFilterFactory {
     type Filter = PruneFilter;
@@ -2169,7 +2171,8 @@ impl RocksStore {
         // no policy and keeps every key.
         let prune = Arc::new(PrunePolicies::default());
         let mut state_options = state_cf_options();
-        state_options.set_compaction_filter_factory(PruneFilterFactory(prune.clone()));
+        state_options
+            .set_compaction_filter_factory(PruneFilterFactory(prune.clone(), PhantomPinned));
         let cf_state = ColumnFamilyDescriptor::new(STATE_CF, state_options);
         let cf_meta = ColumnFamilyDescriptor::new(META_CF, Options::default());
         let cf_log = ColumnFamilyDescriptor::new(LOG_CF, log_cf_options());
@@ -4025,7 +4028,7 @@ mod tests {
 
     /// A filter over the policies in `shared`, built as RocksDB builds one for a compaction.
     fn filter_over(shared: &Arc<PrunePolicies>) -> PruneFilter {
-        PruneFilterFactory(shared.clone()).create(CompactionFilterContext {
+        PruneFilterFactory(shared.clone(), PhantomPinned).create(CompactionFilterContext {
             is_full_compaction: false,
             is_manual_compaction: false,
         })
