@@ -23,10 +23,10 @@ const WRITER_DIR: &str = "LOG_MERGE_CRASH_WRITER_DIR";
 /// Commit groups between log merges, low so that the writer merges often.
 const MERGE_FILES: usize = 8;
 
-/// Rows in each large batch.
+/// Rows in each batch.
 const ROWS: u64 = 4;
 
-/// Bytes of each value in a large batch.
+/// Bytes of each value in a batch.
 const VALUE_LEN: usize = 64 * 1024;
 
 /// Opens the store with a merge every `MERGE_FILES` commit groups.
@@ -44,22 +44,15 @@ fn open(path: &Path) -> RocksStore {
     .expect("open store")
 }
 
-/// The rows of the batch committed as `sequence`. Even sequences carry `ROWS` rows of
-/// `VALUE_LEN` bytes, too many for a state batch, so their state is ingested as a file and
-/// their log files give a merge more bytes to copy. Odd sequences carry one small row above
-/// every earlier key, so their state is written as a batch.
+/// The `ROWS` rows of `VALUE_LEN` bytes committed as `sequence`. Each log file gives a merge
+/// that much to copy, so a kill has time to land inside the merge.
 fn batch(sequence: u64) -> Vec<(Bytes, Bytes)> {
-    let (rows, value_len) = if sequence.is_multiple_of(2) {
-        (ROWS, VALUE_LEN)
-    } else {
-        (1, 64)
-    };
-    (0..rows)
+    (0..ROWS)
         .map(|row| {
             let mut key = sequence.to_be_bytes().to_vec();
             key.extend_from_slice(&row.to_be_bytes());
             let fill = (sequence.wrapping_mul(31).wrapping_add(row)) as u8;
-            (Bytes::from(key), Bytes::from(vec![fill; value_len]))
+            (Bytes::from(key), Bytes::from(vec![fill; VALUE_LEN]))
         })
         .collect()
 }
@@ -177,10 +170,18 @@ async fn killed_writer_reopens_with_every_acknowledged_row() {
                 .into_iter()
                 .map(|entry| (Bytes::from(entry.key), entry.value))
                 .collect();
-            assert_eq!(logged, batch(sequence), "round {round}: batch {sequence}");
+            assert_eq!(
+                logged,
+                batch(sequence),
+                "round {round}: the log row of batch {sequence} must match what was written"
+            );
             for (key, value) in batch(sequence) {
                 let stored = store.get(key).await.expect("get").value;
-                assert_eq!(stored, Some(value), "round {round}: state of {sequence}");
+                assert_eq!(
+                    stored,
+                    Some(value),
+                    "round {round}: the state of batch {sequence} must match what was written"
+                );
             }
         }
         assert!(

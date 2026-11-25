@@ -8,8 +8,8 @@
 //! `LOAD_MODE` picks the workload:
 //!
 //! - `small` (the default) issues one Put at a time, shaped like a chain indexer following empty
-//!   blocks. Each block is three Puts: twelve SQL and QMDB rows, a certificate, and a tiny
-//!   publication barrier.
+//!   blocks. Each block is three Puts: twelve SQL and QMDB rows, a certificate, and a publication
+//!   barrier.
 //! - `mixed` makes the first Put of each block `LOAD_BLOCK_ROWS` rows of 90 bytes (default
 //!   14,000, or 1.26 MB) and issues blocks from `LOAD_WRITERS` tasks at once (default 4).
 //! - `verify` issues no Puts. It opens a store that a `small` run filled, checks that every
@@ -47,9 +47,13 @@ use tokio::sync::mpsc;
 
 // Key namespaces of the chain indexer's rows.
 const NS_QMDB: u8 = 0x00;
+const NS_TRANSACTIONS: u8 = 0x01;
 const NS_SIMPLEX: u8 = 0x02;
 const NS_SQL: u8 = 0x03;
 const NS_TARGET: u8 = 0x04;
+
+/// Row family of a QMDB watermark, the byte after the namespace.
+const QMDB_WATERMARK: u8 = 0x03;
 
 /// Reads setting `name` from the environment, or `default` when it is unset.
 fn setting<T: std::str::FromStr>(name: &str, default: T) -> T {
@@ -122,12 +126,18 @@ fn certificate(height: u64) -> Vec<(Bytes, Bytes)> {
     vec![(ordered_key(NS_SIMPLEX, height, 0), value(!height, 400))]
 }
 
-/// A block's publication barrier, one row holding the block height.
+/// A block's publication barrier, shaped like the chain indexer's publication request for one
+/// block. Its keys run from the QMDB watermarks to the target, so its state file overlaps the
+/// stored rows, as the indexer's does. It holds a watermark row for each of the account-state and
+/// transaction QMDBs and the block's 32-byte target. The block height stands in for both operation
+/// locations and keys the target.
 fn barrier(height: u64) -> Vec<(Bytes, Bytes)> {
-    vec![(
-        ordered_key(NS_TARGET, height, 0),
-        Bytes::copy_from_slice(&height.to_be_bytes()),
-    )]
+    let key = |prefix: &[u8]| Bytes::from([prefix, &height.to_be_bytes()].concat());
+    vec![
+        (key(&[NS_QMDB, QMDB_WATERMARK]), Bytes::new()),
+        (key(&[NS_TRANSACTIONS, QMDB_WATERMARK]), Bytes::new()),
+        (key(&[NS_TARGET]), value(height, 32)),
+    ]
 }
 
 /// SST files and total bytes of the files in the store directory. The staging subdirectory is
@@ -311,12 +321,19 @@ async fn run_verify(store: RocksStore, dir: &Path) {
             .into_iter()
             .map(|entry| (Bytes::from(entry.key), entry.value))
             .collect();
-        assert_eq!(logged, rows, "log row of sequence {sequence}");
+        assert_eq!(
+            logged, rows,
+            "the log row of sequence {sequence} must equal the rows of that Put"
+        );
 
         // Each row must read back from the state as written.
         for (key, value) in rows {
             let stored = store.get(key).await.expect("get").value;
-            assert_eq!(stored, Some(value), "state of sequence {sequence}");
+            assert_eq!(
+                stored,
+                Some(value),
+                "the state of sequence {sequence} must hold the rows of that Put"
+            );
         }
     }
     eprintln!(
@@ -334,9 +351,13 @@ async fn run_mixed(
     rows_per_block: u64,
     mut report: Report,
 ) {
+    // Without a writer the run would issue no Put and still end like a complete one.
+    assert!(writers > 0, "LOAD_WRITERS must be nonzero");
+
     let blocks = (commits as u64).div_ceil(3);
     let next = Arc::new(AtomicU64::new(0));
     let (sender, mut latencies) = mpsc::unbounded_channel();
+    let mut tasks = tokio::task::JoinSet::new();
 
     // A 90-byte row is a 33-byte key and a 57-byte value.
     let value_len = 90 - 33;
@@ -346,7 +367,7 @@ async fn run_mixed(
         let store = store.clone();
         let next = next.clone();
         let sender = sender.clone();
-        tokio::spawn(async move {
+        tasks.spawn(async move {
             loop {
                 let height = next.fetch_add(1, Ordering::Relaxed);
                 if height >= blocks {
@@ -373,8 +394,15 @@ async fn run_mixed(
     while let Some(latency) = latencies.recv().await {
         if !report.record(latency) {
             eprintln!("disk cap reached after {} commits", report.commits);
-            return;
+            break;
         }
+    }
+
+    // Closing the channel stops each writer after its next Put. A writer that panicked fails the
+    // run, because the Puts of its unfinished block are missing from the report.
+    drop(latencies);
+    while let Some(writer) = tasks.join_next().await {
+        writer.expect("every writer must finish without a panic");
     }
 }
 
