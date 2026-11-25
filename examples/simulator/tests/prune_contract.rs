@@ -416,8 +416,8 @@ fn keys_prune_and_retention_compose() {
         (v1, v2, v3, last)
     };
 
-    // Reopening replays retained log rows above the state floor; it must resurrect neither the
-    // key-pruned rows nor the retention-evicted log rows, and must not regress the frontier.
+    // Retention raised the state floor to the frontier, so reopening replays no log row. The
+    // pruned rows and the evicted log rows stay gone, and the frontier does not regress.
     let store = RocksStore::open(dir.path(), None).expect("reopen db");
     assert_eq!(store.current_sequence(), last);
     assert!(get_value(&store, &v1).is_none());
@@ -460,8 +460,10 @@ fn retention_drop_all_survives_reopen() {
     assert_eq!(oldest_retained(&store), None);
 }
 
+/// Every version of a group shares one batch, so reopening re-applies the log row that holds
+/// the pruned ones. The stored policy removes them again at the next compaction.
 #[test]
-fn key_pruned_state_survives_reopen_when_versions_share_a_batch() {
+fn keep_latest_prunes_replayed_versions_after_reopen() {
     let dir = tempdir().expect("tempdir");
     let (v1, v2, v3) = {
         let store = RocksStore::open(dir.path(), None).expect("open db");
@@ -489,9 +491,11 @@ fn key_pruned_state_survives_reopen_when_versions_share_a_batch() {
         (v1, v2, v3)
     };
 
-    // Reopening replays retained log rows; that replay must not resurrect key-pruned rows
-    // whose log entries are still retained.
     let store = RocksStore::open(dir.path(), None).expect("reopen db");
+    assert_eq!(get_value(&store, &v1).as_deref(), Some(b"v1".as_slice()));
+    assert_eq!(get_value(&store, &v2).as_deref(), Some(b"v2".as_slice()));
+
+    store.compact_state();
     assert!(get_value(&store, &v1).is_none());
     assert!(get_value(&store, &v2).is_none());
     assert_eq!(get_value(&store, &v3).as_deref(), Some(b"v3".as_slice()));
