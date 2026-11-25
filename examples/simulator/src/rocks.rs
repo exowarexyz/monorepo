@@ -1,31 +1,88 @@
-//! Naive reference storage for local development: user keys and values are written as-is to
-//! RocksDB. A `meta` column family holds the state-floor row, and a `log` column family keeps
-//! one row per commit group: the exact `log.stream.v1.GetResponse` bytes the stream service
-//! serves for that sequence, loaded on demand. Everything is addressed by key: recovery and
-//! pruning never assume which SST files rows live in for their correctness, so RocksDB is free
-//! to place and compact them however it likes. Each log row does get its own file, bracketed
-//! by sentinel keys, so that ingestion and pruning never touch a row's payload.
+//! Naive reference storage for local development. User keys and values are written as-is to
+//! RocksDB. A `log` column family keeps one row per commit group, the exact
+//! `log.stream.v1.GetResponse` bytes the stream service serves for that sequence, loaded on
+//! demand. A `meta` column family holds the state-floor row and the retention rule.
 //!
-//! Writes bypass the WAL and the memtables: `prepare` coalesces queued requests into commit
-//! groups that each share one sequence number and queues them for a pool of stage workers,
-//! which build each group's log row and sorted state rows as two SST files (concurrently
-//! across groups), while `commit` reorders staged groups back into sequence order and ingests
-//! each: the log file first (the durable row alone defines the group; `open` derives the
-//! frontier from the highest retained row and the state-floor meta row), then the state file,
-//! then publish and ack. Several groups can be queued, staging, or buffered awaiting their
-//! predecessors at once (the queue and worker count bound staged memory), but ingestion stays
-//! atomic and strictly ordered, so a crash never leaves a partial batch and at most the
-//! newest ingested group can be missing its state ingestion; `open` repairs that by
-//! re-applying the newest retained log row (idempotent: its rows are the newest writes for
-//! their keys). The floor meta row is written by key pruning and by sequence-log retention
-//! enforcement, and is durable by the time either acks: it marks state the replay must never
-//! touch (re-applying key-pruned rows would resurrect them) and keeps a fully-evicted log from
-//! regressing the frontier. A separate meta row persists the active retention rule (see the
-//! [`Retention`] impl), which the ingest path re-enforces continuously as the log grows.
+//! Everything is addressed by key. Recovery and pruning never assume which SST files rows live
+//! in for their correctness, so RocksDB is free to place and compact them however it likes.
 //!
-//! Any write failure in the pipeline is fatal: once a group's log row is durable it cannot be
-//! rolled back (its sequence number must never be re-issued), so the writer panics and the next
-//! open rolls the store forward instead of any in-process recovery.
+//! # Write pipeline
+//!
+//! ```text
+//!                                          stage workers
+//!   put a --+                             +--> wave 6 --+
+//!   put b --+   requests          waves   |             |   groups
+//!   put c --+-----------> prepare --------+--> wave 7 --+-----------> commit --wake-up--> merge
+//!   put d --+   unbounded    |   4 queued |             |   4 queued    |      1 queued
+//!     ^                      |            +--> wave 8 --+               |
+//!     |                   a b -> 6                                   6, 7, 8
+//!     |                   c   -> 7                                   in order
+//!     |                   d   -> 8                                      |
+//!     +---------- each put gets its sequence, once published -----------+
+//! ```
+//!
+//! Stage workers finish in any order, and `commit` holds a staged group until every earlier one
+//! is applied. Both queues of four are defaults of [`RocksWritePipelineConfig`], and the wake-up
+//! channel has room for one.
+//!
+//! # One commit
+//!
+//! ```text
+//!                              ingest log file      apply state, publish         reply
+//!                                     |                       |                    |
+//!   time  ----------------------------+-----------------------+--------------------+------->
+//!   log row 8                         [=====================================================
+//!   state rows 8                                              [=============================
+//!   published        <------------------ 7 ------------------>|<------------ 8 -------------
+//!                                     |                       |
+//!   a crash here     8 never existed  |  open replays row 8   |  8 is complete
+//! ```
+//!
+//! A stage worker writes each group's log row and state rows as two SST files, and `commit`
+//! ingests both (see `stage_wave`). Ingestion bypasses the WAL and the memtables.
+//!
+//! The durable log row alone defines a group. Each ingestion is atomic, and `commit` applies a
+//! group's state before it ingests the next group's log row. A crash can therefore leave only
+//! the newest group with a log row and no state, never a partial row or a partial state. `open`
+//! re-applies the newest row above the state floor whether or not its state was complete (see
+//! `replay_newest_log_row`).
+//!
+//! Any write failure in the pipeline is fatal. The writer panics and the next open rolls the
+//! store forward (see `commit_group`).
+//!
+//! # Log files
+//!
+//! Each log row is ingested as its own file, bracketed by sentinel keys with empty values so that
+//! ingestion and retention enforcement can skip its payload block (see `stage_log_file`). RocksDB
+//! rebuilds a column family's file list on every ingestion into it, so commits slow down as the
+//! families gain files.
+//!
+//! ```text
+//!   log family, bottom level, without the merge
+//!
+//!   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+ - - +-+
+//!   |1|2|3|4|5|6|7|8| | | | | | | | | | | | | | | | | | | | | | | | |     |N|
+//!   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+ - - +-+
+//!   |<------ N files after N commits, and every ingestion walks all N ----->|
+//!
+//!   with the merge
+//!
+//!   +-----------------+-----------------+-+-+-+-+-+-+-+-+-+-+-+-+-+-+ - - +-+
+//!   | 1 ..            |                 | | | | | | | | | | | | | | |     |N|
+//!   +-----------------+-----------------+-+-+-+-+-+-+-+-+-+-+-+-+-+-+ - - +-+
+//!   |<--------- merged files ---------->|<-------- not merged yet --------->|
+//! ```
+//!
+//! `commit` wakes the merge every `log_merge_files` groups, 1,024 by default (see
+//! `plan_log_merge`). The merge copies each row with its sentinels and drops only what a
+//! retention tombstone has already deleted.
+//!
+//! # Floor and retention
+//!
+//! `open` derives the frontier from the newest retained log row and the state floor, a meta row
+//! that key pruning and retention enforcement raise (see `RocksStore::raise_state_floor` and
+//! `RocksStore::prune_log`). A separate meta row persists the active retention rule (see the
+//! [`Retention`] impl), and the ingest path re-enforces that rule as the log grows.
 
 #[cfg(test)]
 use buffa::Message;
@@ -56,14 +113,15 @@ use exoware_server::{
 use parking_lot::Mutex;
 use regex::bytes::Regex;
 use rocksdb::{
-    BlockBasedOptions, ColumnFamily, ColumnFamilyDescriptor, DBCompactionStyle, DBCompressionType,
-    DBIterator, Direction, IngestExternalFileOptions, IteratorMode, Options, Snapshot,
-    SstFileWriter, WriteOptions, DB,
+    BlockBasedOptions, BottommostLevelCompaction, ColumnFamily, ColumnFamilyDescriptor,
+    CompactOptions, DBCompactionStyle, DBCompressionType, DBIterator, Direction,
+    IngestExternalFileOptions, IteratorMode, Options, Snapshot, SstFileWriter, WriteOptions, DB,
 };
 use std::{
     cmp::Ordering as CmpOrdering,
     collections::BTreeMap,
     num::NonZeroUsize,
+    ops::Range,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -74,22 +132,99 @@ use std::{
 use tokio::sync::oneshot;
 use tracing::debug;
 
+/// Column family of the state rows, RocksDB's default one.
 const STATE_CF: &str = rocksdb::DEFAULT_COLUMN_FAMILY_NAME;
+
+/// Column family of the store's own rows, the state floor and the retention rule.
 const META_CF: &str = "meta";
+
+/// Meta row holding the state floor, a sequence number (see [`read_state_floor`]).
 const SEQ_META_KEY: &[u8] = b"sequence";
+
 /// Meta row holding the active sequence-log retention rule (the codec-encoded
 /// [`RetentionPolicy`]). Absence of the row means no rule is installed.
 const RETENTION_META_KEY: &[u8] = b"retention";
+
+/// Rows a key prune copies out of its scan in one step. It holds no more values than that at
+/// once. The value is a round number.
 const PRUNE_SCAN_BATCH_SIZE: usize = 4096;
+
+/// Most keys a key prune deletes in one write batch. The value is a round number.
 const PRUNE_DELETE_CHUNK_KEYS: usize = 4096;
+
+/// Default for [`RocksWritePipelineConfig::max_commit_batch_bytes`]. A larger wave commits
+/// more requests at once and holds more memory while it is queued or staged. The value is a
+/// round number.
 const DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
+
+/// Most entries in one sequence, the protocol's limit for one put. A wave stops coalescing at
+/// the limits of a single put, so every sequence fits in one response.
 const MAX_SEQUENCE_ENTRIES: usize = MAX_PUT_ENTRIES;
+
+/// Directory inside the store path where commit groups stage their SST files, so that ingestion
+/// can hard-link them into the database. Where hard links are unsupported, as across
+/// filesystems, RocksDB copies the file.
 const LOG_INGEST_DIR: &str = "ingest";
+
+/// Column family of the sequence log, one row per commit group.
 const LOG_CF: &str = "log";
+
+/// Length of a log row's key, the sequence number as a big-endian `u64`. Sentinel keys are
+/// one byte longer, and readers tell them from rows by that length.
 const LOG_BATCH_KEY_LEN: usize = 8;
+
+/// Bottom level of the log column family, the last of RocksDB's default seven levels. Ingested
+/// log files never overlap one another, so they normally land there, and the merge rewrites
+/// them within it.
+const LOG_BOTTOM_LEVEL: i32 = 6;
+
+/// Default for [`RocksWritePipelineConfig::log_merge_files`]. The value is a round number.
+const DEFAULT_LOG_MERGE_FILES: usize = 1024;
+
+/// Size at which the merge cuts its output files. Larger files leave fewer for every commit
+/// to pay for, and a retention cutoff that falls inside one costs a rewrite of the whole
+/// file. The value is a round number.
+const LOG_MERGE_TARGET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Log files below this size are merged with their small neighbors. A merge's last output file can
+/// fall below it and be merged again, so this also bounds what a merge rewrites of an earlier
+/// one's output. The value equals RocksDB's default target file size.
+const LOG_MERGE_SMALL_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Most bytes of bottom-level files one merge selects. This bounds a merge's temporary disk use
+/// and the size of each merge a closing store waits for, unless a retention tombstone overlaps
+/// the run and widens the compaction to every file it covers. The value is a round number.
+const LOG_MERGE_PASS_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+/// Most files one merge selects. RocksDB picks a manual compaction's files within one level in
+/// time quadratic in their number, while it holds the database mutex that every commit and
+/// snapshot needs. The value is four times the default merge trigger.
+const LOG_MERGE_PASS_FILES: usize = 4096;
+
+/// Size at which compaction cuts the state files it writes below level zero. Large files keep
+/// down the file count that every state ingestion pays for. The value is four times RocksDB's
+/// default target file size.
+const STATE_TARGET_FILE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Threads in the bottom-priority pool of RocksDB's default environment. A store on that
+/// environment runs compactions into a family's last level there, apart from other compactions,
+/// and the second thread lets a log merge start while a last-level state compaction holds the
+/// first.
+const BOTTOM_POOL_THREADS: i32 = 2;
+
+/// Name prefix of every writer thread. A failed write is fatal to the store and panics its writer
+/// thread, so a process can abort when a thread with this prefix panics.
 pub const WRITER_THREAD_PREFIX: &str = "simulator-rocks-";
+
+/// Default for [`RocksWritePipelineConfig::stage_workers`] and
+/// [`RocksWritePipelineConfig::max_queued_waves`]. Each added worker or queue slot lets one more
+/// wave stage or wait and holds that wave's payload in memory. The value is a round number.
 const DEFAULT_STAGE_WORKERS: usize = 4;
+
+/// Flat memory charge for one request, added to the charges that grow with its rows (see
+/// [`writer_growth`]). The value is a round number.
 const WRITER_OVERHEAD: usize = 16 * 1024;
+
 type RocksIterItem = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>;
 
 /// A resource dropped strictly after the database has closed (see [`Database`]).
@@ -489,43 +624,57 @@ struct Writer {
 }
 
 impl Writer {
-    /// Starts the write pipeline. `prepare` drains queued requests up to the configured byte
-    /// cap into commit groups that each share one sequence number (continuing from the
-    /// published frontier, which is exactly the frontier derived at open since nothing has
-    /// committed yet) and queues them for the stage workers, any of which takes the next
-    /// group and builds its log and state SSTs concurrently with the other workers;
-    /// `commit` reorders staged groups back into sequence order, ingests each log file, then
-    /// its state file, publishes the frontier, and resolves the requests. `commit` still
-    /// ingests strictly in order, so a crash leaves at most the newest ingested group without
-    /// its state. Any write failure in any stage is fatal (the worker panics): the durable
-    /// log row alone defines the group, so the next open re-derives the frontier and replays
-    /// the rows above the floor. Sequence numbers never need to be reclaimed in-process.
+    /// Starts the write pipeline the module docs describe: the `prepare` thread, the stage
+    /// workers, the `commit` thread, and the log merge worker beside them.
     fn start(
         db: Arc<Database>,
         ingest_dir: PathBuf,
         frontiers: Arc<Frontiers>,
         write_pipeline: RocksWritePipelineConfig,
     ) -> Self {
+        // Nothing has committed yet, so the published frontier is exactly the one `open`
+        // derived, and sequence numbers continue from it.
         let next = frontiers.published.load(Ordering::Acquire);
+
         let (request_sender, request_receiver) = mpsc::channel();
         let max_commit_batch_bytes = write_pipeline.max_commit_batch_bytes.get();
         let stage_workers = write_pipeline.stage_workers.get();
         let max_queued_waves = write_pipeline.max_queued_waves.get();
+        let log_merge_files = write_pipeline.log_merge_files.get();
 
         // Staged groups queue shallowly toward `commit`, which reorders them by sequence.
         let (staged_sender, staged_receiver) = mpsc::sync_channel(stage_workers);
 
+        // The channel holds one wake-up, since an unread one covers every file ingested before
+        // the merge worker reads it.
+        let (merge_sender, merge_receiver) = mpsc::sync_channel(1);
+        let merge = thread::Builder::new()
+            .name(format!("{WRITER_THREAD_PREFIX}merge"))
+            .spawn({
+                let db = db.clone();
+                move || run_log_merge(db, merge_receiver, log_merge_files)
+            })
+            .expect("RocksDB log merge worker must spawn");
+
         let commit = thread::Builder::new()
             .name(format!("{WRITER_THREAD_PREFIX}commit"))
-            .spawn(move || run_commit(db, frontiers, staged_receiver, next))
+            .spawn(move || {
+                run_commit(
+                    db,
+                    frontiers,
+                    staged_receiver,
+                    next,
+                    merge_sender,
+                    log_merge_files,
+                )
+            })
             .expect("failed to spawn RocksDB commit worker");
 
-        // One shared bounded queue, so `prepare` cannot run away from staging and any idle
-        // worker takes the next wave (a slow wave never blocks the others); the queue plus
-        // in-progress waves bound staged memory.
+        // One shared bounded queue, so `prepare` blocks once `max_queued_waves` waves wait for
+        // staging, and any idle worker takes the next wave.
         let (wave_sender, wave_receiver) = mpsc::sync_channel::<QueuedWave>(max_queued_waves);
         let wave_receiver = Arc::new(Mutex::new(wave_receiver));
-        let mut handles = Vec::with_capacity(stage_workers + 2);
+        let mut handles = Vec::with_capacity(stage_workers + 3);
         for worker in 0..stage_workers {
             let ingest_dir = ingest_dir.clone();
             let staged_sender = staged_sender.clone();
@@ -547,6 +696,7 @@ impl Writer {
 
         handles.insert(0, prepare);
         handles.push(commit);
+        handles.push(merge);
         Self {
             sender: Some(request_sender),
             handles,
@@ -688,23 +838,31 @@ fn run_stage(
 
 /// Commits staged groups strictly in sequence order (log ingestion, state ingestion, publish,
 /// ack), buffering groups whose predecessors are still staging, until the group channel closes
-/// (store drop). Any write failure panics inside `commit_group`.
+/// (store drop). Any write failure panics inside `commit_group`. Wakes the merge worker after
+/// every `log_merge_files` groups, since each adds one log file.
 fn run_commit(
     db: Arc<Database>,
     frontiers: Arc<Frontiers>,
     receiver: mpsc::Receiver<PreparedWrite>,
     mut committed: u64,
+    merge: mpsc::SyncSender<()>,
+    log_merge_files: usize,
 ) {
     let mut pending: BTreeMap<u64, PreparedWrite> = BTreeMap::new();
-    let commit_ready = |committed: &mut u64, pending: &mut BTreeMap<u64, PreparedWrite>| {
-        while let Some(group) = pending.remove(&(*committed + 1)) {
-            *committed = group.sequence;
-            commit_group(&db, &frontiers, group);
-        }
-    };
+    let mut unmerged = 0;
     while let Ok(group) = receiver.recv() {
         pending.insert(group.sequence, group);
-        commit_ready(&mut committed, &mut pending);
+        while let Some(group) = pending.remove(&(committed + 1)) {
+            committed = group.sequence;
+            commit_group(&db, &frontiers, group);
+            unmerged += 1;
+            if unmerged >= log_merge_files {
+                unmerged = 0;
+
+                // A full channel means a wake-up is already waiting.
+                let _ = merge.try_send(());
+            }
+        }
     }
 
     // The channel closes only once every stage worker has exited, after handing over every
@@ -712,11 +870,201 @@ fn run_commit(
     assert!(pending.is_empty(), "staged groups lost at shutdown");
 }
 
+/// A bottom-level log file as the merge planner sees it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LogFile {
+    /// Smallest key in the file.
+    start: Vec<u8>,
+    /// Largest key in the file.
+    end: Vec<u8>,
+    /// File size in bytes.
+    size: u64,
+}
+
+/// Lists the log column family's bottom-level files in key order. Their key ranges are
+/// disjoint, so the order is also sequence order.
+fn bottom_log_files(db: &DB) -> Result<Vec<LogFile>, String> {
+    let mut files: Vec<LogFile> = db
+        .live_files()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|file| file.column_family_name == LOG_CF && file.level == LOG_BOTTOM_LEVEL)
+        .filter_map(|file| {
+            Some(LogFile {
+                start: file.start_key?,
+                end: file.end_key?,
+                size: file.size as u64,
+            })
+        })
+        .collect();
+    files.sort_unstable_by(|a, b| a.start.cmp(&b.start));
+    Ok(files)
+}
+
+/// Picks the oldest run of adjacent small log files worth merging, as an index range into
+/// `files` (bottom-level log files in key order), or `None` when there is nothing to do.
+///
+/// ```text
+///   oldest                                                       newest
+///   +-----+-----+-+-+-+-----+-+-----+-+-+-+-+-+-+-+-+-+-+-+-+-+ - - +-+
+///   |#####|#####| | | |#####| |#####| | | | | | | | | | | | | |     | |
+///   +-----+-----+-+-+-+-----+-+-----+-+-+-+-+-+-+-+-+-+-+-+-+-+ - - +-+
+///               |<--->|     |-|     |<--------- newest run ---------->|
+///               merged      stays   waits for `trigger` files
+///               first
+///
+///   ##### a file of `LOG_MERGE_SMALL_BYTES` or more     | | a smaller one
+/// ```
+///
+/// A run needs two files. The newest run needs `trigger` of them when that is more, or
+/// `LOG_MERGE_PASS_FILES` when `trigger` is above that. One pass selects at most
+/// `LOG_MERGE_PASS_FILES` files holding at most `LOG_MERGE_PASS_BYTES`.
+fn plan_log_merge(files: &[LogFile], trigger: usize) -> Option<Range<usize>> {
+    let small = |file: &LogFile| file.size < LOG_MERGE_SMALL_BYTES;
+    let mut start = 0;
+    while start < files.len() {
+        if !small(&files[start]) {
+            start += 1;
+            continue;
+        }
+        let run = files[start..].iter().take_while(|file| small(file)).count();
+
+        // The newest run is still growing, so it waits for `trigger` files. Its first file is
+        // usually the small last output of the previous merge, and waiting spreads the cost of
+        // rewriting that file over many new ones. It waits for at most `LOG_MERGE_PASS_FILES`,
+        // since a pass takes no more however long the run grows. A run with a large file after it
+        // cannot grow, so waiting would gain nothing and two files are enough.
+        let needed = if start + run == files.len() {
+            trigger.clamp(2, LOG_MERGE_PASS_FILES)
+        } else {
+            2
+        };
+        if run >= needed {
+            // One merge takes the first two files, then more until it holds
+            // `LOG_MERGE_PASS_FILES` files or the next file would pass `LOG_MERGE_PASS_BYTES`.
+            // A later call picks up the rest of the run.
+            let mut bytes = 0;
+            let taken = files[start..start + run]
+                .iter()
+                .enumerate()
+                .take_while(|(index, file)| {
+                    bytes += file.size;
+                    *index < 2 || (*index < LOG_MERGE_PASS_FILES && bytes <= LOG_MERGE_PASS_BYTES)
+                })
+                .count();
+            return Some(start..start + taken);
+        }
+        start += run;
+    }
+    None
+}
+
+/// Merges the oldest run [`plan_log_merge`] picks by compacting its key range within the bottom
+/// level, and reports whether there was a run to merge.
+//
+// RocksDB swaps a compaction's output files for its inputs in one manifest edit, so a reader or
+// a crash sees either the old files or the new ones, and every row stays readable by key. The
+// compaction copies every row and sentinel except those under a retention tombstone. Files
+// ingested meanwhile sort above the range, and the compaction takes one only when a retention
+// tombstone written meanwhile covers it.
+fn merge_log_run(db: &DB, trigger: usize) -> Result<bool, String> {
+    let files = bottom_log_files(db)?;
+    let Some(run) = plan_log_merge(&files, trigger) else {
+        return Ok(false);
+    };
+    let log_cf = db
+        .cf_handle(LOG_CF)
+        .expect("log CF must exist (created on open)");
+    let mut options = CompactOptions::default();
+
+    // By default a manual compaction skips files that are already in the bottom level, and `Force`
+    // makes it rewrite them. When a retention tombstone overlaps the run, RocksDB first rewrites
+    // the bottom-level files under the tombstone without their deleted rows, and `Force` then
+    // merges that output with the rest of the run. That copies the surviving rows of those files
+    // twice and leaves the run merged after one call. `ForceOptimized` copies them once and leaves
+    // that output apart from the rest of the run.
+    options.set_bottommost_level_compaction(BottommostLevelCompaction::Force);
+
+    // A non-exclusive manual compaction leaves automatic compactions running in every family.
+    options.set_exclusive_manual_compaction(false);
+
+    let start = &files[run.start].start;
+    let end = &files[run.end - 1].end;
+    db.compact_range_cf_opt(log_cf, Some(start), Some(end), &options);
+
+    // The compaction reports no status, so its effect is read back from the file list. A range
+    // that holds as many files as the run did was not merged.
+    let left = bottom_log_files(db)?
+        .iter()
+        .filter(|file| file.start >= *start && file.end <= *end)
+        .count();
+    if left >= run.len() {
+        return Err(format!(
+            "compacting {} log files left {left} in their place",
+            run.len()
+        ));
+    }
+    Ok(true)
+}
+
+/// Merges runs until none is left or a merge fails, at start for files an earlier process left and
+/// again on each wake-up from `commit`. Exits when the wake-up channel closes (store drop). A
+/// merge in flight at that point finishes first, and a wake-up still queued can start one more.
+///
+/// ```text
+///   groups            1,024           2,048           3,072
+///   commit   -----------+---------------+---------------+-------------------------------------->
+///                       | wake-up       | queued        x not sent, one is queued
+///                       v               +----------------------+
+///          at start                                            v
+///   merge  [ plan ] . . [ plan ][========== compact ==========][ plan ][ compact ][ plan ] . . .
+/// ```
+///
+/// The ticks are at the default `log_merge_files`. A wake-up that finds one already queued is
+/// not sent. The queued one is taken before the next plan, and a plan lists the files as they
+/// are when it runs, so it covers the groups behind both.
+fn run_log_merge(db: Arc<Database>, wake: mpsc::Receiver<()>, trigger: usize) {
+    loop {
+        // Take a pending wake-up before reading the file list, so the worker never sleeps on a
+        // list older than a wake-up it consumed.
+        if matches!(wake.try_recv(), Err(mpsc::TryRecvError::Disconnected)) {
+            break;
+        }
+        match merge_log_run(&db, trigger) {
+            Ok(true) => continue,
+            Ok(false) => {}
+
+            // A failed merge loses no row, and the next wake-up retries it. RocksDB records some
+            // compaction failures, a corrupt block among them, as a background error. It then
+            // fails the next commit's ingestion, which is fatal to the store.
+            Err(error) => {
+                tracing::warn!(error = %error, "log file merge failed and will be retried after more commits");
+            }
+        }
+        if wake.recv().is_err() {
+            break;
+        }
+    }
+}
+
 /// Coalesces one wave from requests already queued behind `first` without waiting for new
-/// arrivals, stopping once the accumulated payload reaches the soft byte cap. The request that
-/// crosses the cap stays in the wave so a single large request can still make progress.
-/// Hard response limits carry an overflowing request intact into the next wave. Each wave
-/// shares one sequence number and preserves arrival order.
+/// arrivals. Each wave shares one sequence number and preserves arrival order.
+///
+/// ```text
+///   wave 6   +---------+-------------------+
+///            |    a    |         b         |
+///            +---------+-------------------+
+///                                   ^ soft cap        b crosses it and stays
+///
+///   wave 7   +---------------+ - - - - - - - - - +
+///            |       c       |         d         :    c and d together pass the limits
+///            +---------------+ - - - - - - - - - +    of one put, so d opens wave 8
+/// ```
+///
+/// The soft cap compares `max_batch_bytes` with twice the wave's payload bytes, and it keeps
+/// the crossing request so a single large request can still make progress. Before a request
+/// joins a wave, the wave is checked against the entry count and encoded size of a single put,
+/// so a sequence always fits one response.
 fn coalesce_queued_write(
     receiver: &mpsc::Receiver<WriteRequest>,
     first: WriteRequest,
@@ -774,15 +1122,30 @@ fn coalesce_queued_write(
     )
 }
 
-/// Stages one wave's two SST files in parallel, the log SST on this thread and the sorted
-/// state SST on a scoped thread. Ingestion later links them into their column families, so
-/// each payload byte reaches the disk exactly once, in its final resting place. A staging
-/// failure is fatal, and leftover staged files are removed by the next open.
+/// Name of the staged file of `kind` (`log` or `state`) for `sequence`. The sequence is written
+/// as 20 digits, the width of the largest `u64`.
+fn staged_file_name(kind: &str, sequence: u64) -> String {
+    format!("{kind}-{sequence:020}.sst")
+}
+
+/// Whether `name` is one that [`staged_file_name`] gives a file.
+fn is_staged_file_name(name: &str) -> bool {
+    ["log", "state"].into_iter().any(|kind| {
+        name.strip_prefix(kind)
+            .and_then(|rest| rest.strip_prefix('-'))
+            .and_then(|rest| rest.strip_suffix(".sst"))
+            .and_then(|digits| digits.parse().ok())
+            .is_some_and(|sequence| name == staged_file_name(kind, sequence))
+    })
+}
+
+/// Stages one wave's two SST files in parallel, the log SST on this thread and the sorted state
+/// SST on a scoped thread. A staging failure is fatal, and the next open removes leftover files.
 fn stage_wave(ingest_dir: &Path, wave: QueuedWave) -> PreparedWrite {
     let sequence = wave.sequence;
     let rows = &wave.rows;
-    let log = ingest_dir.join(format!("log-{sequence:020}.sst"));
-    let state = ingest_dir.join(format!("state-{sequence:020}.sst"));
+    let log = ingest_dir.join(staged_file_name("log", sequence));
+    let state = ingest_dir.join(staged_file_name("state", sequence));
     let (log_result, state_result) = thread::scope(|scope| {
         let state_task = thread::Builder::new()
             .name(format!("{WRITER_THREAD_PREFIX}stage"))
@@ -809,17 +1172,29 @@ fn stage_wave(ingest_dir: &Path, wave: QueuedWave) -> PreparedWrite {
 }
 
 /// Stages the log SST, one row mapping the group's sequence to the exact encoded batch the
-/// stream service serves, bracketed by the sentinel keys. Uncompressed, like the state SST.
+/// stream service serves, bracketed by the sentinel keys. Built with [`log_cf_options`], like
+/// the files the merge writes.
+///
+/// ```text
+///   key order -->
+///   +--------+---------+--------+--------+---------+--------+
+///   |  head  |   row   |  tail  |  head  |   row   |  tail  |
+///   |  6+01  |    7    |  7+00  |  7+01  |    8    |  8+00  |
+///   +--------+---------+--------+--------+---------+--------+
+///     empty    payload   empty    empty    payload   empty
+///   |<------- file of 7 ------->|<------- file of 8 ------->|
+///   |<---------------- or one merged file ----------------->|
+///        ^                 ^
+///        +-----------------+--- the blocks looked up for the first and last key of file 7
+///
+///   6+01 is the key of sequence 6 followed by the byte 01
+/// ```
+///
+/// A sentinel has an empty value, and every key has its own block, so the lookups for a file's
+/// first and last key land on blocks without a payload.
 fn stage_log_file(path: &Path, sequence: u64, rows: &[(Bytes, Bytes)]) -> Result<usize, String> {
     let payload = encode_log_value(sequence, rows);
-    let mut options = Options::default();
-    options.set_compression_type(DBCompressionType::None);
-
-    // Ingestion reads a file's first and last data blocks to learn its key range. With one
-    // block per key, those reads hit the two empty sentinel rows instead of the payload block.
-    let mut table = rocksdb::BlockBasedOptions::default();
-    table.set_block_size(1);
-    options.set_block_based_table_factory(&table);
+    let options = log_cf_options();
     let mut writer = SstFileWriter::create(&options);
     writer.open(path).map_err(|e| e.to_string())?;
     writer
@@ -837,13 +1212,11 @@ fn stage_log_file(path: &Path, sequence: u64, rows: &[(Bytes, Bytes)]) -> Result
     Ok(LOG_BATCH_KEY_LEN + payload.len())
 }
 
-/// Empty rows bracket each log row inside its file. Ingestion reads a file's first and last data
-/// blocks, so with the sentinels it never reads the payload block. The head sentinel is the
-/// previous sequence's key with a trailing `1`. It sorts after that sequence's tail sentinel and
-/// before this sequence's row, so files of consecutive sequences stay disjoint, and it is where
-/// `prune_log` ends the tombstone for the sequences below, so the tombstone stays clear of this
-/// file. Readers that iterate rows skip keys of this length, while the oldest-retained lookup
-/// reads the head sentinel on purpose.
+/// The head sentinel is the previous sequence's key with a trailing `1`, so the files of
+/// consecutive sequences stay disjoint (see the figure on `stage_log_file`). `prune_log` ends the
+/// tombstone for the sequences below at this key, so the tombstone stays clear of this file.
+/// Readers that iterate rows skip keys of this length, and the oldest-retained lookup reads the
+/// head sentinel in place of the row.
 fn log_head_sentinel(sequence: u64) -> [u8; LOG_BATCH_KEY_LEN + 1] {
     // Sequences start at 1. A wrapped subtraction here would make the prune tombstone end
     // above every key and erase the whole log.
@@ -898,24 +1271,42 @@ fn stage_state_file(path: &Path, rows: &[(Bytes, Bytes)]) -> Result<usize, Strin
 }
 
 /// Commits one group: ingests its log row (durability), then its state file (visibility), then
-/// publishes the frontier and resolves the requests. Any write failure is fatal (panic): once
-/// the log row is durable the group cannot be rolled back (its sequence must not be
-/// re-issued), and the next open rolls it forward by replaying the row, so nothing is ever
-/// reclaimed or retried in-process. The panic drops the group's response channels, so waiting
-/// callers observe an error even though the group may resurface after the restart repair, an
-/// accepted at-least-once ambiguity of this severe error path.
+/// publishes the frontier and resolves the requests. Any write failure panics. A durable log
+/// row cannot be rolled back, because its sequence number must never be re-issued, so the next
+/// open rolls the group forward from it.
+///
+/// ```text
+///   commit    --[ ingest log 8 ]--[####### apply state 8, publish 8 #######]--[ reply ]-->
+///   read A    ----[#]-------------------------------------------------------------------->
+///                snapshot at 7
+///   read B    ------------------------. . . . . . . waits . . . . . . . . .  [#]--------->
+///                                                                       snapshot at 8
+///   log trim  --------------[#]---------------------------------------------------------->
+///                          floor = 7, tombstone excludes file 8
+///
+///   # holds the publication lock
+/// ```
+///
+/// The lock is `Frontiers::persist`. A state read takes it in `OwnedRocksSnapshot::capture`, and a
+/// log read does not. A log trim holds it for its tombstone and floor batch
+/// (`RocksStore::prune_log`). A key prune takes it for its scan snapshot and again to raise the
+/// floor (`RocksStore::raise_state_floor`), and scans and deletes outside it.
+//
+// The panic drops the group's response channels, so waiting callers observe an error even
+// though the open-time repair may restore the group. This at-least-once ambiguity is accepted
+// on a fatal error path.
 fn commit_group(db: &DB, frontiers: &Frontiers, group: PreparedWrite) {
     assert!(!group.requests.is_empty(), "groups are never empty");
     let sequence = group.sequence;
 
-    // Log first: the durable row alone defines the group (an ingested state file without its
-    // log row could leave keys in the store that were never part of a sequenced batch). Safe
-    // against a concurrent prune without a lock: a prune only deletes rows below a published
-    // frontier it loaded earlier, and this sequence sits above every published frontier until
-    // publish.
+    // The log goes first because the durable row alone defines the group (an ingested state
+    // file without its log row could leave keys in the store that were never part of a
+    // sequenced batch). It needs no lock against a concurrent prune. A prune only deletes rows
+    // at or below a published frontier it loaded earlier, and this sequence sits above every
+    // published frontier until publish.
     ingest_staged_file(db, LOG_CF, &group.log);
 
-    // Ingest and publish under the floor lock: a prune loads the published frontier as its
+    // Ingest and publish under the publication lock. A prune loads the published frontier as its
     // state floor under the same lock, so no scan-visible state row can outrun the frontier
     // covering it (a key prune must never delete a row the floor does not cover).
     let publish_guard = frontiers.persist.lock();
@@ -957,7 +1348,7 @@ fn ingest_staged_file(db: &DB, cf: &str, path: &Path) {
         });
 }
 
-/// Writes a batch with sync enabled, used for the meta row that defines the durable floor.
+/// Writes a batch with sync enabled, so it is durable once this returns.
 fn write_synced_batch(db: &DB, batch: rocksdb::WriteBatch) -> Result<(), String> {
     let mut write_options = WriteOptions::default();
     write_options.set_sync(true);
@@ -971,6 +1362,11 @@ fn write_synced_batch(db: &DB, batch: rocksdb::WriteBatch) -> Result<(), String>
 /// original behind while its rows are already visible. Deleting leftovers is safe either way
 /// because the database owns its own link to every ingested file. Nothing here decides
 /// whether a group committed: the retained log rows alone do.
+///
+/// Only a file that carries a [`staged_file_name`] is deleted. [`RocksConfig::db_options`] can
+/// place RocksDB's WAL, SST files and info log in this directory (`wal_dir`, `db_paths`,
+/// `db_log_dir`). The open database is using those files, and RocksDB gives none of them such a
+/// name.
 fn prepare_ingest_dir(store_path: &Path) -> Result<PathBuf, String> {
     let ingest_dir = store_path.join(LOG_INGEST_DIR);
     std::fs::create_dir_all(&ingest_dir)
@@ -979,8 +1375,10 @@ fn prepare_ingest_dir(store_path: &Path) -> Result<PathBuf, String> {
         .map_err(|e| format!("failed to read staging directory: {e}"))?
     {
         let entry = entry.map_err(|e| format!("failed to read staging directory: {e}"))?;
-        std::fs::remove_file(entry.path())
-            .map_err(|e| format!("failed to remove staged file: {e}"))?;
+        if entry.file_name().to_str().is_some_and(is_staged_file_name) {
+            std::fs::remove_file(entry.path())
+                .map_err(|e| format!("failed to remove staged file: {e}"))?;
+        }
     }
     Ok(ingest_dir)
 }
@@ -1057,15 +1455,30 @@ const fn retention_floor(policy: &RetentionPolicy, frontier: u64) -> u64 {
 }
 
 /// Re-applies the newest retained log row to the state column family and returns its sequence
-/// (zero when the log is empty). Rows are only ever ingested by sequential, atomic commits, so
-/// the returned sequence is a lower bound on the durable frontier. `commit` ingests strictly
-/// in order (a group's log row lands before its state, and the next group's row only after
-/// that state), so every older group's state is already durably ingested and at most the
-/// newest group can be missing it; re-applying is idempotent because the row's entries are the
-/// newest writes for their keys. A row at or below `floor` is never replayed: its state is
-/// authoritative, and key pruning may have deleted rows a replay would resurrect. Ingestion is
-/// atomic, so no partial row can exist; a row that fails to decode is real corruption and
-/// fails the open.
+/// (zero when the log is empty). `open` takes the larger of that and `floor` as the frontier.
+///
+/// ```text
+///   sequence           5     6     7     8
+///   log rows                [6]   [7]   [8]
+///
+///   floor 7      ####################]   ^ re-applied       frontier 8
+///   floor 8      ##########################]   left alone   frontier 8
+///
+///   log rows                (none)
+///   floor 8      ##########################]                frontier 8
+///
+///   # at or below the floor, never re-applied
+/// ```
+///
+/// Rows are only ever ingested by sequential, atomic commits (a group's log row lands before
+/// its state, and the next group's row only after that state). The returned sequence is
+/// therefore a lower bound on the durable frontier, and at most the newest group can be missing
+/// its state. Re-applying is idempotent because the row's entries are the newest writes for
+/// their keys.
+///
+/// A row at or below `floor` is never replayed, because its state is authoritative and key pruning
+/// may have deleted rows a replay would resurrect. Ingestion is atomic, so no row is partial, and
+/// a re-applied row that fails to decode is corrupt and fails the open.
 fn replay_newest_log_row(db: &DB, floor: u64) -> Result<u64, String> {
     let log_cf = db
         .cf_handle(LOG_CF)
@@ -1109,11 +1522,19 @@ pub struct RocksWritePipelineConfig {
     /// Stage workers building wave SSTs concurrently. Each worker stages one wave at a time
     /// across two threads (log and state SSTs in parallel).
     pub stage_workers: NonZeroUsize,
-    /// Coalesced waves that may queue ahead of the stage workers before `prepare` blocks.
-    /// Together with `stage_workers` this bounds staged memory: every queued or staging wave
-    /// holds up to `max_commit_batch_bytes` of payload. Defaults to one queued wave per
-    /// default worker.
+    /// Coalesced waves that may queue ahead of the stage workers before `prepare` blocks. Each
+    /// stage worker holds one more wave while it stages it. Groups already staged that wait in
+    /// `commit` for an earlier sequence are not counted. Defaults to one queued wave per default
+    /// worker.
     pub max_queued_waves: NonZeroUsize,
+    /// Commit groups between wake-ups of the log merge, counted from `open`. At each wake-up, and
+    /// once at `open`, the merge compacts the newest run of small log files if the run holds this
+    /// many files, so a shorter run waits for a later wake-up. For that test a value of one counts
+    /// as two and a value above `LOG_MERGE_PASS_FILES` as that bound, the fewest and the most
+    /// files one merge takes. A smaller value leaves fewer files for every commit to pay for, and
+    /// rewrites the previous merge's last, partly filled file more often. A value above the bound
+    /// only leaves more files.
+    pub log_merge_files: NonZeroUsize,
 }
 
 impl Default for RocksWritePipelineConfig {
@@ -1125,6 +1546,8 @@ impl Default for RocksWritePipelineConfig {
                 .expect("default stage worker count must be nonzero"),
             max_queued_waves: NonZeroUsize::new(DEFAULT_STAGE_WORKERS)
                 .expect("default queued wave limit must be nonzero"),
+            log_merge_files: NonZeroUsize::new(DEFAULT_LOG_MERGE_FILES)
+                .expect("default log merge file count must be nonzero"),
         }
     }
 }
@@ -1132,20 +1555,33 @@ impl Default for RocksWritePipelineConfig {
 /// RocksDB engine and application-level write pipeline options used by [`RocksStore::open`].
 #[derive(Default)]
 pub struct RocksConfig {
-    /// Database-wide options. `max_background_jobs` sets how many compactions can run at
-    /// once. `max_open_files` can be lower than the number of SST files, because the log
-    /// files are never read back and are the ones RocksDB closes first, but it has to stay
-    /// above the number of state files in level zero, which every point read consults.
+    /// Database-wide options. `open` sets the bottom-priority thread pool of the process-wide
+    /// default environment to `BOTTOM_POOL_THREADS` threads, whatever its size was. A store on
+    /// that environment runs its log merges there.
+    ///
+    /// RocksDB derives from `max_background_jobs` how many flushes and automatic compactions run
+    /// at once. A running log merge counts as one of those compactions but does not wait for a
+    /// slot. `max_open_files` can be lower than the number of SST files. RocksDB closes the files
+    /// read least recently, and the log files are rarely read back. Below the number of state
+    /// files that reads probe, those reads reopen tables.
+    ///
+    /// A rate limiter throttles flushes and compactions, log merges included, but not the files a
+    /// commit stages. It spreads a compaction over more time without reducing what it writes, so
+    /// under a limit below the store's average compaction rate the backlog only grows.
+    ///
+    /// `open` relies on RocksDB replaying its WAL, where the store's meta rows stay until a
+    /// flush. An option that skips the WAL at open (`best_efforts_recovery`) can bring the store
+    /// up without the newest of them, even at a frontier below sequences it has issued.
     pub db_options: Options,
     /// Options for the application-level ingest write pipeline.
     pub write_pipeline: RocksWritePipelineConfig,
 }
 
-/// Options for the state column family. Ingested state SSTs overlap one another, so this
-/// family bears all compaction. Universal compaction merges whole sorted runs, compression
-/// stays off to match the staged files, and the raised level-zero triggers keep a compaction
-/// backlog from throttling ingest. A ribbon filter lets a point read skip the runs that lack
-/// its key in fewer bytes than a bloom filter.
+/// Options for the state column family. Ingested state SSTs can overlap one another, so compaction
+/// has to merge them. Universal compaction merges whole sorted runs, and compression stays off to
+/// match the staged files. The raised level-zero triggers let a larger compaction backlog build
+/// before RocksDB slows or stops writes such as prunes. A ribbon filter lets a point read skip the
+/// runs that lack its key in fewer bytes than a bloom filter.
 fn state_cf_options() -> Options {
     let mut opts = Options::default();
     opts.set_compression_type(DBCompressionType::None);
@@ -1154,20 +1590,31 @@ fn state_cf_options() -> Options {
     opts.set_level_zero_file_num_compaction_trigger(16);
     opts.set_level_zero_slowdown_writes_trigger(1024);
     opts.set_level_zero_stop_writes_trigger(2048);
+    opts.set_target_file_size_base(STATE_TARGET_FILE_BYTES);
     let mut table = BlockBasedOptions::default();
     table.set_ribbon_filter(10.0);
     opts.set_block_based_table_factory(&table);
     opts
 }
 
-/// Options for the log column family.
-///
-/// Log rows are keyed by a monotonic sequence, so ingested log SSTs never overlap and settle
-/// without rewrites; compression stays off to match the uncompressed staged files.
+/// Options for the log column family and for the log files staged for ingestion into it. Log rows
+/// are keyed by a monotonic sequence, so those files never overlap and settle in the bottom level,
+/// where the merge compacts small ones into files it cuts at about `LOG_MERGE_TARGET_BYTES`.
 fn log_cf_options() -> Options {
     let mut opts = Options::default();
     opts.set_compression_type(DBCompressionType::None);
     opts.set_bottommost_compression_type(DBCompressionType::None);
+    opts.set_num_levels(LOG_BOTTOM_LEVEL + 1);
+    opts.set_target_file_size_base(LOG_MERGE_TARGET_BYTES);
+
+    // Every key gets its own block. Ingestion reads a staged file's first and last data blocks
+    // to learn its key range, and the oldest-retained lookup reads the block of the first live
+    // key, in a merged file as in a staged one. Those keys are sentinels with empty values, so
+    // neither read loads a payload. In return the index holds an entry per key, and RocksDB
+    // keeps a file's index in memory while the file is open.
+    let mut table = BlockBasedOptions::default();
+    table.set_block_size(1);
+    opts.set_block_based_table_factory(&table);
     opts
 }
 
@@ -1176,8 +1623,8 @@ fn log_cf_options() -> Options {
 #[derive(Clone)]
 pub struct RocksStore {
     /// Declared before `db` so the last store drop joins the writer threads before releasing
-    /// its database handle: the prepare thread stages files inside the data directory without
-    /// holding [`Database`], so it must never outlive the handles that keep the directory
+    /// its database handle. The stage workers stage files inside the data directory without
+    /// holding [`Database`], so they must never outlive the handles that keep the directory
     /// alive.
     writer: Arc<Writer>,
     db: Arc<Database>,
@@ -1230,6 +1677,11 @@ impl RocksStore {
 
         db_options.create_if_missing(true);
         db_options.create_missing_column_families(true);
+
+        // The bottom-priority pool belongs to the process-wide default environment, so this
+        // sizes it for every store that uses that environment.
+        let mut env = rocksdb::Env::new().map_err(|e| e.to_string())?;
+        env.set_bottom_priority_background_threads(BOTTOM_POOL_THREADS);
 
         let cf_state = ColumnFamilyDescriptor::new(STATE_CF, state_cf_options());
         let cf_meta = ColumnFamilyDescriptor::new(META_CF, Options::default());
@@ -1331,6 +1783,22 @@ impl RocksStore {
 
     /// Deletes replay-log rows with sequence numbers below `cutoff_exclusive`. A no-op when
     /// the cutoff does not advance past what this process already trimmed.
+    ///
+    /// ```text
+    ///   sequence          1     2     3     4     5     6     7     8
+    ///                                                   ^ cutoff    ^ published, the new floor
+    ///   tombstone   [================================)
+    ///
+    ///   unmerged         [1]   [2]   [3]   [4]   [5]   [6]   [7]   [8]    file 6 untouched
+    ///   merged           [1 ............... 4]   [5 ......... 7]   [8]    5 .. 7 rewritten later
+    ///
+    ///   keys at the cut  ..|  row 5  |  5+00  ||  5+01  |  row 6  |..
+    ///   tombstone        =====================)^ its end, the first key of file 6
+    /// ```
+    ///
+    /// The tombstone runs from key 0 to the head sentinel of the cutoff, and the same batch
+    /// writes the floor. A later compaction drops the files under it, and the covered part of a
+    /// merged file that the cutoff falls inside. Keys are drawn as on `stage_log_file`.
     fn prune_log(&self, cutoff_exclusive: u64) -> Result<(), String> {
         if cutoff_exclusive == 0
             || self.frontiers.trimmed.load(Ordering::Acquire) >= cutoff_exclusive
@@ -1353,11 +1821,12 @@ impl RocksStore {
         // loaded. Space is reclaimed by ordinary compaction, and correctness never assumes
         // which SST files hold the rows.
         //
-        // The tombstone ends at the first retained sequence's head sentinel, the smallest key
-        // of its file, so it never overlaps a retained file. An overlapping tombstone would
-        // pull that file's payload into the compaction that consumes the tombstone, and at a
-        // cutoff of published + 1 it would overlap the next group's file, forcing a memtable
-        // flush before that ingestion and placing the file in L0 for a compaction to rewrite.
+        // The tombstone ends at the first retained sequence's head sentinel, the smallest key of
+        // a file that holds only that sequence, so it stays clear of every such file. Reaching
+        // into one would pull its payload into the compaction that consumes the tombstone, and
+        // reaching into the next group's file (at a cutoff of published + 1) would force a
+        // memtable flush before that ingestion and place the file in L0. A merged file with
+        // sequences on both sides of the cutoff does overlap, and that compaction rewrites it.
         //
         // Unsynced: batch atomicity means a crash loses the tombstone and the floor raise
         // together, leaving the rows intact and open's re-derivation consistent; the next
@@ -1445,8 +1914,12 @@ impl RocksStore {
             return Ok(());
         }
 
-        // The floor is raised before the deletes so the final synced chunk makes it durable
-        // by ack: an acked prune must never be undone by the newest-log-row replay at reopen.
+        // The floor is raised before the deletes, and the final synced chunk makes both durable
+        // before the reply. The floor keeps the newest-log-row replay at reopen from restoring the
+        // rows this prune scanned. Pruning is garbage collection and stays best-effort against a
+        // concurrent put. A put that publishes after the floor is raised and rewrites a key this
+        // prune then deletes loses that row, and a reopen replays it while it is still the newest
+        // log row.
         self.raise_state_floor()?;
         self.delete_keys(&all_deletes)
     }
@@ -3006,6 +3479,68 @@ mod tests {
         assert!(error.contains("keep_latest count must be > 0"), "{error}");
     }
 
+    #[tokio::test]
+    async fn open_removes_only_staged_files_from_the_staging_directory() {
+        // Each open places RocksDB's WAL in the staging directory.
+        let dir = tempdir().expect("tempdir");
+        let ingest_dir = dir.path().join(LOG_INGEST_DIR);
+        let open = || {
+            let mut config = RocksConfig::default();
+            config.db_options.set_wal_dir(&ingest_dir);
+            RocksStore::open(dir.path(), Some(config)).expect("open db")
+        };
+
+        // A retention rule evicts the first two of three groups, and only the WAL holds the rule
+        // and the trim when the store closes. A fourth group is staged and never committed, as a
+        // crash would leave it.
+        let leftovers = {
+            let store = open();
+            for sequence in 1..=3 {
+                store.put_batch(small_batch(sequence)).await.expect("put");
+            }
+            store
+                .set_retention(Some(RetentionPolicy::KeepLatest { count: 1 }))
+                .expect("set retention");
+            assert_eq!(
+                store.oldest_retained_batch().await.expect("oldest"),
+                Some(3)
+            );
+            let group = prepared_write(&store, 3, small_batch(4));
+            [group.log, group.state]
+        };
+        for path in &leftovers {
+            assert!(path.exists(), "{} must be staged", path.display());
+        }
+
+        // Two more files have names that only resemble a staged one.
+        let others = ["state-backup.sst", "log-4.sst"].map(|name| ingest_dir.join(name));
+        for path in &others {
+            std::fs::write(path, b"").expect("write file");
+        }
+
+        // The reopened store has the rule and the trim, so the evicted groups stay evicted. The
+        // staged leftovers are gone, and the other files are not.
+        let store = open();
+        assert_eq!(
+            store.oldest_retained_batch().await.expect("oldest"),
+            Some(3)
+        );
+        assert!(store.get_batch(2).await.expect("get").is_none());
+        for path in &leftovers {
+            assert!(!path.exists(), "open must remove {}", path.display());
+        }
+        for path in &others {
+            assert!(path.exists(), "open must keep {}", path.display());
+        }
+
+        // The rule is installed, so the next group moves the cutoff.
+        store.put_batch(small_batch(4)).await.expect("put");
+        assert_eq!(
+            store.oldest_retained_batch().await.expect("oldest"),
+            Some(4)
+        );
+    }
+
     /// Number of retained rows in the log column family.
     fn live_log_rows(store: &RocksStore) -> usize {
         store
@@ -3143,6 +3678,479 @@ mod tests {
         }
     }
 
+    /// Opens a store that merges its log files every `log_merge_files` commit groups.
+    fn open_merging(path: &Path, log_merge_files: usize) -> RocksStore {
+        RocksStore::open(
+            path,
+            Some(RocksConfig {
+                write_pipeline: RocksWritePipelineConfig {
+                    log_merge_files: NonZeroUsize::new(log_merge_files).expect("nonzero"),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        )
+        .expect("open db")
+    }
+
+    /// Waits for the merge worker to leave at most `at_most` log files.
+    async fn wait_for_log_files(store: &RocksStore, at_most: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            while log_files(store).len() > at_most {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "the merge worker must leave at most {at_most} log files: {:?}",
+                log_files(store)
+            )
+        });
+    }
+
+    /// The rows of the small batch committed as `sequence`.
+    fn small_batch(sequence: u64) -> Vec<(Bytes, Bytes)> {
+        let mut key = b"merge-".to_vec();
+        key.extend_from_slice(&sequence.to_be_bytes());
+        vec![(
+            Bytes::from(key),
+            Bytes::from(sequence.to_le_bytes().to_vec()),
+        )]
+    }
+
+    /// Asserts that sequences `1..=newest` are all in the log with their sentinels and in the
+    /// state, exactly as [`small_batch`] wrote them.
+    async fn assert_small_batches(store: &RocksStore, newest: u64) {
+        assert_eq!(store.current_sequence(), newest);
+        assert_eq!(
+            store.oldest_retained_batch().await.expect("oldest"),
+            Some(1)
+        );
+        for sequence in 1..=newest {
+            let batch = store
+                .get_batch(sequence)
+                .await
+                .expect("get batch")
+                .unwrap_or_else(|| panic!("batch {sequence} must be retained"));
+            assert_eq!(batch_entries(batch), small_batch(sequence));
+            assert_eq!(log_file_keys_present(store, sequence), [true; 3]);
+            let (key, value) = small_batch(sequence).remove(0);
+            assert_eq!(
+                store.get_raw(&key).expect("get").as_deref(),
+                Some(&value[..])
+            );
+        }
+    }
+
+    /// A bottom-level log file holding sequences `first..=last`.
+    fn log_file(first: u64, last: u64, size: u64) -> LogFile {
+        LogFile {
+            start: log_head_sentinel(first).to_vec(),
+            end: log_tail_sentinel(last).to_vec(),
+            size,
+        }
+    }
+
+    #[test]
+    fn log_merge_plan_waits_for_the_newest_run_and_closes_older_ones() {
+        // A file of exactly the small-file limit is the smallest that counts as large.
+        const LARGE: u64 = LOG_MERGE_SMALL_BYTES;
+        let singles = |sequences: std::ops::RangeInclusive<u64>| {
+            sequences.map(|sequence| log_file(sequence, sequence, 1024))
+        };
+
+        // The newest run merges only once it holds the trigger count.
+        let mut files: Vec<LogFile> = singles(1..=7).collect();
+        assert_eq!(plan_log_merge(&files, 8), None);
+        files.push(log_file(8, 8, 1024));
+        assert_eq!(plan_log_merge(&files, 8), Some(0..8));
+
+        // A small file left by an earlier merge is part of the run, and large files are not.
+        let mut files = vec![log_file(1, 100, LARGE), log_file(101, 150, LARGE - 1)];
+        files.extend(singles(151..=157));
+        assert_eq!(plan_log_merge(&files, 8), Some(1..9));
+        assert_eq!(plan_log_merge(&files[..8], 8), None);
+
+        // A run that a large file closes merges from two files up, oldest run first, and a
+        // lone small file before a large one stays.
+        let mut files = vec![log_file(1, 1, 1024), log_file(2, 2, LARGE)];
+        files.extend(singles(3..=4));
+        files.push(log_file(5, 5, LARGE));
+        files.extend(singles(6..=9));
+        assert_eq!(plan_log_merge(&files, 8), Some(2..4));
+        assert_eq!(plan_log_merge(&files, 4), Some(2..4));
+        assert_eq!(plan_log_merge(&files[4..], 4), Some(1..5));
+
+        // One merge takes as many files as the byte budget of a pass holds, and a merge needs at
+        // least two files.
+        let files: Vec<LogFile> = (1..=200).map(|s| log_file(s, s, LARGE - 1)).collect();
+        let run = plan_log_merge(&files, 8).expect("run");
+        let bytes: u64 = files[run.clone()].iter().map(|file| file.size).sum();
+        assert_eq!(run.start, 0);
+        assert!(bytes <= LOG_MERGE_PASS_BYTES && bytes + LARGE > LOG_MERGE_PASS_BYTES);
+        assert_eq!(plan_log_merge(&files[..2], 1), Some(0..2));
+        assert_eq!(plan_log_merge(&files[..1], 1), None);
+    }
+
+    #[test]
+    fn log_merge_plan_takes_a_backlog_in_bounded_passes() {
+        // Four passes' worth of one-row files hold far less than the byte budget of one pass,
+        // so the file limit alone ends the first pass.
+        let mut files: Vec<LogFile> = (1..=4 * LOG_MERGE_PASS_FILES as u64)
+            .map(|sequence| log_file(sequence, sequence, 1250))
+            .collect();
+        assert_eq!(
+            plan_log_merge(&files, DEFAULT_LOG_MERGE_FILES),
+            Some(0..LOG_MERGE_PASS_FILES)
+        );
+
+        // Drain the backlog the way the merge worker does. Each pass leaves one small output in
+        // place of its inputs, and the next plan starts from that output.
+        while let Some(run) = plan_log_merge(&files, DEFAULT_LOG_MERGE_FILES) {
+            assert!(
+                run.len() <= LOG_MERGE_PASS_FILES,
+                "one pass must select at most {LOG_MERGE_PASS_FILES} files, selected {}",
+                run.len()
+            );
+            let output = LogFile {
+                start: files[run.start].start.clone(),
+                end: files[run.end - 1].end.clone(),
+                size: files[run.clone()].iter().map(|file| file.size).sum(),
+            };
+            files.splice(run, [output]);
+        }
+        assert!(
+            files.len() < DEFAULT_LOG_MERGE_FILES,
+            "the passes must drain the backlog below the trigger, left {} files",
+            files.len()
+        );
+
+        // Under a trigger above the pass limit, the newest run merges once it holds
+        // `LOG_MERGE_PASS_FILES` files.
+        let files: Vec<LogFile> = (1..=LOG_MERGE_PASS_FILES as u64)
+            .map(|sequence| log_file(sequence, sequence, 1250))
+            .collect();
+        assert_eq!(
+            plan_log_merge(&files, 2 * LOG_MERGE_PASS_FILES),
+            Some(0..LOG_MERGE_PASS_FILES)
+        );
+        assert_eq!(
+            plan_log_merge(&files[..LOG_MERGE_PASS_FILES - 1], 2 * LOG_MERGE_PASS_FILES),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn log_merge_bounds_live_files_and_keeps_every_row() {
+        // A hundred commits try twelve wake-ups at this trigger, with four commits after the last.
+        const MERGE_FILES: usize = 8;
+        const BATCHES: u64 = 100;
+        let dir = tempdir().expect("tempdir");
+        {
+            let store = open_merging(dir.path(), MERGE_FILES);
+
+            // Commit a hundred one-row groups while the merge worker runs.
+            for sequence in 1..=BATCHES {
+                assert_eq!(
+                    store.put_batch(small_batch(sequence)).await.expect("put"),
+                    sequence
+                );
+            }
+
+            // Each commit group ingested one log file. The settled worker leaves fewer than
+            // `MERGE_FILES` in the newest run, and fewer than that arrive after its last wake-up.
+            wait_for_log_files(&store, 2 * MERGE_FILES).await;
+            assert!(
+                log_files(&store).iter().all(|(_, level)| *level == 6),
+                "merged log files must stay in the bottom level"
+            );
+            assert_small_batches(&store, BATCHES).await;
+        }
+
+        // The reopened store reads every row, whether or not a merge rewrote its file.
+        let store = open_merging(dir.path(), MERGE_FILES);
+        assert_small_batches(&store, BATCHES).await;
+
+        // Groups committed after the reopen ingest beside the merged files and merge in turn.
+        for sequence in BATCHES + 1..=2 * BATCHES {
+            store.put_batch(small_batch(sequence)).await.expect("put");
+        }
+        wait_for_log_files(&store, 2 * MERGE_FILES).await;
+        assert_small_batches(&store, 2 * BATCHES).await;
+    }
+
+    #[tokio::test]
+    async fn reopen_merges_log_files_left_by_an_earlier_process() {
+        const BATCHES: u64 = 40;
+        let dir = tempdir().expect("tempdir");
+        {
+            // The default trigger is far above forty files, so none of them is merged.
+            let store = RocksStore::open(dir.path(), None).expect("open db");
+            for sequence in 1..=BATCHES {
+                store.put_batch(small_batch(sequence)).await.expect("put");
+            }
+            assert_eq!(log_files(&store).len(), BATCHES as usize);
+        }
+
+        // A store reopened with a low trigger merges the leftover files without a new commit.
+        let store = open_merging(dir.path(), 8);
+        wait_for_log_files(&store, 1).await;
+        assert_small_batches(&store, BATCHES).await;
+    }
+
+    #[tokio::test]
+    async fn reopen_replays_newest_log_row_above_merged_files() {
+        const MERGE_FILES: usize = 4;
+        const BATCHES: u64 = 16;
+        let dir = tempdir().expect("tempdir");
+        {
+            let store = open_merging(dir.path(), MERGE_FILES);
+
+            // The last of the sixteen commits wakes the worker, so it settles with fewer files
+            // than the trigger, and at least one of them holds several sequences.
+            for sequence in 1..=BATCHES {
+                store.put_batch(small_batch(sequence)).await.expect("put");
+            }
+            wait_for_log_files(&store, MERGE_FILES - 1).await;
+
+            // Ingest a group's log row without its state rows, as a crash between the two would
+            // leave it.
+            let group = prepared_write(&store, BATCHES, small_batch(BATCHES + 1));
+            ingest_staged_file(&store.db, LOG_CF, &group.log);
+            assert_eq!(store.current_sequence(), BATCHES);
+        }
+
+        // The reopen replays that group's log row above the merged files.
+        let store = open_merging(dir.path(), MERGE_FILES);
+        assert_small_batches(&store, BATCHES + 1).await;
+    }
+
+    #[tokio::test]
+    async fn merged_log_files_keep_payloads_out_of_sentinel_reads() {
+        let dir = tempdir().expect("tempdir");
+        let store = open_merging(dir.path(), 4);
+
+        // Four large groups merge into one file.
+        for tag in 1..=4u8 {
+            store.put_batch(large_batch(tag)).await.expect("put");
+        }
+        wait_for_log_files(&store, 1).await;
+
+        // The merged file starts with sequence 1's head sentinel, directly followed by its
+        // multi-megabyte row. If the two shared a block, the lookup would load the row.
+        rocksdb::perf::set_perf_stats(rocksdb::perf::PerfStatsLevel::EnableCount);
+        let mut perf = rocksdb::perf::PerfContext::default();
+        perf.reset();
+        assert_eq!(store.oldest_retained_sequence().expect("oldest"), Some(1));
+        let read = perf.metric(rocksdb::perf::PerfMetric::BlockReadByte);
+        rocksdb::perf::set_perf_stats(rocksdb::perf::PerfStatsLevel::Disable);
+        assert!(
+            read < 4096,
+            "the oldest-retained lookup must not load a payload, but read {read} bytes"
+        );
+
+        // Every payload stays readable from the merged file.
+        for tag in 1..=4u8 {
+            let batch = store
+                .get_batch(u64::from(tag))
+                .await
+                .expect("get batch")
+                .expect("batch must be retained");
+            assert_eq!(batch_entries(batch), large_batch(tag));
+        }
+    }
+
+    #[tokio::test]
+    async fn newest_write_wins_across_overlapping_state_files() {
+        let dir = tempdir().expect("tempdir");
+        let key = large_batch(7).remove(3).0;
+        let small = |value: &'static [u8]| vec![(key.clone(), Bytes::from_static(value))];
+        {
+            let store = RocksStore::open(dir.path(), None).expect("open db");
+
+            // The first group's state file holds only that key.
+            store.put_batch(small(b"first")).await.expect("put");
+            assert_eq!(
+                store.get_raw(&key).expect("get").as_deref(),
+                Some(&b"first"[..])
+            );
+
+            // A file that rewrites that key among many others must land above the first.
+            store.put_batch(large_batch(7)).await.expect("put");
+            assert_eq!(
+                store.get_raw(&key).expect("get").as_deref(),
+                Some(&[7u8; 4096][..])
+            );
+
+            // A file of that one key, inside the large file's key range, must land above it in
+            // turn.
+            store.put_batch(small(b"last")).await.expect("put");
+            assert_eq!(
+                store.get_raw(&key).expect("get").as_deref(),
+                Some(&b"last"[..])
+            );
+
+            // A group with another key becomes the newest log row, so the reopen replays no
+            // write of this key.
+            store.put_batch(small_batch(4)).await.expect("put");
+        }
+
+        // The newest write survives a reopen.
+        let store = RocksStore::open(dir.path(), None).expect("reopen db");
+        assert_eq!(store.current_sequence(), 4);
+        assert_eq!(
+            store.get_raw(&key).expect("get").as_deref(),
+            Some(&b"last"[..])
+        );
+    }
+
+    #[test]
+    fn overlapping_state_files_keep_the_newest_write_and_old_snapshots() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        let key = large_batch(7).remove(3).0;
+        let read = |snapshot: &OwnedRocksSnapshot| {
+            snapshot
+                .snapshot
+                .get(&key)
+                .expect("get")
+                .map(|value| value[..5].to_vec())
+        };
+
+        // The stage workers can stage both groups before either commits. The overwrite commits
+        // after the file that covers its key.
+        let file = prepared_write(&store, 0, large_batch(7));
+        let overwrite =
+            prepared_write(&store, 1, vec![(key.clone(), Bytes::from_static(b"newer"))]);
+        assert_eq!(commit_and_apply(&store, file), 1);
+        let after_file = OwnedRocksSnapshot::capture(store.db.clone(), &store.frontiers);
+        assert_eq!(commit_and_apply(&store, overwrite), 2);
+        assert_eq!(
+            store.get_raw(&key).expect("get").as_deref(),
+            Some(&b"newer"[..])
+        );
+
+        // Another file that covers the key lands above the overwrite.
+        let after_overwrite = OwnedRocksSnapshot::capture(store.db.clone(), &store.frontiers);
+        let again = prepared_write(&store, 2, large_batch(7));
+        assert_eq!(commit_and_apply(&store, again), 3);
+        assert_eq!(
+            store.get_raw(&key).expect("get").as_deref(),
+            Some(&[7u8; 4096][..])
+        );
+
+        // Each snapshot reads the state of the sequence it was taken at, despite the later
+        // writes.
+        assert_eq!(after_file.sequence_number, 1);
+        assert_eq!(read(&after_file), Some(vec![7u8; 5]));
+        assert_eq!(after_overwrite.sequence_number, 2);
+        assert_eq!(read(&after_overwrite), Some(b"newer".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn retention_cuts_through_a_merged_log_file() {
+        const MERGE_FILES: usize = 4;
+        let dir = tempdir().expect("tempdir");
+
+        // Exactly `oldest..=newest` is retained, sentinels included, and nothing of the
+        // sequence below it.
+        let assert_window = |store: RocksStore, oldest: u64, newest: u64| async move {
+            assert_eq!(store.current_sequence(), newest);
+            assert_eq!(
+                store.oldest_retained_batch().await.expect("oldest"),
+                Some(oldest)
+            );
+            assert!(store.get_batch(oldest - 1).await.expect("get").is_none());
+            assert_eq!(log_file_keys_present(&store, oldest - 1), [false; 3]);
+            for sequence in oldest..=newest {
+                let batch = store
+                    .get_batch(sequence)
+                    .await
+                    .expect("get batch")
+                    .unwrap_or_else(|| panic!("batch {sequence} must be retained"));
+                assert_eq!(batch_entries(batch), small_batch(sequence));
+                assert_eq!(log_file_keys_present(&store, sequence), [true; 3]);
+            }
+        };
+        {
+            let store = open_merging(dir.path(), MERGE_FILES);
+
+            // The last of the twelve commits wakes the worker, so it settles with fewer files
+            // than the trigger, and one merged file holds sequences 1 through at least 10.
+            for sequence in 1..=12 {
+                store.put_batch(small_batch(sequence)).await.expect("put");
+            }
+            wait_for_log_files(&store, MERGE_FILES - 1).await;
+
+            // The cutoff, sequence 8, falls inside that merged file.
+            store
+                .set_retention(Some(RetentionPolicy::KeepLatest { count: 5 }))
+                .expect("set retention");
+            assert_window(store.clone(), 8, 12).await;
+
+            // Ingestion, merging and trimming carry on together.
+            for sequence in 13..=20 {
+                store.put_batch(small_batch(sequence)).await.expect("put");
+            }
+            wait_for_log_files(&store, MERGE_FILES).await;
+            assert_window(store.clone(), 16, 20).await;
+        }
+
+        // The window survives a reopen, and log retention leaves every state row in place.
+        let store = open_merging(dir.path(), MERGE_FILES);
+        assert_window(store.clone(), 16, 20).await;
+        for sequence in 1..=20 {
+            let (key, value) = small_batch(sequence).remove(0);
+            assert_eq!(
+                store.get_raw(&key).expect("get").as_deref(),
+                Some(&value[..])
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn log_merge_joins_a_file_that_retention_cut_with_its_neighbor() {
+        let dir = tempdir().expect("tempdir");
+
+        // The default trigger is far above nine files, so the merge worker stays idle and the
+        // test runs each merge itself.
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        for sequence in 1..=8 {
+            store.put_batch(small_batch(sequence)).await.expect("put");
+        }
+        assert_eq!(merge_log_run(&store.db, 8), Ok(true));
+        store.put_batch(small_batch(9)).await.expect("put");
+        assert_eq!(log_files(&store).len(), 2);
+
+        // The cutoff, sequence 5, falls inside the merged file, and its tombstone is still in
+        // the memtable when the next merge compacts the run of two.
+        store
+            .set_retention(Some(RetentionPolicy::KeepLatest { count: 5 }))
+            .expect("set retention");
+
+        // One call joins the two files. A run of two that stayed two files would be planned
+        // again at every wake-up, ahead of every newer run.
+        assert_eq!(merge_log_run(&store.db, 2), Ok(true));
+        assert_eq!(log_files(&store).len(), 1);
+
+        // The merged file holds exactly the retained window.
+        assert_eq!(
+            store.oldest_retained_batch().await.expect("oldest"),
+            Some(5)
+        );
+        assert_eq!(log_file_keys_present(&store, 4), [false; 3]);
+        for sequence in 5..=9 {
+            let batch = store
+                .get_batch(sequence)
+                .await
+                .expect("get batch")
+                .unwrap_or_else(|| panic!("batch {sequence} must be retained"));
+            assert_eq!(batch_entries(batch), small_batch(sequence));
+            assert_eq!(log_file_keys_present(&store, sequence), [true; 3]);
+        }
+    }
+
     #[tokio::test]
     async fn reopen_replays_newest_log_batch_missing_from_state() {
         let dir = tempdir().expect("tempdir");
@@ -3153,11 +4161,9 @@ mod tests {
                 .await
                 .expect("put");
 
-            // Simulate a crash that lost the WAL-less state rows for sequence 2 (the group
-            // whose commit was interrupted) but kept its durable log row: write it directly,
-            // bypassing the state apply stage and the floor advance. The reopened store must
-            // re-derive the durable frontier from the retained rows alone, exactly as after a
-            // crash that also lost the unsynced floor advance.
+            // Seed only sequence 2's durable log row, as a crash between its log ingestion and
+            // its state ingestion would leave it. The reopened store must re-derive the frontier
+            // from the retained rows alone and replay the row into the state.
             let payload = StreamGetResponse {
                 sequence_number: 2,
                 entries: vec![
@@ -3338,6 +4344,7 @@ mod tests {
                     max_commit_batch_bytes: NonZeroUsize::new(1).expect("nonzero"),
                     stage_workers: NonZeroUsize::new(2).expect("nonzero"),
                     max_queued_waves: NonZeroUsize::new(1).expect("nonzero"),
+                    ..Default::default()
                 },
                 ..Default::default()
             }),

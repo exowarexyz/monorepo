@@ -22,8 +22,9 @@ directory.
 
 RocksDB keeps up to `--max-open-files` table files open (default 16384) and
 closes the least recently read ones beyond that, so run the server under an
-open-file limit above it, for example `ulimit -n 65536`. A long session adds
-files for as long as it is written, and a cap below the state files a read
+open-file limit above it, for example `ulimit -n 65536`. The store merges its
+log files in the background, so the number of log files grows with the bytes
+stored and not with the number of writes. A cap below the state files a read
 probes makes reads reopen tables.
 
 Connect with the [Rust SDK](../../sdk/rs/README.md) or [TypeScript
