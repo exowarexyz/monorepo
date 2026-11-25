@@ -4117,6 +4117,7 @@ mod tests {
 
         let mut drop_all = filter(versioned_policy(&[1], RetainPolicy::DropAll));
         assert!(removes(&mut drop_all, &key(1)));
+
         // Outside the prefix, and under it with a payload the regex rejects.
         assert!(!removes(&mut drop_all, &versioned_key(&[2], b"row", 1)));
         assert!(!removes(&mut drop_all, &[1, b'r', 0, 0, 9]));
@@ -4218,6 +4219,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
         let key = |group: &[u8], version| versioned_key(&[1], group, version);
+
         // The one version of group b is higher than every version of group a before it.
         let keys: Vec<Vec<u8>> = [(b"a", 1..=4), (b"b", 9..=9), (b"c", 1..=2)]
             .into_iter()
