@@ -1,8 +1,8 @@
 //! Contract tests for RocksDB simulator pruning (user-key scopes via `Prune`) and sequence-log
 //! retention (continuously enforced via `Retention`/`SetRetention`).
 //!
-//! A prune reply does not promise that the pruned rows are gone, so each key-prune test compacts
-//! the state between the prune and its reads.
+//! A prune reply does not promise that the rows its policies remove are gone, so a key-prune
+//! test compacts the state before it expects a row to be gone.
 
 use bytes::Bytes;
 use exoware_sdk::{
@@ -381,8 +381,8 @@ fn retention_clear_stops_enforcement() {
 }
 
 /// Key pruning (`Prune`) and sequence-log retention (`SetRetention`) target different data and
-/// compose: current key rows are deleted by the prune, log rows are trimmed by retention, and
-/// neither advances the ingest frontier.
+/// compose. The prune's policy removes key rows, retention trims log rows, and neither advances
+/// the ingest frontier.
 #[test]
 fn keys_prune_and_retention_compose() {
     let dir = tempdir().expect("tempdir");
@@ -460,8 +460,9 @@ fn retention_drop_all_survives_reopen() {
     assert_eq!(oldest_retained(&store), None);
 }
 
-/// Every version of a group shares one batch, so reopening re-applies the log row that holds
-/// the pruned ones. The stored policy removes them again at the next compaction.
+/// All versions of the group are written in one batch. Its log row is the newest, and with no log
+/// trim it is above the state floor, so reopening re-applies it and the pruned versions are
+/// readable again. The stored `KeepLatest` policy removes them again at the next compaction.
 #[test]
 fn keep_latest_prunes_replayed_versions_after_reopen() {
     let dir = tempdir().expect("tempdir");
@@ -544,7 +545,7 @@ fn prune_reply_leaves_rows_until_a_compaction() {
     assert!(get_value(&store, &a1).is_none());
 }
 
-/// A policy stands. It removes a row written after the request as it removes one written
+/// An installed policy also removes a row written after the request, as it removes one written
 /// before.
 #[test]
 fn prune_policy_stands_for_rows_written_later() {
@@ -570,7 +571,7 @@ fn prune_policy_stands_for_rows_written_later() {
 }
 
 /// A request's document replaces the installed one as a whole. A policy that the request does
-/// not repeat no longer applies, and the rows that it alone selected stay.
+/// not repeat stops applying, and the rows that only it selected stay.
 #[test]
 fn prune_request_replaces_the_policies_of_earlier_requests() {
     const OTHER_PREFIX: u8 = 2;
@@ -607,9 +608,9 @@ fn prune_request_replaces_the_policies_of_earlier_requests() {
         Some(b"v5".as_slice())
     );
 
-    // The next request repeats the threshold alone. The policy it leaves out no longer
-    // applies, so a row under that prefix survives a compaction, and the threshold still
-    // removes its rows.
+    // The next request repeats only the threshold. The policy it leaves out stops applying,
+    // so a row under that prefix survives a compaction, and the threshold still removes its
+    // rows.
     apply_prune(&store, &[threshold]);
     seed(&store);
     store.compact_state();
@@ -678,8 +679,9 @@ fn prune_policies_survive_reopen() {
     assert_eq!(get_value(&store, &v5).as_deref(), Some(b"v5".as_slice()));
 }
 
-/// Reopening re-applies the newest log row, which can bring back rows of that batch that a
-/// compaction had pruned. The stored policy removes them again at the next compaction.
+/// With no log trim, the newest log row is above the state floor, so reopening re-applies it and
+/// brings back the rows of that batch that a compaction had pruned. The stored threshold policy
+/// removes them again at the next compaction.
 #[test]
 fn reopen_restores_pruned_rows_of_the_newest_batch_until_a_compaction() {
     let dir = tempdir().expect("tempdir");

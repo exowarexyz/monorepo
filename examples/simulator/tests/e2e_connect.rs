@@ -38,8 +38,8 @@ async fn spawn_client_with_store() -> (PrefixedStoreClient, String, RocksStore) 
     (PrefixedStoreClient::empty(client), url, store)
 }
 
-/// Compacts the store's state. A prune reply does not promise that the pruned rows are gone, so
-/// the prune tests compact before they read.
+/// Compacts the store's state. A prune reply does not promise that the rows its policies remove
+/// are gone, so the prune tests compact before they read.
 async fn compact_state(store: &RocksStore) {
     let store = store.clone();
     tokio::task::spawn_blocking(move || store.compact_state())
@@ -619,7 +619,8 @@ async fn prune_keep_latest_retains_newest() {
         client.query().get(&k_a3).await.expect("get a3").as_deref(),
         Some(b"a-v3".as_slice())
     );
-    // Group "bbb" has only 1 entry, which is its latest -- should survive
+
+    // The only entry of group "bbb" is its latest, so it survives.
     assert_eq!(
         client.query().get(&k_b1).await.expect("get b1").as_deref(),
         Some(b"b-v1".as_slice())

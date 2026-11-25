@@ -768,10 +768,9 @@ async fn test_qmdb_streaming_is_isolated_by_store_prefix() {
 async fn test_prefixed_prune_composes_selector_and_prunes_cleanly() {
     // Regression test for prefix composition
 
-    // The SDK composes the store prefix
-    // onto the logical selector (prefix_prune_policies), and the store
-    // reconstructs a codec from the MERGED selector when it compiles the policy,
-    // and strips.
+    // The SDK prepends the store prefix to the logical selector's prefix
+    // (prefix_prune_policies). The simulator compiles the policy with that MERGED
+    // prefix and strips it from each key before the payload regex runs.
     let (base, store) = local_store_client_with_store().await;
     let client = base.prefixed(StoreKeyPrefix::new(vec![0x05, 0x06]).unwrap());
 
@@ -828,24 +827,22 @@ async fn test_prefixed_prune_composes_selector_and_prunes_cleanly() {
         retain: RetainPolicy::KeepLatest { count: 1 },
     };
 
-    // The crux: the prefixed client composes [0x05, 0x06] onto the [0x07] logical
-    // selector, producing merged physical prefix [0x05, 0x06, 0x07]
-    // (prefix_prune_policies), and the server reconstructs a codec from the merged
-    // selector and strips.
+    // The prefixed client turns the [0x07] logical selector into the merged
+    // physical prefix [0x05, 0x06, 0x07] before it sends the policy.
     client.prune().prune(&[policy]).await.expect("prune");
 
-    // A prune reply does not promise that the pruned rows are gone, so compact the state
-    // before reading.
+    // A prune reply does not promise that the rows its policies remove are gone, so compact the
+    // state before reading.
     tokio::task::spawn_blocking(move || store.compact_state())
         .await
         .expect("compact state");
 
     // Verified through the prefixed client (which strips the store prefix
-    // transparently). Because KeepLatest grouping depends on the server stripping
-    // the COMPOSED prefix and the payload_regex parsing logical/version, a spurious
-    // trailing byte (the old bit-codec bug) would break grouping and the wrong rows
-    // would survive -- so exact KeepLatest correctness proves the merge + strip +
-    // regex all work through the real composed path.
+    // transparently). A wrong merged prefix leaves the policy matching no key,
+    // and a stray byte at the end of the payload stops the payload regex from
+    // matching, so either way the wrong rows would survive. Exact `KeepLatest`
+    // results show that the merged prefix and the payload regex work through
+    // the composed path.
     assert!(client
         .query()
         .get(&row_v1)

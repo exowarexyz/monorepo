@@ -87,11 +87,11 @@
 //!
 //! # Key pruning
 //!
-//! A Prune call installs its policies in place of the ones installed before, and replies. It
-//! writes the request's document to a meta row and swaps the compiled policies that the state
-//! family's compaction filter reads (see `RocksStore::install_prune_policies` and
-//! `PruneFilter`). The rows a policy removes leave later, when RocksDB compacts the files that
-//! hold them, and nothing schedules a compaction for that.
+//! A Prune call replaces the installed policies with its own and replies. It writes the
+//! request's document to a meta row and swaps the compiled policies that the state family's
+//! compaction filter reads (see `RocksStore::install_prune_policies` and `PruneFilter`). The
+//! rows a policy removes leave later, when RocksDB compacts the files that hold them, and the
+//! store schedules no compaction for that.
 //!
 //! ```text
 //!   Prune call   -----------[ write row ][ swap ]--> reply
@@ -108,20 +108,23 @@
 //!
 //! Both rows are ones a policy removes, k1 in the oldest file and k8 in a new one. A compaction
 //! of the newer files removes k8, and k1 stays readable until a compaction takes the oldest
-//! file. A policy stands, so it also removes rows written after the call. It ends with the next
-//! request the store accepts, whose document replaces every installed policy. A replaced policy
-//! stops deciding at the next key a compaction is shown. The removals it had already decided
-//! still land when their compaction finishes (see `PruneFilter`).
+//! file.
 //!
-//! Which rows `KeepLatest` removes depends on the other rows of their group, and a filter is
-//! shown one row at a time. So the filter reads ahead in the live state (see
-//! `ReadAhead::followed_by`). It prunes a group in full when the group's keys sort together,
-//! oldest first, and can keep more of it otherwise.
+//! An installed policy also removes rows written after the call. It stays installed until the
+//! store accepts another request, and that request's document replaces every installed policy.
+//! A replaced policy stops deciding at the next key a compaction is shown, and the removals it
+//! had already decided still land when their compaction finishes (see `PruneFilter`).
 //!
-//! `open` loads the document before the store serves. It also re-applies the newest log row
-//! (see `replay_newest_log_row`), which can bring back rows of that group that a compaction had
-//! removed. A policy that is still installed removes them again when a compaction takes them,
-//! and a row that no installed policy removes stays.
+//! Which rows `KeepLatest` removes depends on the other rows of their group, and a filter is shown
+//! one row at a time. So the filter reads ahead in the live state to find the rows that follow
+//! each one (see `ReadAhead::followed_by`). When a group's keys sort together, oldest first, a
+//! compaction under an unchanged document removes every live row of the group it takes except the
+//! latest `count` its read-ahead sees. Under any other layout it can keep more.
+//!
+//! `open` loads the document before the store serves. Re-applying the newest log row at open (see
+//! `replay_newest_log_row`) can bring back rows of its commit group that a compaction had removed.
+//! A policy that is still installed removes them again when a compaction takes them, and a row
+//! that no installed policy removes stays.
 
 #[cfg(test)]
 use buffa::Message;
@@ -192,13 +195,14 @@ const SEQ_META_KEY: &[u8] = b"sequence";
 /// [`RetentionPolicy`]). Absence of the row means no rule is installed.
 const RETENTION_META_KEY: &[u8] = b"retention";
 
-/// Meta row holding the installed prune policies, the SDK's encoded [`PrunePolicyDocument`]
-/// under the SDK's name for it. Absence of the row means no policy is installed.
+/// Meta row holding the installed prune policies as the SDK encodes a
+/// [`PrunePolicyDocument`]. Absence of the row means no policy is installed.
 const PRUNE_META_KEY: &[u8] = PRUNE_POLICY_CONTROL_KEY.as_bytes();
 
-/// Keys a filter is shown before it drops its read-ahead cursor for a fresh one. A cursor pins
-/// the files and memtables of the moment it was opened, and a long compaction would keep files
-/// alive that other compactions have replaced. The value is a round number.
+/// Fewest keys a read-ahead cursor is shown before the filter drops it for age (see
+/// [`ReadAhead::aged`]). A cursor pins the files and memtables of the moment it was opened, so one
+/// kept for a whole long compaction would keep alive files that other compactions have replaced.
+/// The value is a round number.
 const READ_AHEAD_REFRESH_KEYS: usize = 4096;
 
 /// Default for [`RocksWritePipelineConfig::max_commit_batch_bytes`]. A larger wave commits
@@ -281,13 +285,14 @@ type Closer = Box<dyn std::any::Any + Send + Sync>;
 
 /// The open RocksDB handle plus everything that must outlive it.
 ///
-/// Every holder of the database (store clones, the writer threads, open range-scan cursors,
-/// in-flight blocking reads) shares one `Arc<Database>`, so the database closes exactly when
-/// the last holder drops, wherever that happens. A closer attached at open drops strictly
-/// after the database (fields drop in declaration order).
+/// Every holder of the store's database (store clones, the writer threads, open range-scan
+/// cursors, in-flight blocking reads) shares one `Arc<Database>`, and the database closes when the
+/// last of them drops, wherever that happens. A compaction filter holds only the inner handle, and
+/// only while its compaction runs. A closer attached at open drops strictly after the database
+/// (fields drop in declaration order).
 struct Database {
-    /// Shared only with the compaction filters, which hold it while they read ahead (see
-    /// [`ReadAhead`]). `Drop` ends them first, so this handle is the last one when it drops.
+    /// Shared only with the compaction filters while they read ahead (see [`ReadAhead`]).
+    /// `Drop` ends every compaction first, so this is the last handle when the field drops.
     db: Arc<DB>,
     /// Dropped only after `db`: any resource that must outlive the open database. For a
     /// store opened with [`RocksStore::open_owned`], this is the owner whose drop deletes
@@ -299,10 +304,10 @@ impl Drop for Database {
     fn drop(&mut self) {
         // Stopping background work ends every compaction, and a compaction destroys its
         // filter as it ends. A filter left holding `db` would otherwise close the database
-        // on a compaction thread, from inside the compaction the close then waits for. The
-        // stop also waits for this database's queued jobs to leave RocksDB's thread pools,
-        // which every store in the process shares, so a close can wait for another store's
-        // compaction.
+        // on a compaction thread, from inside the compaction the close then waits for.
+        // Every store in the process shares RocksDB's thread pools, and the stop also waits
+        // for this database's queued jobs to leave them, so a close can wait for another
+        // store's compaction.
         self.db.cancel_all_background_work(true);
     }
 }
@@ -545,7 +550,7 @@ enum PruneRule {
     DropAll,
 }
 
-/// One installed prune policy, compiled once when it is installed.
+/// One installed prune policy, compiled once when the store installs it or loads it at open.
 struct CompiledPolicy {
     prefix: Prefix,
     regex: Regex,
@@ -597,20 +602,22 @@ fn compile_policies(policies: &[PrunePolicy]) -> Result<Arc<[CompiledPolicy]>, S
 /// The installed prune policies, shared by the Prune call and the state family's filters.
 //
 // The two locks are separate so that a filter never waits for an install. An install holds
-// `install` across a synced write, the write can wait on a write stall, and a stall ends only
-// when compactions run, each of which builds a filter first.
+// `install` across a synced write, and that write can wait on a write stall that ends only
+// when state compactions run. Every state compaction builds a filter first.
 #[derive(Default)]
 struct PrunePolicies {
     /// Held by an install from its write of the meta row to its swap, so the row and `compiled`
     /// change in the same order.
     install: Mutex<()>,
-    /// The policies of the meta row as compiled. Each new filter takes the list as it is then.
+    /// The policies of the meta row, compiled. A new filter takes the list in force when it is
+    /// built.
     compiled: Mutex<Arc<[CompiledPolicy]>>,
-    /// Counts the changes of `compiled`. A filter compares it at every key, so a replaced
-    /// policy stops deciding at the next key and not at the next compaction.
+    /// Counts the changes of `compiled`. A running filter compares it at every key, so a
+    /// replaced policy stops deciding at the next key.
     generation: AtomicU64,
     /// The open database, for the filters that read ahead. `open` sets it once the database
-    /// exists, and until then a filter keeps every key of a `KeepLatest` policy.
+    /// exists, and until then a filter keeps every key of a `KeepLatest` policy. The handle is
+    /// weak because the database owns the filter factory and the factory holds this cell.
     db: OnceLock<Weak<DB>>,
     /// Held by a test to stop every filter that has taken the database and is about to open
     /// its read-ahead cursor.
@@ -643,9 +650,9 @@ impl PrunePolicies {
 
 /// Builds the state family's compaction filters.
 //
-// RocksDB calls `create` from any of its compaction threads, at times together, and the
-// binding hands each call a `&mut self` to this one object. So it holds a handle to shared
-// state and nothing of its own.
+// RocksDB can call `create` from several compaction threads at once, and the binding hands
+// each call a `&mut self` to this one object. So the factory holds only a handle to shared
+// state.
 struct PruneFilterFactory(Arc<PrunePolicies>);
 
 impl CompactionFilterFactory for PruneFilterFactory {
@@ -672,47 +679,55 @@ impl CompactionFilterFactory for PruneFilterFactory {
 /// oldest file can drop the tombstone, and it keeps the tombstone while an open snapshot still
 /// shows an older version of the key.
 //
-// It is never shown a flush or an ingestion, so a row leaves only when a compaction takes the
-// file that holds it. It never writes to the database and never takes the publication lock.
-// Its one read is the read-ahead cursor.
+// RocksDB does not run it on flushes or ingested files, so a row a policy removes leaves only
+// when a compaction takes the file that holds it. It never writes to the database or takes the
+// publication lock, and its only read is the read-ahead cursor.
 //
 // A removal does not advance the store's sequence, and a snapshot does not shield the version
 // of a row that a compaction removes. What a query sees depends on when its read starts,
 // because RocksDB fixes the files a read uses at that moment. A point read or a multi-key read
 // sees all the removals of a finished compaction or none of them. A range cursor keeps the
-// files it opened on for all its pages. A query that captured its snapshot before a compaction
-// finished and starts its read afterward misses a row when the version that compaction removed
-// is the one its snapshot showed. A query whose snapshot predates the removed version still
-// sees the version that snapshot showed, until a compaction removes that one too. The rows that
-// stand behind a `KeepLatest` removal can be newer than that snapshot, so such a query can find
-// fewer than `count` rows of a group.
+// files it opened on for all its pages.
+//
+// A query that captured its snapshot before a compaction finished and starts its read afterward
+// misses a row when the version that compaction removed is the one its snapshot showed. A query
+// whose snapshot predates the removed version still sees the version that snapshot showed,
+// until a compaction removes that one too. The `count` rows that let `KeepLatest` remove a
+// version can be newer than that snapshot, so such a query can find fewer than `count` rows of
+// a group.
 //
 // A request can replace a policy while compactions run. The replaced policy stops deciding at
 // the next key, and the removals it has already decided still land when their compaction
 // finishes. They take only rows written before the request is answered, so a group can hold
-// fewer rows than a `KeepLatest` policy from the request would keep. Until they land those rows
-// are live. A second state compaction that runs meanwhile, which takes options above RocksDB's
-// defaults, counts them among the rows that follow a key under the new `KeepLatest` policy. It
-// can then remove a row the new policy alone would keep, even one written after the request.
+// fewer rows than a `KeepLatest` policy from the request would keep.
+//
+// Those rows stay live until the removals land. A second state compaction can run meanwhile
+// only with options above RocksDB's defaults. It counts those rows among the rows that follow a
+// key under the new `KeepLatest` policy, so it can remove a row the new policy alone would
+// keep, even one written after the request.
 struct PruneFilter {
+    /// The store's policy cell, checked at every key for a new generation.
     shared: Arc<PrunePolicies>,
     /// The generation at which `policies` was taken.
     generation: u64,
+    /// The policies in force at `generation`.
     policies: Arc<[CompiledPolicy]>,
-    /// The cursor for `KeepLatest`, opened at the first key that needs it.
+    /// The read-ahead cursor for `KeepLatest`, opened when a key needs one and none is open.
     ahead: Option<ReadAhead>,
 }
 
 impl CompactionFilter for PruneFilter {
     fn filter(&mut self, _level: u32, key: &[u8], _value: &[u8]) -> CompactionDecision {
-        // A replaced policy stops deciding here, and the new one takes over.
+        // The generation moves each time the store publishes a policy list, at open and at every
+        // install. The filter then takes up the published list at this key and drops the cursor,
+        // because its window was matched against the list it held.
         if self.shared.generation.load(Ordering::Acquire) != self.generation {
             (self.generation, self.policies) = self.shared.current();
             self.ahead = None;
         }
 
-        // Every key the filter is shown ages its cursor, used or not, and an old cursor is
-        // dropped here. A key that needs one opens the next.
+        // Every key the filter is shown ages the cursor, whether or not the key uses it. An
+        // aged cursor is dropped here, and the next key that needs one opens a fresh one.
         if self.ahead.as_mut().is_some_and(ReadAhead::aged) {
             self.ahead = None;
             #[cfg(test)]
@@ -764,8 +779,9 @@ impl CompactionFilter for PruneFilter {
     }
 }
 
-/// A key that a read-ahead cursor has reached, with what its policy reads from it.
+/// A key the read-ahead cursor has read.
 struct Ahead {
+    /// The key, copied so it stays valid after the cursor moves on.
     key: Box<[u8]>,
     /// The key's group and order value, or `None` when the policy does not select the key.
     member: Option<(Vec<u8>, Vec<u8>)>,
@@ -775,20 +791,21 @@ struct Ahead {
 /// which keys follow the one the compaction is at. It reads the state as it was when the
 /// cursor opened.
 struct ReadAhead {
-    /// Declared before `_db`, which it borrows, so that it drops first.
+    /// Borrows `_db`, so it is declared first and drops first.
     cursor: DBRawIterator<'static>,
+    /// Keeps the database open while the cursor reads it.
     _db: Arc<DB>,
     /// The keys the cursor has read after the key last asked about, in key order. The cursor
     /// is on the last of them unless it ran off the end. It holds at most as many keys as the
     /// `count` of the policy that reads ahead, and never more than a run of one group's keys
     /// in rising order and one key past it.
     window: VecDeque<Ahead>,
-    /// How many keys at the front of `window` have been linked into a chain, members of one
-    /// group whose order values never decrease from one key to the next. Keys behind them can
-    /// continue the chain, and the next key that needs it links those.
+    /// How many keys at the front of `window` are linked into a chain. A chain is a run of one
+    /// group's members whose order values never decrease from one key to the next. The keys
+    /// after it are linked only when a key the compaction shows needs them.
     chain: usize,
-    /// Whether the cursor ran off the end of the state. Then no key follows a later key
-    /// either.
+    /// Whether the cursor ran off the end of the state. No key then follows a later key
+    /// either, so the cursor stops reading.
     exhausted: bool,
     /// Keys the filter has been shown since the cursor opened.
     age: usize,
@@ -822,8 +839,8 @@ impl ReadAhead {
 
     /// Counts one more key against the cursor and says whether it is due to be dropped.
     //
-    // A cursor pins the files and memtables of the moment it was opened. The limit grows with
-    // the window, so that reading a long window again costs less than the keys since.
+    // The limit is at least twice the window's length, so the reads a fresh cursor spends
+    // rebuilding the window are at most half the keys this one was shown.
     fn aged(&mut self) -> bool {
         self.age += 1;
         self.age >= READ_AHEAD_REFRESH_KEYS.max(2 * self.window.len())
@@ -849,14 +866,18 @@ impl ReadAhead {
     //
     // Each of those keys sorts after `key` by order value and then by key, so `count` members
     // of the group are newer than `key` whatever else the group holds. The latest `count`
-    // members never have `count` members after them, so no chain of removals reaches them.
+    // members never have `count` newer members, so under an unchanged document no chain of
+    // removals reaches them.
     //
-    // The cursor's view can be stale. A row in it can have left through this same rule, and
-    // then rows newer than that row stand behind it, and behind `key` too. It can also have
-    // left through a policy that this one replaced (see `PruneFilter`).
+    // The cursor's view can be stale. A row in it can have been removed by this same rule, and
+    // then the group still holds `count` rows newer than that row, so newer than `key` too. A
+    // row in it can also have been removed by a policy that this one replaced (see
+    // `PruneFilter`).
     //
-    // A group is pruned in full when its keys sort together, oldest first. Under another
-    // layout the chain breaks early, and the group can keep more than `count`.
+    // When a group's keys sort together, oldest first, this test removes a member a compaction
+    // shows exactly when `count` members of its group follow it in the cursor's view, so of the
+    // members in that view it keeps only the latest `count`. Under another layout the chain breaks
+    // early, and the group can keep more than `count`.
     fn followed_by(
         &mut self,
         policy: &CompiledPolicy,
@@ -865,16 +886,15 @@ impl ReadAhead {
         order: &[u8],
         count: usize,
     ) -> bool {
-        // Keys at or before `key` are behind the compaction now.
+        // The compaction has passed the window keys at or before `key`.
         while self.window.front().is_some_and(|ahead| &*ahead.key <= key) {
             self.window.pop_front();
             self.chain = self.chain.saturating_sub(1);
         }
 
-        // With nothing read ahead of `key`, the cursor is on `key` itself when the compaction
-        // walks adjacent keys, and has to seek otherwise. The seek lands on the first key
-        // after `key` when `key` is not live any more. A cursor that ran off the end has
-        // nothing after a later key either, so it does not seek again.
+        // With nothing read ahead of `key`, the cursor is still on `key` when the last read
+        // ahead stopped there, and has to seek otherwise. The seek lands on the first key after
+        // `key` when `key` is not live. An exhausted cursor does not seek again.
         if self.window.is_empty() && !self.exhausted && self.cursor.key() != Some(key) {
             self.cursor.seek(key);
             if self.cursor.key() != Some(key) {
@@ -882,9 +902,9 @@ impl ReadAhead {
             }
         }
 
-        // `key` is removed only if the first key after it follows it in its group. When that
-        // key does not, as behind the newest key of a group, `key` is kept after this one read
-        // and the cursor does not read into the next group.
+        // `key` can be removed only if the first key after it is a member of its group with an
+        // order value at or above its own. When it is not, as after a group's newest key, `key`
+        // is kept after this one read and the cursor reads no further into the next group.
         if self.window.is_empty() && !self.advance(policy) {
             return false;
         }
@@ -900,10 +920,10 @@ impl ReadAhead {
             return false;
         }
 
-        // The chain grows until it holds `count` keys, breaks, or the keys run out. Each key
-        // is read once and linked once, however many keys before it ask. So the cursor's work
-        // follows the live keys it passes and not the keys the compaction shows. A key shown
-        // past the window drops the window and pays a seek and up to `count` reads of its own.
+        // The chain grows until it holds `count` keys, breaks, or the keys run out. A cursor
+        // reads and links each key once, however many keys before it ask. So the cursor's work
+        // grows with the live keys it passes, not with the keys the compaction shows. A key
+        // shown past the window empties it and pays a seek and up to `count` reads of its own.
         loop {
             while self.chain < self.window.len() && self.links(self.chain, &policy.scope) {
                 self.chain += 1;
@@ -1814,7 +1834,7 @@ fn sequence_from_log_key(key: &[u8]) -> Result<u64, String> {
 }
 
 /// Reads the state-floor meta row, defaulting to zero when no log trim has written it yet. A
-/// malformed row is corruption and fails the open. Read as zero, it would let `open` derive a
+/// malformed row is corruption and fails the open. Reading it as zero would let `open` derive a
 /// frontier below sequences the store has already issued.
 fn read_state_floor(db: &DB) -> Result<u64, String> {
     let meta_cf = db
@@ -1857,8 +1877,8 @@ fn read_retention_policy(db: &DB) -> Result<Option<RetentionPolicy>, String> {
     }
 }
 
-/// Reads the stored prune policies. Absence of the row means none is installed. A row that
-/// fails to decode or validate is corruption and fails the open.
+/// Reads the stored prune policies, or none when the row is absent. A row that fails to decode
+/// or validate is corruption and fails the open.
 fn read_prune_policies(db: &DB) -> Result<Vec<PrunePolicy>, String> {
     let meta_cf = db
         .cf_handle(META_CF)
@@ -1916,7 +1936,7 @@ const fn retention_floor(policy: &RetentionPolicy, frontier: u64) -> u64 {
 /// frontier, so the state of every group at or below it is already applied. Ingestion is atomic,
 /// so no row is partial, and a re-applied row that fails to decode is corrupt and fails the open.
 ///
-/// Re-applying can bring back rows of the group that a compaction had pruned (see
+/// Re-applying can bring back rows of the group that a compaction had removed (see
 /// `PruneFilter`). A policy that is still installed removes them again when a compaction takes
 /// them, and a row that no installed policy removes stays.
 fn replay_newest_log_row(db: &DB, floor: u64) -> Result<u64, String> {
@@ -2066,7 +2086,7 @@ pub struct RocksStore {
     /// across reopens). The ingest path reads it on every commit to trim continuously, so a
     /// cheap cache keeps a rule-less store off the disk on that hot path.
     retention: Arc<Mutex<Option<RetentionPolicy>>>,
-    /// The installed prune policies, which the state family's compaction filters apply.
+    /// The prune policies that the state family's compaction filters apply.
     prune: Arc<PrunePolicies>,
 }
 
@@ -2118,10 +2138,10 @@ impl RocksStore {
         let mut env = rocksdb::Env::new().map_err(|e| e.to_string())?;
         env.set_bottom_priority_background_threads(BOTTOM_POOL_THREADS);
 
-        // The filter factory has to be in the options before the database opens, and the
-        // policies are stored inside the database. So the factory gets an empty cell now, and
-        // the stored policies go into it below. Until then a filter has no policy and keeps
-        // every key.
+        // The filter factory has to be in the options before the database opens, but the
+        // policies are stored inside the database. So the factory starts with an empty cell,
+        // and the stored policies go into it once they are read below. Until then a filter has
+        // no policy and keeps every key.
         let prune = Arc::new(PrunePolicies::default());
         let mut state_options = state_cf_options();
         state_options.set_compaction_filter_factory(PruneFilterFactory(prune.clone()));
@@ -2137,7 +2157,7 @@ impl RocksStore {
         prune
             .db
             .set(Arc::downgrade(&db.db))
-            .expect("the cell is new");
+            .expect("a new policy cell must not hold a database yet");
 
         let ingest_dir = prepare_ingest_dir(path)?;
 
@@ -2260,9 +2280,9 @@ impl RocksStore {
         Ok(())
     }
 
-    /// Installs a request's policies in place of the stored ones. It persists the document and
-    /// puts it in force. The rows a policy removes leave when a compaction takes the files that
-    /// hold them.
+    /// Replaces the installed policies with those of `document`. Once this returns `Ok`, the
+    /// document is durable and in force. The rows a policy removes leave when a compaction takes
+    /// the files that hold them.
     //
     // A prune document covers keys only. Sequence-log retention is set through
     // `log.retention.v1.SetRetention` (see the `Retention` impl).
@@ -2278,7 +2298,8 @@ impl RocksStore {
         Ok(())
     }
 
-    /// Writes the prune policy row with one synced put, so it is durable once this returns.
+    /// Writes the prune policy row with one synced put, so the row is durable once this returns
+    /// `Ok`.
     //
     // A single put reports a value that RocksDB refuses to store. A put into a write batch
     // does not report that through the binding.
@@ -2368,10 +2389,10 @@ impl RocksStore {
         self.enforce_retention()
     }
 
-    /// Asks RocksDB to compact the whole state column family, memtable included, and returns
-    /// when RocksDB is done. A compaction that succeeds applies the installed prune policies
-    /// to every value it shows the filter. This call does not report a failed compaction. This
-    /// is a test tool, and the store never calls it.
+    /// Compacts the whole state column family, memtable included, and returns when RocksDB is
+    /// done. A compaction that succeeds applies the installed prune policies to every key that was
+    /// live when this call began, and a failed one goes unreported. It lets a test prune at a
+    /// known point.
     #[doc(hidden)]
     pub fn compact_state(&self) {
         self.db.compact_range(None::<&[u8]>, None::<&[u8]>);
@@ -2572,8 +2593,8 @@ impl Query for RocksStore {
     }
 }
 
-// Installing policies issues a synced write, so it runs on the blocking pool instead of
-// occupying a Tokio worker.
+// Installing policies issues a synced write, so it runs on the blocking pool instead of occupying
+// a Tokio worker.
 impl Prune for RocksStore {
     async fn apply_prune_policies(&self, document: PrunePolicyDocument) -> Result<(), String> {
         let store = self.clone();
@@ -3915,8 +3936,8 @@ mod tests {
         );
     }
 
-    /// A policy over keys of the form group, two zero bytes, big-endian version, under
-    /// `prefix`.
+    /// A policy under `prefix` over keys laid out as a group, two zero bytes and a big-endian
+    /// version. It groups keys by the group and orders them by the version.
     fn versioned_policy(prefix: &[u8], retain: RetainPolicy) -> PrunePolicy {
         PrunePolicy {
             scope: KeysScope {
@@ -4020,8 +4041,8 @@ mod tests {
         );
         assert_eq!(stored_prefixes(&store), [[1], [2]]);
 
-        // The second request names another prefix. The policies of the first are gone from the
-        // row, and a filter no longer applies them.
+        // The second request names another prefix. Its document replaces the first request's in
+        // the row, and a filter built afterward applies only its policy.
         install(&store, vec![versioned_policy(&[3], RetainPolicy::DropAll)]);
         assert_eq!(stored_prefixes(&store), [[3]]);
         let mut filter = filter_over(&store.prune);
@@ -4059,7 +4080,7 @@ mod tests {
         let store = RocksStore::open(dir.path(), Some(config)).expect("open db");
         let synced = || statistics.get_ticker_count(rocksdb::statistics::Ticker::WalFileSynced);
 
-        // The meta row is the only write of an install.
+        // An install writes only the meta row, so a rise in the counter comes from that row.
         let before = synced();
         install(&store, vec![versioned_policy(&[1], RetainPolicy::DropAll)]);
         assert!(
@@ -4074,9 +4095,9 @@ mod tests {
         let store = RocksStore::open(dir.path(), None).expect("open db");
         install(&store, vec![versioned_policy(&[1], RetainPolicy::DropAll)]);
 
-        // The test holds the compiled list, so a second install writes its row and then waits
-        // at the swap. It still holds the install lock there, which keeps a third install from
-        // writing its row and swapping ahead of it.
+        // The test holds the lock on the compiled list, so a second install writes its row and
+        // then waits at the swap. It holds the install lock while it waits, so no third install
+        // can write its row and swap ahead of it.
         let compiled = store.prune.compiled.lock();
         thread::scope(|scope| {
             let second = scope
@@ -4087,7 +4108,7 @@ mod tests {
             );
             assert!(store.prune.install.is_locked());
             drop(compiled);
-            second.join().expect("install");
+            second.join().expect("the second install must not panic");
         });
         assert_eq!(stored_prefixes(&store), [[2]]);
         let mut filter = filter_over(&store.prune);
@@ -4113,7 +4134,7 @@ mod tests {
         *store.prune.write_gate.lock() = true;
         let error = store
             .install_prune_policies(document(&[2]))
-            .expect_err("a failed write");
+            .expect_err("an install whose write fails must return an error");
         assert_eq!(error, "the write of the prune policy row failed");
         assert_eq!(stored_prefixes(&store), [[1]]);
         let (generation_after, compiled_after) = store.prune.current();
@@ -4141,7 +4162,7 @@ mod tests {
         let refused = vec![0u8; u32::MAX as usize + 1];
         let error = store
             .write_prune_row(refused)
-            .expect_err("a value RocksDB refuses");
+            .expect_err("RocksDB must refuse the value");
         assert!(error.contains("value is too large"), "{error}");
         assert_eq!(stored_prefixes(&store), [[1]]);
     }
@@ -4175,7 +4196,7 @@ mod tests {
                 let mut filter = filter_over(prune);
                 sender
                     .send(removed(&mut filter, keys))
-                    .expect("the test waits for the keys");
+                    .expect("the test must still wait for the decisions");
             });
             let gone = decided
                 .recv_timeout(std::time::Duration::from_secs(30))
@@ -4183,7 +4204,7 @@ mod tests {
             assert_eq!(gone, [keys[0].clone()]);
             assert_eq!(stored_prefixes(&store), [[1]]);
             drop(gate);
-            second.join().expect("install");
+            second.join().expect("the second install must not panic");
         });
 
         // The install has finished, and a filter decides under its list.
@@ -4203,7 +4224,8 @@ mod tests {
         let mut drop_all = filter(versioned_policy(&[1], RetainPolicy::DropAll));
         assert!(removes(&mut drop_all, &key(1)));
 
-        // Outside the prefix, and under it with a payload the regex rejects.
+        // A key outside the prefix stays, and so does a key under it whose payload the regex
+        // rejects.
         assert!(!removes(&mut drop_all, &versioned_key(&[2], b"row", 1)));
         assert!(!removes(&mut drop_all, &[1, b'r', 0, 0, 9]));
 
@@ -4303,6 +4325,8 @@ mod tests {
     fn keep_latest_accepts_a_count_above_any_group() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
+
+        // The store accepts a count of `usize::MAX` and stores it as sent.
         let policy = versioned_policy(&[1], RetainPolicy::KeepLatest { count: usize::MAX });
         install(&store, vec![policy.clone()]);
         assert_eq!(read_prune_policies(&store.db).expect("read row"), [policy]);
@@ -4364,8 +4388,9 @@ mod tests {
             assert_eq!(removed(&mut filter, &keys), expected, "keep latest {count}");
         }
 
-        // A compaction of some files shows the filter some of the keys, and one of them can be
-        // a version that is no longer live. The cursor reads the others from the live state.
+        // A compaction of some files shows the filter only the keys in them, and one of those
+        // can be a version that is not live. The cursor reads the keys that follow from the
+        // live state.
         install(
             &store,
             vec![versioned_policy(
@@ -4419,8 +4444,8 @@ mod tests {
             ],
         );
 
-        // The last key of the first policy reads ahead into the keys of the second. What it
-        // read there says nothing about them under the second policy.
+        // The last key of the first policy reads ahead into the keys of the second. The filter
+        // still decides those keys under the second policy's own rule.
         let keys = [
             versioned_key(&[1], b"z", 1),
             versioned_key(&[2], b"a", 1),
@@ -4439,8 +4464,8 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
 
-        // The version comes first in the key, so the versions of one group are apart. The
-        // next key is always of another group, and nothing is removed.
+        // The version comes first in the key, so the versions of one group are apart. Each key
+        // is followed by a key of another group or by none, so nothing is removed.
         let mut policy = versioned_policy(&[1], RetainPolicy::KeepLatest { count: 1 });
         policy.scope.selector.payload_regex =
             Utf8::from("(?s-u)^(?P<version>.{8})(?P<group>[a-z])$");
@@ -4473,8 +4498,8 @@ mod tests {
             store.db.put(key, b"row").expect("put");
         }
 
-        // Version 5 has the newer 9 behind it. Version 9 has only the older 1 behind it, which
-        // does not count against it.
+        // Version 5 has the newer 9 behind it. Version 9 has only the older 1 behind it, and an
+        // older version does not count against it.
         install(&store, vec![policy(1)]);
         let mut filter = filter_over(&store.prune);
         assert_eq!(removed(&mut filter, &keys), [key(b'x', 5)]);
@@ -4486,8 +4511,9 @@ mod tests {
         assert!(removed(&mut filter, &keys).is_empty());
     }
 
-    /// The cursor steps and seeks of `walk` on this thread, from RocksDB's own counters. The
-    /// rows of these tests sit in the memtable, where each cursor step is one memtable step.
+    /// Runs `walk` and returns the cursor steps and seeks it made on this thread, from
+    /// RocksDB's own counters. The rows of these tests sit in the memtable, where each cursor
+    /// step is one memtable step.
     fn cursor_work(walk: impl FnOnce()) -> (u64, u64) {
         rocksdb::perf::set_perf_stats(rocksdb::perf::PerfStatsLevel::EnableCount);
         let mut perf = rocksdb::perf::PerfContext::default();
@@ -4526,7 +4552,7 @@ mod tests {
         // cursor for a fresh one.
         let mut filter = filter_over(&store.prune);
         assert_eq!(removed(&mut filter, &keys), keys[..keys.len() - 1]);
-        assert!(filter.ahead.as_ref().expect("cursor").age < READ_AHEAD_REFRESH_KEYS);
+        assert!(filter.ahead.as_ref().expect("cursor must be open").age < READ_AHEAD_REFRESH_KEYS);
     }
 
     #[test]
@@ -4534,8 +4560,8 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
 
-        // The window is twice as long as the interval at which a short one is dropped, and the
-        // group is longer still.
+        // The window fills to `count`, twice the age at which the filter drops a cursor with a
+        // short window. The group is longer still.
         let count = 2 * READ_AHEAD_REFRESH_KEYS;
         let versions = 5 * READ_AHEAD_REFRESH_KEYS;
         install(
@@ -4631,7 +4657,15 @@ mod tests {
             cursor_work(|| gone = removes(&mut filter, &versioned_key(&[1], b"a", 1)));
         assert!(!gone);
         assert_eq!((steps, seeks), (3, 1));
-        assert_eq!(filter.ahead.as_ref().expect("cursor").window.len(), 3);
+        assert_eq!(
+            filter
+                .ahead
+                .as_ref()
+                .expect("cursor must be open")
+                .window
+                .len(),
+            3
+        );
     }
 
     #[test]
@@ -4647,8 +4681,8 @@ mod tests {
         );
         store.db.put([0], b"row").expect("put");
 
-        // A compaction can show the filter versions that are no longer live. Nothing follows
-        // the first of these, so nothing follows the later ones either.
+        // A compaction can show the filter versions that are not live. No live key follows the
+        // first of these, so none follows the later ones either, and the cursor seeks once.
         let keys: Vec<Vec<u8>> = (1..=64)
             .map(|version| versioned_key(&[1], b"row", version))
             .collect();
@@ -4673,7 +4707,8 @@ mod tests {
         let inside = versioned_key(&[1], b"row", 1);
         store.db.put(&inside, b"row").expect("put");
 
-        // The compaction leaves the policy's prefix and no key needs the cursor any more.
+        // Past the policy's prefix no key needs the cursor, and the filter drops it once it
+        // has aged.
         let mut filter = filter_over(&store.prune);
         assert!(!removes(&mut filter, &inside));
         assert!(filter.ahead.is_some());
@@ -4728,8 +4763,8 @@ mod tests {
         let mut filter = filter_over(&store.prune);
         assert!(removes(&mut filter, &keys[0]));
 
-        // The new policy keeps one version and does not select version 3. Version 2 is now the
-        // newest row it selects, and what the cursor read under the old policy does not count
+        // The new policy keeps one version and does not select version 3, so version 2 is the
+        // newest row it selects. What the cursor read under the old policy does not count
         // against it.
         let mut policy = versioned_policy(&[1], RetainPolicy::KeepLatest { count: 1 });
         policy.scope.selector.payload_regex =
@@ -4754,7 +4789,8 @@ mod tests {
 
         // The gate stops the filter after it has taken the database and before its cursor
         // opens. Meanwhile a request replaces the policy with one that keeps every row, and a
-        // newer version is written. The cursor then sees that version.
+        // newer version is written. The cursor then sees that version, and the filter keeps
+        // the key because its policy was replaced.
         let gate = store.prune.read_ahead_gate.lock();
         let mut filter = filter_over(&store.prune);
         let db = Arc::downgrade(&store.db.db);
@@ -4773,7 +4809,7 @@ mod tests {
                 .put(versioned_key(&[1], b"row", 2), b"row")
                 .expect("put");
             drop(gate);
-            shown.join().expect("filter")
+            shown.join().expect("the filter thread must not panic")
         });
         assert!(!removed);
     }
@@ -4792,7 +4828,8 @@ mod tests {
         files
     }
 
-    /// One version of each of `groups` under [`versioned_policy`], with values of `value_len`.
+    /// Rows holding `version` of each group in `groups`, keyed for [`versioned_policy`] under
+    /// the prefix `[1]`, with values of `value_len` bytes.
     fn version_rows(
         groups: std::ops::Range<u64>,
         version: u64,
@@ -4814,7 +4851,7 @@ mod tests {
 
     #[tokio::test]
     async fn keep_latest_counts_newer_keys_in_a_file_the_compaction_skips() {
-        // Fifteen files above the oldest one make sixteen sorted runs, which is where the state
+        // Fifteen files above the oldest one make sixteen sorted runs. At sixteen the state
         // family starts a compaction by itself.
         const OLD_VERSIONS: u64 = 15;
         const NEWEST: u64 = 100;
@@ -4852,8 +4889,9 @@ mod tests {
         assert_eq!(files.len(), 2, "{files:?}");
         assert!(files.contains(&oldest_file[0]), "{files:?}");
 
-        // The newest version stands behind every older one, in the file that was not
-        // compacted, and the filter removed them all on its strength.
+        // The newest version of each group sorts after every older one and sits in the file
+        // the compaction skipped. The cursor reads it from the live state, so the filter
+        // removed every older version.
         for (key, _) in (1..=OLD_VERSIONS).flat_map(|version| version_rows(1..6, version, 8)) {
             assert_eq!(store.get_raw(&key).expect("get"), None);
         }
@@ -4948,7 +4986,8 @@ mod tests {
                     .wait_for_compact(&rocksdb::WaitForCompactOptions::default())
                     .expect("wait for compaction");
 
-                // The two compactions pruned, and the latest of every group are still there.
+                // The compactions removed rows, and the latest `COUNT` versions of every group are
+                // still there.
                 let live = |group: usize, version: &u64| {
                     store.get_raw(&key(group, *version)).expect("get").is_some()
                 };
@@ -4961,7 +5000,7 @@ mod tests {
                     for version in versions.iter().rev().take(COUNT) {
                         assert!(
                             live(group, version),
-                            "seed {seed}: group {group} lost version {version} of {versions:?}"
+                            "seed {seed}: group {group} must keep {version} of {versions:?}"
                         );
                     }
                 }
@@ -4969,7 +5008,8 @@ mod tests {
                 pruned = gone;
             }
 
-            // A compaction of every file leaves exactly the latest of each group.
+            // A compaction of every file leaves exactly the latest `COUNT` versions of each
+            // group.
             store.compact_state();
             for (group, versions) in written.iter().enumerate() {
                 let live: Vec<u64> = versions
@@ -5012,9 +5052,9 @@ mod tests {
             sequence += 1;
         };
 
-        // The first file holds versions 3 to 7 of group a. Behind them it holds as many keys
-        // that the policy does not select as it takes for a filter to drop its cursor for age.
-        // The file spans every key, so each later file overlaps it.
+        // The first file holds versions 3 to 7 of group a. Behind them it holds
+        // `READ_AHEAD_REFRESH_KEYS` keys that the policy does not select, enough for a filter to
+        // drop its cursor for age. The file spans every key, so each later file overlaps it.
         let mut rows = vec![
             (Bytes::from_static(&[0]), row.clone()),
             (Bytes::from_static(&[255]), row.clone()),
@@ -5041,8 +5081,9 @@ mod tests {
             "the first compaction must reach the read-ahead gate",
         );
 
-        // Let through, it decides that versions 3, 4 and 5 go, each with two newer versions
-        // behind it. Then it drops its cursor for age and stops, with nothing installed.
+        // Once the gate opens, the filter decides that versions 3, 4 and 5 go, each with two
+        // newer versions behind it. It then drops its cursor for age and stops at the aged
+        // gate, before its compaction finishes.
         drop(read_gate);
         wait_until(
             || db.strong_count() == 1,
@@ -5051,8 +5092,9 @@ mod tests {
         assert_eq!(live(), [3, 4, 5, 6, 7]);
 
         // Versions 1 and 2 arrive late, and sixteen more files start a second compaction
-        // beside the first. It counts versions 3 and 4, which the first is removing, as the
-        // rows behind versions 1 and 2. It removes those two and installs first.
+        // beside the first. The second counts versions 3 and 4 as the rows behind versions 1
+        // and 2, though the first is removing them. It removes versions 1 and 2 and finishes
+        // first.
         commit(vec![
             rewrite.clone(),
             (key(1), row.clone()),
@@ -5067,7 +5109,7 @@ mod tests {
             "the second compaction must remove versions 1 and 2",
         );
 
-        // The first compaction installs, and the group holds its latest two rows.
+        // The first compaction finishes, and the group holds only its latest two rows.
         drop(aged_gate);
         store
             .db
@@ -5104,7 +5146,9 @@ mod tests {
         let (closed_sender, closed) = mpsc::channel();
         let closer = thread::spawn(move || {
             drop(store);
-            closed_sender.send(()).expect("closed");
+            closed_sender
+                .send(())
+                .expect("the test must still wait for the close");
         });
         wait_until(
             || database.strong_count() == 0,
@@ -5114,10 +5158,10 @@ mod tests {
         closed
             .recv_timeout(std::time::Duration::from_secs(30))
             .expect("the store must close while a filter reads ahead");
-        closer.join().expect("closer");
+        closer.join().expect("the closing thread must not panic");
         assert_eq!(db.strong_count(), 0);
 
-        // The database closed whole. It reopens, and the newest version of every group is
+        // The close finished, so the store reopens, and the newest version of every group is
         // there.
         let store = RocksStore::open(dir.path(), None).expect("reopen db");
         for (key, value) in version_rows(0..32, 16, 4096) {

@@ -154,22 +154,21 @@ let policy = schema.keep_latest_versions_policy("documents", 1)?;
 ```
 
 This policy requires an unindexed table whose primary key is exactly
-`(entity, UInt64 version)`. The policy stands once the Store accepts it. The Store
-also applies it to versions written later, and it removes rows in the
-background, so an old version can stay readable for a while after the call
-returns. The policy stays in force until the next Prune request the Store
-accepts, which replaces every installed policy, so send the policies of all
-tables in one request.
+`(entity, UInt64 version)`. It stays in force from the moment the Store accepts
+it until the next Prune request the Store accepts, and it also covers versions
+written later. That next request replaces every installed policy, so send the
+policies of all tables in one request. Old versions can stay readable for a
+while after the Store accepts the policy.
 
-Store pruning removes base rows but leaves their index entries, so this policy
-is for a table that stays unindexed. To end it, send a request that leaves it
-out. A request needs at least one policy, so when nothing else is installed send
-one that keeps every version, for example the policy above with `retain` set to
-`RetainPolicy::GreaterThanOrEqual { threshold: 0 }`. Versions the policy had
-already selected can still disappear for a while after that call returns, so an
-index added right away can hold entries for versions that are gone. The schema
-cannot check policies built directly with the SDK or schema changes made after
-the policy was applied.
+Store pruning removes base rows but leaves their index entries, so end the
+policy before adding an index to the table. Versions it had already selected can
+still disappear for a while after it ends, so an index added right away can hold
+entries for versions that are gone. To end the policy, send a request that
+leaves it out. A request needs at least one policy, so if no other policy should
+stay installed, send the policy above with `retain` set to
+`RetainPolicy::GreaterThanOrEqual { threshold: 0 }` to keep every version. The
+schema cannot check policies built directly with the SDK or schema changes made
+after the policy was applied.
 
 ### Secondary indexes
 

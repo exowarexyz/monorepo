@@ -80,8 +80,8 @@ pub async fn open_temp(
     Ok((handle, url))
 }
 
-/// Like [`open_temp`], and also returns the store behind the server, for tests that need what
-/// the API does not expose.
+/// Like [`open_temp`], and also returns the server's store, so a test can reach what the API
+/// does not expose.
 pub async fn open_temp_with_store() -> Result<
     (tokio::task::JoinHandle<()>, String, RocksStore),
     Box<dyn std::error::Error + Send + Sync>,
