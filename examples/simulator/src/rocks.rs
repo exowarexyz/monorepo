@@ -199,6 +199,12 @@ const LOG_MERGE_SMALL_BYTES: u64 = 64 * 1024 * 1024;
 /// a round number.
 const LOG_MERGE_PASS_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
+/// Most files one merge selects. RocksDB chooses the files of a manual compaction within one
+/// level while it holds the database mutex, and the time that takes grows with the square of
+/// their number. Every commit and every snapshot needs that mutex. The value is four times the
+/// default merge trigger, a round number.
+const LOG_MERGE_PASS_FILES: usize = 4096;
+
 /// Size at which compaction cuts the state files it writes below level zero. Large files keep
 /// down the file count that every state ingestion pays for. The value is four times RocksDB's
 /// default target file size.
@@ -914,8 +920,9 @@ fn bottom_log_files(db: &DB) -> Result<Vec<LogFile>, String> {
 ///   ##### a file of `LOG_MERGE_SMALL_BYTES` or more     | | a smaller one
 /// ```
 ///
-/// A run needs two files, and the newest run needs `trigger` of them when that is more. One pass
-/// selects at most `LOG_MERGE_PASS_BYTES` of files.
+/// A run needs two files. The newest run needs `trigger` of them when that is more, or
+/// `LOG_MERGE_PASS_FILES` when `trigger` is above that. One pass selects at most
+/// `LOG_MERGE_PASS_FILES` files holding at most `LOG_MERGE_PASS_BYTES`.
 fn plan_log_merge(files: &[LogFile], trigger: usize) -> Option<Range<usize>> {
     let small = |file: &LogFile| file.size < LOG_MERGE_SMALL_BYTES;
     let mut start = 0;
@@ -928,23 +935,25 @@ fn plan_log_merge(files: &[LogFile], trigger: usize) -> Option<Range<usize>> {
 
         // The newest run is still growing, so it waits for `trigger` files. Its first file is
         // usually the small last output of the previous merge, and waiting spreads the cost of
-        // rewriting that file over many new ones. A run with a large file after it cannot grow,
-        // so waiting would gain nothing and two files are enough.
+        // rewriting that file over many new ones. It stops waiting once it fills a pass, since a
+        // pass takes the same files however long the run grows. A run with a large file after it
+        // cannot grow, so waiting would gain nothing and two files are enough.
         let needed = if start + run == files.len() {
-            trigger.max(2)
+            trigger.clamp(2, LOG_MERGE_PASS_FILES)
         } else {
             2
         };
         if run >= needed {
-            // One merge takes the first two files, then more while the total stays within
-            // `LOG_MERGE_PASS_BYTES`. A later call picks up the rest of the run.
+            // One merge takes the first two files, then more until it holds
+            // `LOG_MERGE_PASS_FILES` files or the next file would pass `LOG_MERGE_PASS_BYTES`.
+            // A later call picks up the rest of the run.
             let mut bytes = 0;
             let taken = files[start..start + run]
                 .iter()
                 .enumerate()
                 .take_while(|(index, file)| {
                     bytes += file.size;
-                    *index < 2 || bytes <= LOG_MERGE_PASS_BYTES
+                    *index < 2 || (*index < LOG_MERGE_PASS_FILES && bytes <= LOG_MERGE_PASS_BYTES)
                 })
                 .count();
             return Some(start..start + taken);
@@ -1503,7 +1512,9 @@ pub struct RocksWritePipelineConfig {
     pub max_queued_waves: NonZeroUsize,
     /// Commit groups between wake-ups of the log merge. The merge compacts the newest run of log
     /// files once it holds this many, so a smaller value leaves fewer files for every commit to
-    /// pay for, and rewrites the previous merge's last, partly filled file more often.
+    /// pay for, and rewrites the previous merge's last, partly filled file more often. A value
+    /// above `LOG_MERGE_PASS_FILES` only leaves more files, since one merge takes at most that
+    /// many.
     pub log_merge_files: NonZeroUsize,
 }
 
@@ -3747,6 +3758,53 @@ mod tests {
         assert!(bytes <= LOG_MERGE_PASS_BYTES && bytes + LARGE > LOG_MERGE_PASS_BYTES);
         assert_eq!(plan_log_merge(&files[..2], 1), Some(0..2));
         assert_eq!(plan_log_merge(&files[..1], 1), None);
+    }
+
+    #[test]
+    fn log_merge_plan_takes_a_backlog_in_bounded_passes() {
+        // A backlog of small one-row files, four passes long and far below the byte budget of
+        // one pass.
+        let mut files: Vec<LogFile> = (1..=4 * LOG_MERGE_PASS_FILES as u64)
+            .map(|sequence| log_file(sequence, sequence, 1250))
+            .collect();
+        assert_eq!(
+            plan_log_merge(&files, DEFAULT_LOG_MERGE_FILES),
+            Some(0..LOG_MERGE_PASS_FILES)
+        );
+
+        // Drain the backlog the way the merge worker does. Each pass leaves one small output in
+        // place of its inputs, and the next plan starts from that output.
+        while let Some(run) = plan_log_merge(&files, DEFAULT_LOG_MERGE_FILES) {
+            assert!(
+                run.len() <= LOG_MERGE_PASS_FILES,
+                "one pass must select at most {LOG_MERGE_PASS_FILES} files, selected {}",
+                run.len()
+            );
+            let output = LogFile {
+                start: files[run.start].start.clone(),
+                end: files[run.end - 1].end.clone(),
+                size: files[run.clone()].iter().map(|file| file.size).sum(),
+            };
+            files.splice(run, [output]);
+        }
+        assert!(
+            files.len() < DEFAULT_LOG_MERGE_FILES,
+            "the passes must drain the backlog below the trigger, left {} files",
+            files.len()
+        );
+
+        // Under a trigger above the pass limit, the newest run merges once it fills a pass.
+        let files: Vec<LogFile> = (1..=LOG_MERGE_PASS_FILES as u64)
+            .map(|sequence| log_file(sequence, sequence, 1250))
+            .collect();
+        assert_eq!(
+            plan_log_merge(&files, 2 * LOG_MERGE_PASS_FILES),
+            Some(0..LOG_MERGE_PASS_FILES)
+        );
+        assert_eq!(
+            plan_log_merge(&files[..LOG_MERGE_PASS_FILES - 1], 2 * LOG_MERGE_PASS_FILES),
+            None
+        );
     }
 
     #[tokio::test]
