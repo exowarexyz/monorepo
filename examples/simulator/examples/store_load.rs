@@ -8,8 +8,8 @@
 //! `LOAD_MODE` picks the workload:
 //!
 //! - `small` (the default) issues one Put at a time, shaped like a chain indexer following empty
-//!   blocks. Each block is three Puts: twelve SQL and QMDB rows, a certificate, and a tiny
-//!   publication barrier.
+//!   blocks. Each block is three Puts: twelve SQL and QMDB rows, a certificate, and a publication
+//!   barrier.
 //! - `mixed` makes the first Put of each block `LOAD_BLOCK_ROWS` rows of 90 bytes (default
 //!   14,000, or 1.26 MB) and issues blocks from `LOAD_WRITERS` tasks at once (default 4).
 //! - `verify` issues no Puts. It opens a store that a `small` run filled, checks that every
@@ -47,9 +47,13 @@ use tokio::sync::mpsc;
 
 // Key namespaces of the chain indexer's rows.
 const NS_QMDB: u8 = 0x00;
+const NS_TRANSACTIONS: u8 = 0x01;
 const NS_SIMPLEX: u8 = 0x02;
 const NS_SQL: u8 = 0x03;
 const NS_TARGET: u8 = 0x04;
+
+/// Row family of a QMDB watermark, the byte after the namespace.
+const QMDB_WATERMARK: u8 = 0x03;
 
 /// Reads setting `name` from the environment, or `default` when it is unset.
 fn setting<T: std::str::FromStr>(name: &str, default: T) -> T {
@@ -122,12 +126,17 @@ fn certificate(height: u64) -> Vec<(Bytes, Bytes)> {
     vec![(ordered_key(NS_SIMPLEX, height, 0), value(!height, 400))]
 }
 
-/// A block's publication barrier, one row holding the block height.
+/// A block's publication barrier, shaped like the chain indexer's publication request for one
+/// block. It holds the watermarks of the account-state and transaction QMDBs, with the block
+/// height standing in for both operation locations, and the block's target, a 32-byte digest
+/// keyed by the height.
 fn barrier(height: u64) -> Vec<(Bytes, Bytes)> {
-    vec![(
-        ordered_key(NS_TARGET, height, 0),
-        Bytes::copy_from_slice(&height.to_be_bytes()),
-    )]
+    let key = |prefix: &[u8]| Bytes::from([prefix, &height.to_be_bytes()].concat());
+    vec![
+        (key(&[NS_QMDB, QMDB_WATERMARK]), Bytes::new()),
+        (key(&[NS_TRANSACTIONS, QMDB_WATERMARK]), Bytes::new()),
+        (key(&[NS_TARGET]), value(height, 32)),
+    ]
 }
 
 /// SST files and total bytes of the files in the store directory. The staging subdirectory is
