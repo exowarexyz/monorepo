@@ -3,21 +3,19 @@ pub use crate::service::server::encode::{
 };
 use crate::{adapter::codec::op_count_for_watermark, QmdbError};
 use bytes::Bytes;
-use commonware_codec::Codec;
+use commonware_codec::{Codec, Encode};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::{Sequential, Strategy};
 use commonware_storage::{
     merkle::{self, Family, Graftable, Location, Position, Proof, RangePlan},
     qmdb::{
-        any::{
-            ordered,
-            value::{ValueEncoding, VariableEncoding},
-        },
+        any::ordered,
         current::{
             ordered::proof::constant::ExclusionProof,
             proof::{constant::OperationProof, OpsRootWitness, RangeProof},
         },
         operation::{Key as QmdbKey, Operation},
+        value::{ValueEncoding, VariableEncoding},
     },
 };
 use std::collections::HashMap;
@@ -56,10 +54,10 @@ impl<D: Digest, F: Graftable> OperationRangeCheckpoint<D, F> {
 
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
         let hasher = commonware_storage::qmdb::hasher::<H>();
-        self.proof.verify_proof_and_pinned_nodes(
+        self.proof.verify_range_inclusion_with_pinned_nodes(
             &hasher,
-            &self.encoded_operations,
             self.start_location,
+            &self.encoded_operations,
             &self.pinned_nodes,
             &self.ops_root,
         )
@@ -152,13 +150,8 @@ pub struct RawBatchMultiProof<D: Digest, F: Graftable> {
 impl<D: Digest, F: Graftable> RawBatchMultiProof<D, F> {
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
         let hasher = commonware_storage::qmdb::hasher::<H>();
-        let elements: Vec<_> = self
-            .operations
-            .iter()
-            .map(|(loc, bytes)| (bytes.as_ref(), *loc))
-            .collect();
         self.proof
-            .verify_multi_inclusion(&hasher, &elements, &self.ops_root)
+            .verify_multi_inclusion(&hasher, &self.operations, &self.ops_root)
     }
 }
 
@@ -307,7 +300,7 @@ pub struct RawKeyValueProof<D: Digest, Op, const N: usize, F: Graftable> {
 
 impl<D: Digest, Op, const N: usize, F: Graftable> RawKeyValueProof<D, Op, N, F>
 where
-    Op: Codec + Clone + Operation<F>,
+    Op: Encode + Clone + Operation<F>,
 {
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
         self.operation.is_update()
@@ -322,8 +315,8 @@ where
 #[must_use]
 pub struct RawKeyExclusionProof<
     D: Digest,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V,
     const N: usize,
     F: Graftable,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
@@ -334,16 +327,10 @@ pub struct RawKeyExclusionProof<
     pub proof: ExclusionProof<F, K, E, D, N>,
 }
 
-impl<
-        D: Digest,
-        K: QmdbKey + Codec,
-        V: Codec + Clone + Send + Sync,
-        const N: usize,
-        F: Graftable,
-        E: ValueEncoding<Value = V>,
-    > RawKeyExclusionProof<D, K, V, N, F, E>
+impl<D: Digest, K: QmdbKey, V, const N: usize, F: Graftable, E: ValueEncoding<Value = V>>
+    RawKeyExclusionProof<D, K, V, N, F, E>
 where
-    ordered::Operation<F, K, E>: Codec + Clone,
+    ordered::Operation<F, K, E>: Codec,
 {
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
         self.proof.verify::<H>(&self.requested_key, &self.root)
@@ -354,8 +341,8 @@ where
 #[must_use]
 pub enum RawKeyLookupProof<
     D: Digest,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V,
     const N: usize,
     F: Graftable,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
@@ -368,8 +355,8 @@ pub enum RawKeyLookupProof<
 #[must_use]
 pub struct RawKeyRangeProof<
     D: Digest,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V,
     const N: usize,
     F: Graftable,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
@@ -388,7 +375,7 @@ pub struct RawKeyRangeProof<
 /// ordered, unordered, immutable, and keyless variants.
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
-pub struct VerifiedOperationRange<D: Digest, Op, F: Family> {
+pub struct VerifiedOperationRange<D, Op, F: Family> {
     pub tip: Location<F>,
     /// Canonical root at `tip`, as returned by the source database's `root()`:
     /// the current root for a database with current state, otherwise the
@@ -402,7 +389,7 @@ pub struct VerifiedOperationRange<D: Digest, Op, F: Family> {
 /// across ordered, unordered, immutable, and keyless variants.
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
-pub struct VerifiedOperations<D: Digest, Op, F: Family> {
+pub struct VerifiedOperations<D, Op, F: Family> {
     pub tip: Location<F>,
     /// Canonical root at `tip`; see [`VerifiedOperationRange::root`].
     pub root: D,
@@ -412,7 +399,7 @@ pub struct VerifiedOperations<D: Digest, Op, F: Family> {
 /// A single key's `Update` operation verified against the current-state root.
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
-pub struct VerifiedKeyValue<D: Digest, Op, F: Family> {
+pub struct VerifiedKeyValue<D, Op, F: Family> {
     pub root: D,
     pub location: Location<F>,
     pub operation: Op,
@@ -422,9 +409,9 @@ pub struct VerifiedKeyValue<D: Digest, Op, F: Family> {
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
 pub enum VerifiedKeyLookup<
-    D: Digest,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
+    D,
+    K: QmdbKey,
+    V,
     F: Family,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > {
@@ -436,9 +423,9 @@ pub enum VerifiedKeyLookup<
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
 pub struct VerifiedKeyRange<
-    D: Digest,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
+    D,
+    K: QmdbKey,
+    V,
     F: Family,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > {
@@ -451,7 +438,7 @@ pub struct VerifiedKeyRange<
 /// current-state root.
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
-pub struct VerifiedCurrentRange<D: Digest, Op, const N: usize, F: Family> {
+pub struct VerifiedCurrentRange<D, Op, const N: usize, F: Family> {
     pub tip: Location<F>,
     pub root: D,
     pub start_location: Location<F>,
@@ -472,7 +459,7 @@ pub struct CurrentOperationRangeProofResult<D: Digest, Op, const N: usize, F: Gr
 
 impl<D: Digest, Op, const N: usize, F: Graftable> CurrentOperationRangeProofResult<D, Op, N, F>
 where
-    Op: Codec,
+    Op: Encode,
 {
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
         self.proof.verify::<H, _, N>(

@@ -9,14 +9,14 @@ use std::{marker::PhantomData, num::NonZeroUsize, time::Duration};
 const RETRY_DELAY: Duration = Duration::from_millis(50);
 
 #[derive(Clone)]
-struct MarshalFetcher<D: Digest> {
+struct MarshalFetcher<D> {
     reader: SimplexReader,
     _marker: PhantomData<D>,
 }
 
 impl<D> opaque::Fetcher for MarshalFetcher<D>
 where
-    D: Digest + Send + 'static,
+    D: Digest,
 {
     type Key = MarshalKey<D>;
     type Value = Bytes;
@@ -50,7 +50,7 @@ pub fn init_marshal_resolver<E, D, P>(
 )
 where
     E: Clock + Metrics + Spawner,
-    D: Digest + Send + 'static,
+    D: Digest,
     P: PublicKey,
 {
     let (receiver, handler) = handler::init(context.child("handler"), mailbox_size);

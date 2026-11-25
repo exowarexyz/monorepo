@@ -71,12 +71,12 @@ pub(crate) trait OperationLogReader: Send + Sync + 'static {
 }
 
 /// `OperationLogService` handler over any [`OperationLogReader`].
-pub(crate) struct OperationLogServer<R: OperationLogReader> {
+pub(crate) struct OperationLogServer<R> {
     reader: Arc<R>,
     raw_store: PrefixedStoreClient,
 }
 
-impl<R: OperationLogReader> Clone for OperationLogServer<R> {
+impl<R> Clone for OperationLogServer<R> {
     fn clone(&self) -> Self {
         Self {
             reader: self.reader.clone(),
@@ -85,7 +85,7 @@ impl<R: OperationLogReader> Clone for OperationLogServer<R> {
     }
 }
 
-impl<R: OperationLogReader> OperationLogServer<R> {
+impl<R> OperationLogServer<R> {
     pub(crate) const fn new(reader: Arc<R>, raw_store: PrefixedStoreClient) -> Self {
         Self { reader, raw_store }
     }

@@ -33,7 +33,7 @@ use std::{
 
 /// Current-state values fixed by one published batch boundary.
 #[derive(Clone)]
-pub(crate) struct CurrentTip<F: Family, D: Digest> {
+pub(crate) struct CurrentTip<F: Family, D> {
     pub watermark: Location<F>,
     /// Canonical current root.
     pub root: D,
@@ -172,7 +172,7 @@ async fn load_current_tip<F: Graftable, H: Hasher, const N: usize>(
 /// Bitmap chunk `index` at the tip, with bits below the floor cleared: the
 /// cached tail chunk when it is one, else its latest version at or below the
 /// watermark.
-async fn load_chunk<F: Graftable, D: Digest, const N: usize>(
+async fn load_chunk<F: Family, D, const N: usize>(
     session: &ReadSession,
     tip: &CurrentTip<F, D>,
     index: u64,
@@ -186,7 +186,7 @@ async fn load_chunk<F: Graftable, D: Digest, const N: usize>(
 }
 
 #[boxed]
-async fn load_chunk_row<F: Graftable, const N: usize>(
+async fn load_chunk_row<F: Family, const N: usize>(
     session: &ReadSession,
     watermark: Location<F>,
     index: u64,
@@ -206,7 +206,7 @@ async fn load_chunk_row<F: Graftable, const N: usize>(
 }
 
 /// Bitmap chunks covering `[start, end)`.
-pub(crate) async fn load_chunks<F: Graftable, D: Digest, const N: usize>(
+pub(crate) async fn load_chunks<F: Family, D, const N: usize>(
     session: &ReadSession,
     tip: &CurrentTip<F, D>,
     start: Location<F>,
@@ -236,7 +236,7 @@ pub(crate) struct ProofReads<F: Family, const N: usize> {
 /// Location of `key`'s latest update at the tip, which must hold a value.
 /// An update that holds a value below the inactivity floor contradicts the
 /// tip, so the index is corrupt.
-pub(crate) async fn locate_active_key<F: Family, D: Digest>(
+pub(crate) async fn locate_active_key<F: Family, D>(
     session: &ReadSession,
     tip: &CurrentTip<F, D>,
     key: &[u8],
@@ -390,7 +390,7 @@ pub(crate) fn range_proof<F: Graftable, H: Hasher, const N: usize>(
     .map_err(crate::error::current_proof_error)
 }
 
-async fn load_current_boundary_metadata<F: Graftable, H: Hasher>(
+async fn load_current_boundary_metadata<F: Family, H: Hasher>(
     session: &ReadSession,
     location: Location<F>,
 ) -> Result<CurrentBoundaryMetadata<H::Digest>, QmdbError> {
@@ -405,7 +405,7 @@ async fn load_current_boundary_metadata<F: Graftable, H: Hasher>(
     )
 }
 
-pub(crate) async fn load_current_boundary_root<F: Graftable, H: Hasher>(
+pub(crate) async fn load_current_boundary_root<F: Family, H: Hasher>(
     session: &ReadSession,
     location: Location<F>,
 ) -> Result<H::Digest, QmdbError> {

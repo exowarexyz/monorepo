@@ -8,7 +8,6 @@ use crate::{
     },
     QmdbError,
 };
-use commonware_codec::Encode;
 use commonware_storage::merkle::{Graftable, Location};
 use connectrpc::{PreEncoded, RequestContext as Context, ServiceRequest};
 use std::{future::Future, sync::Arc};
@@ -34,11 +33,11 @@ pub(crate) trait CurrentOperationReader<const N: usize>: Send + Sync + 'static {
 }
 
 /// `CurrentOperationService` handler over any [`CurrentOperationReader`].
-pub(crate) struct CurrentOperationServer<R: CurrentOperationReader<N>, const N: usize> {
+pub(crate) struct CurrentOperationServer<R, const N: usize> {
     reader: Arc<R>,
 }
 
-impl<R: CurrentOperationReader<N>, const N: usize> Clone for CurrentOperationServer<R, N> {
+impl<R, const N: usize> Clone for CurrentOperationServer<R, N> {
     fn clone(&self) -> Self {
         Self {
             reader: self.reader.clone(),
@@ -46,7 +45,7 @@ impl<R: CurrentOperationReader<N>, const N: usize> Clone for CurrentOperationSer
     }
 }
 
-impl<R: CurrentOperationReader<N>, const N: usize> CurrentOperationServer<R, N> {
+impl<R, const N: usize> CurrentOperationServer<R, N> {
     pub(crate) const fn new(reader: Arc<R>) -> Self {
         Self { reader }
     }
@@ -55,7 +54,6 @@ impl<R: CurrentOperationReader<N>, const N: usize> CurrentOperationServer<R, N> 
 impl<R, const N: usize> CurrentOperationService for CurrentOperationServer<R, N>
 where
     R: CurrentOperationReader<N>,
-    R::Operation: Encode,
 {
     fn get_current_operation_range(
         &self,

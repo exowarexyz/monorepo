@@ -15,18 +15,18 @@ const NODE_CAPACITY: usize = 16_384;
 const CONTEXT_CAPACITY: usize = 128;
 
 #[derive(Clone, Copy)]
-pub(crate) struct RootContext<D: Digest> {
+pub(crate) struct RootContext<D> {
     pub root: D,
     pub inactive_peaks: usize,
 }
 
 // Each cache belongs to one namespace and immutable operation history. Successful Store
 // reads are trusted across read floors. Rewriting that history requires a new client.
-pub(crate) struct ReadCache<F: Family, D: Digest> {
+pub(crate) struct ReadCache<F: Family, D> {
     state: Mutex<State<F, D>>,
 }
 
-struct State<F: Family, D: Digest> {
+struct State<F: Family, D> {
     nodes: Cache<Position<F>, Bytes>,
     contexts: Cache<Location<F>, RootContext<D>>,
     witnesses: Cache<Location<F>, Bytes>,

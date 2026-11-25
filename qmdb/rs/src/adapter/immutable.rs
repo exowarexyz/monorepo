@@ -11,14 +11,14 @@ use crate::{
     },
     PublishedWatermark, VersionedValue,
 };
-use commonware_codec::{Codec, Copying, Decode, Encode, Read as CodecRead};
+use commonware_codec::{Copying, Decode, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::{Family, Graftable, Location},
     qmdb::{
-        any::value::{ValueEncoding, VariableEncoding},
         immutable,
         operation::Key as QmdbKey,
+        value::{ValueEncoding, VariableEncoding},
     },
 };
 use exoware_sdk::{PrefixedStoreClient, ReadSession};
@@ -28,7 +28,7 @@ pub struct Immutable<
     F: Family,
     H: Hasher,
     K: QmdbKey,
-    V: Codec + Send + Sync,
+    V,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > where
     immutable::Operation<F, K, E>: CodecRead,
@@ -45,7 +45,6 @@ where
     F: Family,
     H: Hasher,
     K: QmdbKey,
-    V: Codec + Send + Sync,
     E: ValueEncoding<Value = V>,
     immutable::Operation<F, K, E>: CodecRead,
 {
@@ -65,7 +64,6 @@ where
     F: Family,
     H: Hasher,
     K: QmdbKey,
-    V: Codec + Send + Sync,
     E: ValueEncoding<Value = V>,
     immutable::Operation<F, K, E>: CodecRead,
 {
@@ -79,9 +77,8 @@ where
     F: Graftable,
     H: Hasher,
     K: QmdbKey,
-    V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
-    immutable::Operation<F, K, E>: Encode + Decode + Clone,
+    immutable::Operation<F, K, E>: Decode,
 {
     /// Read client for the Store namespace.
     pub fn new(
@@ -301,7 +298,6 @@ async fn inactive_peaks_at<F, K, V, E>(
 where
     F: Graftable,
     K: QmdbKey,
-    V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
     immutable::Operation<F, K, E>: Decode,
 {
@@ -319,9 +315,8 @@ fn inactive_peaks_from_operation<F, K, V, E>(
     operation: immutable::Operation<F, K, E>,
 ) -> Result<usize, QmdbError>
 where
-    F: Graftable,
+    F: Family,
     K: QmdbKey,
-    V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
 {
     let immutable::Operation::Commit(_, floor) = operation else {

@@ -9,11 +9,11 @@ use commonware_storage::{
     journal::contiguous::fixed::Config as FixedJournalConfig,
     merkle::{mmb, mmr, Family, Graftable, Location},
     qmdb::{
-        any::value::FixedEncoding,
         keyless::{
             fixed::{Db as FixedKeyless, Operation as FixedKeylessOperation},
             variable::{Db as Keyless, Operation as KeylessOperation},
         },
+        value::FixedEncoding,
     },
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -112,17 +112,15 @@ where
                     .append(b"fifth-value".to_vec())
                     .append(b"sixth-value".to_vec())
                     .append(b"seventh-value".to_vec());
-                batch
-                    .merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
-                    .await
-                    .expect("merkleize")
+                batch.merkleize(&db).await.expect("merkleize")
             };
             db = db.apply_batch(finalized).await.expect("apply");
 
             let finalized = {
                 let batch = db.new_batch().append(b"eighth-value".to_vec());
                 batch
-                    .merkleize(&db, None::<Vec<u8>>, db.bounds().end - 1)
+                    .with_inactivity_floor(db.bounds().end - 1)
+                    .merkleize(&db)
                     .await
                     .expect("merkleize")
             };
@@ -139,7 +137,8 @@ where
             let finalized = {
                 let batch = db.new_batch().append(b"ninth-value".to_vec());
                 batch
-                    .merkleize(&db, None::<Vec<u8>>, db.bounds().end - 1)
+                    .with_inactivity_floor(db.bounds().end - 1)
+                    .merkleize(&db)
                     .await
                     .expect("merkleize")
             };
@@ -188,7 +187,7 @@ where
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
             let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = commonware_storage::qmdb::keyless::Config {
-                merkle: common::merkle_config("keyless_fixed_full_source", page_cache.clone()),
+                merkle: common::merkle_config("keyless_fixed_full_source"),
                 log: FixedJournalConfig {
                     partition: "keyless_fixed_full_source-log".to_string(),
                     items_per_blob: NZU64!(7),
@@ -196,6 +195,7 @@ where
                     write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
                 },
+                init_concurrency: NZUsize!(1),
             };
             let mut db: FixedDb<F> =
                 FixedDb::init(context.child("keyless_fixed_full_source"), cfg, None)
@@ -206,10 +206,7 @@ where
             let second = commonware_cryptography::Sha256::fill(0x22);
             let finalized = {
                 let batch = db.new_batch().append(first).append(second);
-                batch
-                    .merkleize(&db, None::<Digest>, db.inactivity_floor_loc())
-                    .await
-                    .expect("merkleize")
+                batch.merkleize(&db).await.expect("merkleize")
             };
             db = db.apply_batch(finalized).await.expect("apply fixed");
 
@@ -339,8 +336,8 @@ where
         .proof
         .verify_range_inclusion_and_extract_digests(
             &hasher,
-            &suffix_checkpoint.encoded_operations,
             suffix_checkpoint.start_location,
+            &suffix_checkpoint.encoded_operations,
             &suffix_checkpoint.ops_root,
         )
         .expect("verify suffix range");

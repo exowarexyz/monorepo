@@ -166,7 +166,7 @@ impl<I, D> Clone for PutService<I, D> {
     }
 }
 
-impl<I: Ingest, D: Dispatcher> PutService<I, D> {
+impl<I, D> PutService<I, D> {
     pub fn new(state: IngestState<I>, other: ConnectRpcService<D>) -> Self {
         Self {
             state,
@@ -186,7 +186,7 @@ where
     I: Ingest,
     D: Dispatcher,
     B: http_body::Body<Data = bytes::Bytes> + Send + 'static,
-    B::Error: std::error::Error + Send + Sync + 'static,
+    B::Error: std::error::Error + Send + Sync,
 {
     type Response = Response<Body>;
     type Error = Infallible;

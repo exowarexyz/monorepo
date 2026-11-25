@@ -9,14 +9,15 @@ use crate::{
     },
     QmdbError,
 };
-use commonware_codec::{Copying, Decode, DecodeExt, Encode, Read};
+use commonware_codec::{Copying, Decode, Encode, Read};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::Graftable,
     qmdb::{
-        any::{ordered, value::ValueEncoding},
+        any::ordered,
         current::{ordered::proof::constant::ExclusionProof, proof::constant::OperationProof},
         operation::{Key as QmdbKey, Operation},
+        value::ValueEncoding,
     },
 };
 
@@ -28,7 +29,6 @@ pub(crate) fn verify_key_value_from_proto<F, H, Op, const N: usize>(
 where
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
     Op: commonware_codec::Codec + Clone + Operation<F>,
 {
     let operation =
@@ -73,14 +73,11 @@ pub(crate) fn verify_key_exclusion_from_proto<F, H, K, V, const N: usize, E>(
 where
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V: Decode,
     E: ValueEncoding<Value = V>,
-    ordered::Operation<F, K, E>: Decode + Encode + Read,
+    ordered::Operation<F, K, E>: Encode + Read,
     ordered::Update<K, E>: Read,
-    ExclusionProof<F, K, E, H::Digest, N>:
-        Read<Cfg = (usize, <ordered::Update<K, E> as Read>::Cfg, V::Cfg)>,
 {
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
     let proof = ExclusionProof::<F, K, E, H::Digest, N>::decode_cfg(

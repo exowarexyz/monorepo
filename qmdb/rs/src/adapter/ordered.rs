@@ -22,14 +22,12 @@ use crate::{
 use commonware_codec::{Codec, Copying, Decode, Encode};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
-    merkle::{Graftable, Location},
+    merkle::{Family, Graftable, Location},
     qmdb::{
-        any::{
-            ordered,
-            value::{ValueEncoding, VariableEncoding},
-        },
+        any::ordered,
         current::ordered::proof::constant::ExclusionProof,
         operation::{Key as QmdbKey, Operation as _},
+        value::{ValueEncoding, VariableEncoding},
     },
 };
 use commonware_utils::range::contains_cyclic;
@@ -54,10 +52,10 @@ const UPDATE_WALK_MAX_PAGE_ROWS: usize = 4096;
 /// index navigates keys by their bytes, and this reader scans its key-ordered
 /// update index the same way.
 pub struct Ordered<
-    F: Graftable,
+    F: Family,
     H: Hasher,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V,
     const N: usize,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > where
@@ -71,14 +69,8 @@ pub struct Ordered<
     _marker: PhantomData<(F, H, K, E)>,
 }
 
-impl<
-        F: Graftable,
-        H: Hasher,
-        K: QmdbKey + Codec,
-        V: Codec + Clone + Send + Sync,
-        const N: usize,
-        E: ValueEncoding<Value = V>,
-    > Clone for Ordered<F, H, K, V, N, E>
+impl<F: Family, H: Hasher, K: QmdbKey, V, const N: usize, E: ValueEncoding<Value = V>> Clone
+    for Ordered<F, H, K, V, N, E>
 where
     ordered::Operation<F, K, E>: commonware_codec::Read,
 {
@@ -94,14 +86,8 @@ where
     }
 }
 
-impl<
-        F: Graftable,
-        H: Hasher,
-        K: QmdbKey + Codec,
-        V: Codec + Clone + Send + Sync,
-        const N: usize,
-        E: ValueEncoding<Value = V>,
-    > std::fmt::Debug for Ordered<F, H, K, V, N, E>
+impl<F: Family, H: Hasher, K: QmdbKey, V, const N: usize, E: ValueEncoding<Value = V>>
+    std::fmt::Debug for Ordered<F, H, K, V, N, E>
 where
     ordered::Operation<F, K, E>: commonware_codec::Read,
 {
@@ -115,7 +101,7 @@ impl<F, H, K, V, const N: usize, E> crate::adapter::core::LatestValueResolver<F,
 where
     F: Graftable,
     H: Hasher,
-    K: QmdbKey + Codec,
+    K: QmdbKey,
     V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
     ordered::Operation<F, K, E>: Encode + Decode,
@@ -129,7 +115,7 @@ where
         let (key, value) = match Self::decode_operation(&self.op_cfg, location, &op_bytes)? {
             ordered::Operation::Update(update) => (update.key, Some(update.value)),
             ordered::Operation::Delete(key) => (key, None),
-            ordered::Operation::CommitFloor(_, _) => {
+            ordered::Operation::Commit(_, _) => {
                 return Err(QmdbError::CorruptData(format!(
                     "latest update row at {location} points to a commit operation"
                 )));
@@ -152,8 +138,7 @@ impl<F, H, K, V, const N: usize, E> Ordered<F, H, K, V, N, E>
 where
     F: Graftable,
     H: Hasher,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
+    K: QmdbKey,
     E: ValueEncoding<Value = V>,
     ordered::Operation<F, K, E>: commonware_codec::Read,
 {
@@ -178,7 +163,7 @@ impl<F, H, K, V, const N: usize, E> Ordered<F, H, K, V, N, E>
 where
     F: Graftable,
     H: Hasher,
-    K: QmdbKey + Codec,
+    K: QmdbKey,
     V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
     ordered::Operation<F, K, E>: Encode + Decode,
@@ -269,8 +254,8 @@ where
         let key = op.key().map(<K as AsRef<[u8]>>::as_ref);
         let value: Option<&[u8]> = match &op {
             ordered::Operation::Update(update) => Some(update.value.as_ref()),
-            ordered::Operation::CommitFloor(Some(value), _) => Some(value.as_ref()),
-            ordered::Operation::Delete(_) | ordered::Operation::CommitFloor(None, _) => None,
+            ordered::Operation::Commit(Some(value), _) => Some(value.as_ref()),
+            ordered::Operation::Delete(_) | ordered::Operation::Commit(None, _) => None,
         };
         Ok(inspect(key, value))
     }
@@ -459,9 +444,9 @@ where
     ) -> Result<CurrentTip<F, H::Digest>, QmdbError> {
         current::current_tip::<F, H, N>(session, &self.read_cache, watermark, |bytes| {
             match Self::decode_operation(&self.op_cfg, watermark, bytes)? {
-                ordered::Operation::CommitFloor(_, floor) => Ok(floor),
+                ordered::Operation::Commit(_, floor) => Ok(floor),
                 _ => Err(QmdbError::CorruptData(format!(
-                    "expected CommitFloor at watermark {watermark}"
+                    "expected Commit at watermark {watermark}"
                 ))),
             }
         })
@@ -893,9 +878,9 @@ where
             ExclusionProof::KeyValue(op_proof, update)
         } else {
             let operation = Self::decode_operation(op_cfg, watermark, &reads.operation)?;
-            let ordered::Operation::CommitFloor(value, floor) = operation else {
+            let ordered::Operation::Commit(value, floor) = operation else {
                 return Err(QmdbError::CorruptData(format!(
-                    "empty ordered exclusion proof expected CommitFloor at watermark {watermark}"
+                    "empty ordered exclusion proof expected Commit at watermark {watermark}"
                 )));
             };
             if floor != watermark {
@@ -1071,12 +1056,12 @@ where
     ) -> Result<Location<F>, QmdbError> {
         let mut location = watermark;
         loop {
-            if let ordered::Operation::CommitFloor(_, floor) = operation {
+            if let ordered::Operation::Commit(_, floor) = operation {
                 return Ok(floor);
             }
             if *location == 0 {
                 return Err(QmdbError::CorruptData(format!(
-                    "no CommitFloor found at or before watermark {watermark}"
+                    "no Commit found at or before watermark {watermark}"
                 )));
             }
             location -= 1;
@@ -1121,14 +1106,14 @@ where
 }
 
 /// The operation an ordered exclusion proof proves.
-enum ExclusionTarget<F: Graftable> {
+enum ExclusionTarget<F: Family> {
     /// The active key whose span covers the excluded key.
     Covering { key: Vec<u8>, location: Location<F> },
     /// The tip's commit, when no key is active.
     Commit(Location<F>),
 }
 
-impl<F: Graftable> ExclusionTarget<F> {
+impl<F: Family> ExclusionTarget<F> {
     const fn location(&self) -> Location<F> {
         match self {
             Self::Covering { location, .. } => *location,
