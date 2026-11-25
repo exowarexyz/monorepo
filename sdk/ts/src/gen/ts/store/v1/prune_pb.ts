@@ -324,6 +324,10 @@ export const PolicyOrderEncodingSchema: GenEnum<PolicyOrderEncoding> = /*@__PURE
  */
 export const Service: GenService<{
   /**
+   * Applies the policies. A reply means the store has accepted them. It does not
+   * mean the keys they remove are gone, since a store may remove them later, for
+   * example as it compacts.
+   *
    * @generated from rpc store.prune.v1.Service.Prune
    */
   prune: {

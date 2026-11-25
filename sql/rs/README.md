@@ -154,10 +154,16 @@ let policy = schema.keep_latest_versions_policy("documents", 1)?;
 ```
 
 This policy requires an unindexed table whose primary key is exactly
-`(entity, UInt64 version)`. Store pruning removes base rows but leaves their index
-entries, so remove the policy before adding an index to the table. The schema
-cannot check policies built directly with the SDK or schema changes made after
-the policy was applied.
+`(entity, UInt64 version)`. The policy stands once the Store accepts it. The Store
+also applies it to versions written later, and it removes rows in the
+background, so an old version can stay readable for a while after the call
+returns. The policy stays in force until another one whose key prefix overlaps
+this table's replaces it.
+
+Store pruning removes base rows but leaves their index entries, so this policy
+is for a table that stays unindexed. Before adding an index, replace it with a
+policy that keeps every version. The schema cannot check policies built directly
+with the SDK or schema changes made after the policy was applied.
 
 ### Secondary indexes
 

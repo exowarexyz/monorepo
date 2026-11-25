@@ -6,6 +6,9 @@ import "buf/validate/validate.proto";
 import "common/v1/kv.proto";
 
 service Service {
+  // Applies the policies. A reply means the store has accepted them. It does not
+  // mean the keys they remove are gone, since a store may remove them later, for
+  // example as it compacts.
   rpc Prune(PruneRequest) returns (PruneResponse);
 }
 

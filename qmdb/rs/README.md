@@ -245,8 +245,10 @@ Current-state rows are versioned by batch location. Unchanged chunks and nodes
 are inherited from earlier batches. Retain the rows needed for every historical
 tip you promise to serve. Source bitmap pruning does not delete Store rows or set
 backend retention. The [`adapter::prune`](src/adapter/prune.rs) helpers construct
-policies for update-index rows. Applications choose Store pruning and replay-log
-retention separately.
+policies for update-index rows. A policy stands once the Store accepts it. The
+Store also applies it to rows written later, and it removes rows in the
+background, so a reply does not mean they are gone. Applications choose Store
+pruning and replay-log retention separately.
 
 ### Pin omission
 

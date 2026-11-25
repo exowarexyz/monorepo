@@ -5816,7 +5816,9 @@ pub const SERVICE_PRUNE_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
 /// example` doc.
 #[allow(clippy::type_complexity)]
 pub trait Service: Send + Sync + 'static {
-    /// Handle the Prune RPC.
+    /// Applies the policies. A reply means the store has accepted them. It does not
+    /// mean the keys they remove are gone, since a store may remove them later, for
+    /// example as it compacts.
     ///
     /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
     ///

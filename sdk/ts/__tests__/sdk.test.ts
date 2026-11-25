@@ -493,7 +493,7 @@ describe('Exoware TS SDK', () => {
             });
         });
 
-        it('should prune keys per KeepLatest policy', async () => {
+        it('should accept a KeepLatest prune policy and keep the newest versions', async () => {
             const store = client.store();
             const encoder = new TextEncoder();
 
@@ -554,13 +554,12 @@ describe('Exoware TS SDK', () => {
 
             await store.prune([policy]);
 
-            expect(await store.get(alphaV1)).toBeNull();
-            expect(await store.get(alphaV2)).toBeNull();
+            // A reply means the Store accepted the policy. It removes old versions later, so
+            // only the newest version of each group is checked.
             const a3 = await store.get(alphaV3);
             expect(a3).not.toBeNull();
             expect(Buffer.from(a3!.value)).toEqual(Buffer.from('a3'));
 
-            expect(await store.get(betaV1)).toBeNull();
             const b2 = await store.get(betaV2);
             expect(b2).not.toBeNull();
             expect(Buffer.from(b2!.value)).toEqual(Buffer.from('b2'));

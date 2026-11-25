@@ -137,7 +137,9 @@ pub trait Query: Sequence {
 
 /// Prune mutation capability.
 pub trait Prune: Send + Sync + 'static {
-    /// Apply a validated prune policy document sequentially.
+    /// Apply a validated prune policy document. `Ok` means the backend has accepted the
+    /// policies. It does not mean the rows they remove are gone, since a backend may remove
+    /// them later, for example as it compacts.
     fn apply_prune_policies(
         &self,
         document: PrunePolicyDocument,

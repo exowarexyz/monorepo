@@ -2811,7 +2811,9 @@ impl<'a> Query<'a> {
 }
 
 impl<'a> Prune<'a> {
-    /// `store.prune.v1.Service.Prune` — apply each policy in turn.
+    /// Calls `store.prune.v1.Service.Prune`. A reply means the store has accepted the
+    /// policies. It does not mean the rows they remove are gone, since a store may remove
+    /// them later, for example as it compacts.
     pub async fn prune(
         &self,
         policies: &[crate::prune_policy::PrunePolicy],
@@ -5056,7 +5058,7 @@ mod tests {
         let merged = prefix.prefix_selector(&logical).unwrap();
         assert_eq!(merged.prefix.as_ref(), &[0x05, 0x06, 0x07]);
 
-        // Reconstruct the codec EXACTLY as apply_key_prune_policy does.
+        // Reconstruct the codec EXACTLY as the simulator does when it compiles a prune policy.
         let codec = Prefix::new(merged.prefix).unwrap();
 
         // Round-trip a real key through the reconstructed codec.

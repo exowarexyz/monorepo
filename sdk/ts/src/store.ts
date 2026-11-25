@@ -1031,6 +1031,10 @@ export class StoreClient {
         );
     }
 
+    /**
+     * Sends prune policies to the Store. A resolved call means the Store has accepted them. It
+     * does not mean the rows they remove are gone, since a Store may remove them later.
+     */
     async prune(policies: Policy[]): Promise<void> {
         const req = create(PruneRequestSchema, { policies: prefixPolicies(policies, this.keyPrefix) });
         try {

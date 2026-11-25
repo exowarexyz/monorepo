@@ -770,8 +770,8 @@ async fn test_prefixed_prune_composes_selector_and_prunes_cleanly() {
 
     // The SDK composes the store prefix
     // onto the logical selector (prefix_prune_policies), and the store
-    // reconstructs a codec from the MERGED selector (apply_key_prune_policy) and
-    // strips.
+    // reconstructs a codec from the MERGED selector when it compiles the policy,
+    // and strips.
     let (base, store) = local_store_client_with_store().await;
     let client = base.prefixed(StoreKeyPrefix::new(vec![0x05, 0x06]).unwrap());
 
